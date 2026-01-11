@@ -75,6 +75,7 @@ func runCheck(target string) error {
 	}
 
 	var files []string
+
 	if info.IsDir() {
 		entries, err := filepath.Glob(filepath.Join(target, "*.go"))
 		if err != nil {
