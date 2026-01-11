@@ -1,129 +1,48 @@
-name: Semantic Firewall
+name: 'Semantic Firewall'
+description: 'Generate semantic fingerprints for Go source files to detect logic corruption'
+author: 'BlackVectorOps'
 
-on:
-  pull_request:
-    branches: [ "main" ]
-    types: [opened, synchronize, reopened, labeled]
+branding:
+  icon: 'shield'
+  color: 'blue'
 
-jobs:
-  semantic-analysis:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
+inputs:
+  path:
+    description: 'Path to file or directory to fingerprint'
+    required: false
+    default: '.'
+  go-version:
+    description: 'Go version to use'
+    required: false
+    default: '1.24'
 
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # Needed to get the base commit for comparison
+outputs:
+  fingerprints:
+    description: 'JSON output of all function fingerprints'
+    value: ${{ steps.fingerprint.outputs.result }}
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-          check-latest: true
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ inputs.go-version }}
 
-      - name: Install sfw
-        run: |
-          echo "Installing Semantic Firewall CLI..."
-          go install github.com/BlackVectorOps/semantic_firewall/cmd/sfw@latest
-          if ! command -v sfw &> /dev/null; then
-              echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
-          fi
+    - name: Install sfw
+      shell: bash
+      run: go install github.com/BlackVectorOps/semantic_firewall/cmd/sfw@latest
 
-      - name: Determine Mode
-        id: mode
-        run: |
-          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'semantic-safe') }}" == "true" ]] || \
-             [[ "${{ contains(github.event.pull_request.title, 'refactor') }}" == "true" ]]; then
-            echo "mode=BLOCKER" >> $GITHUB_OUTPUT
-            echo " Mode: BLOCKER (Strict Refactor Verification)"
-          else
-            echo "mode=REPORTER" >> $GITHUB_OUTPUT
-            echo " Mode: REPORTER (Drift Monitoring)"
-          fi
-
-      - name: Run Semantic Analysis
-        shell: bash
-        run: |
-          MODE="${{ steps.mode.outputs.mode }}"
-          BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          
-          # Initialize Summary
-          echo "## Semantic Analysis Report ($MODE)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| File | Status | Match % |" >> $GITHUB_STEP_SUMMARY
-          echo "| :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
-
-          FAILED_REFACTOR=false
-
-          # Check if any Go files changed
-          if ! git diff --name-only "$BASE_SHA" HEAD | grep -q '\.go$'; then
-             echo "No Go files changed." >> $GITHUB_STEP_SUMMARY
-             exit 0
-          fi
-
-          # Iterate over changed Go files
-          git diff --name-only -z "$BASE_SHA" HEAD -- '*.go' | while IFS= read -r -d '' file; do
-            # Skip deleted files
-            if [ ! -f "$file" ]; then continue; fi
-
-            # Fetch old version
-            TEMP_OLD="old_temp.go"
-            git show "$BASE_SHA:$file" > "$TEMP_OLD" 2>/dev/null || touch "$TEMP_OLD"
-            
-            # Run SFW Diff
-            if ! OUTPUT=$(sfw diff "$TEMP_OLD" "$file" 2>&1); then
-               echo "::error::sfw failed on $file: $OUTPUT"
-               rm "$TEMP_OLD"
-               continue
-            fi
-            rm "$TEMP_OLD"
-
-            # Validate JSON
-            if ! echo "$OUTPUT" | jq -e . >/dev/null 2>&1; then
-               echo "::error::sfw returned invalid JSON for $file"
-               continue
-            fi
-
-            # Parse Results
-            PCT=$(echo "$OUTPUT" | jq -r '.summary.semantic_match_pct // 0')
-            MODIFIED=$(echo "$OUTPUT" | jq -r '.summary.modified // 0')
-            PRESERVED=$(echo "$OUTPUT" | jq -r '.summary.preserved // 0')
-            
-            # Determine Status Icon
-            if (( $(echo "$PCT < 100" | bc -l) )); then
-               STATUS_ICON=" Modified ($MODIFIED)"
-               
-               # LOGIC: If we are in BLOCKER mode AND logic changed, we fail.
-               if [ "$MODE" == "BLOCKER" ]; then
-                   # Write to a temp file so we can read it outside the subshell
-                   echo "true" > /tmp/failed_refactor
-                   echo "::error file=$file::Logic change detected in a PR tagged as refactor/semantic-safe! (Match: $PCT%)"
-               fi
-            else
-               STATUS_ICON=" Preserved ($PRESERVED)"
-            fi
-            
-            echo "| \`$file\` | $STATUS_ICON | **$PCT%** |" >> $GITHUB_STEP_SUMMARY
-            
-            # Detailed logs for modified files
-            if (( $(echo "$PCT < 100" | bc -l) )); then
-               echo "::group::Details for $file"
-               echo "$OUTPUT" | jq .
-               echo "::endgroup::"
-            fi
-          done
-
-          # Check if any refactor failed (read from temp file due to subshell)
-          if [ -f /tmp/failed_refactor ] && [ "$(cat /tmp/failed_refactor)" = "true" ]; then
-             echo "" >> $GITHUB_STEP_SUMMARY
-             echo " **CI FAILED**: You labeled this PR as 'semantic-safe' or 'refactor', but business logic was modified." >> $GITHUB_STEP_SUMMARY
-             rm /tmp/failed_refactor
-             exit 1
-          fi
-          
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo " Semantic analysis complete." >> $GITHUB_STEP_SUMMARY
-          exit 0
+    - name: Generate fingerprints
+      id: fingerprint
+      shell: bash
+      run: |
+        echo "::group::Semantic Fingerprints"
+        OUTPUT=$(sfw check ${{ inputs.path }})
+        echo "$OUTPUT"
+        echo "::endgroup::"
+        
+        # Save to output
+        echo "result<<EOF" >> $GITHUB_OUTPUT
+        echo "$OUTPUT" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
