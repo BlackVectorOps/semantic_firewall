@@ -27,6 +27,12 @@ type FingerprintResult struct {
 	fn *ssa.Function
 }
 
+// GetSSAFunction returns the underlying SSA function for advanced analysis workflows
+// such as semantic diffing with the Zipper algorithm. Returns nil if not available.
+func (r FingerprintResult) GetSSAFunction() *ssa.Function {
+	return r.fn
+}
+
 // virtualControlFlowState stores the virtual control flow modifications for a function.
 // This allows fingerprinting without mutating the SSA graph.
 type virtualControlFlowState struct {

@@ -11,7 +11,9 @@ I adhere to Semantic Versioning. Security patches will be backported to the curr
 
 | :--- | :---: | :--- |
 
-| 1.x | :white_check_mark: | **Active Support.** Security patches and minor updates. |
+| 1.1.x | :white_check_mark: | **Active Support.** Current release with SCEV and Zipper. |
+
+| 1.0.x | :white_check_mark: | **Maintenance.** Security patches only. |
 
 | < 1.0 | :x: | **End of Life.** Pre-release versions are not supported. |
 

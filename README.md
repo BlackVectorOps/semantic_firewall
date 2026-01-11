@@ -6,8 +6,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Marketplace](https://img.shields.io/badge/Marketplace-Semantic%20Firewall-blue.svg)](https://github.com/marketplace/actions/semantic-firewall)
 [![Semantic Check](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic-check.yml/badge.svg)](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic-check.yml)
+
 ---
-Semantic Firewall generates deterministic fingerprints of your Go code's **behavior**, not its bytes. Rename variables, refactor loops, extract helpers—the fingerprint stays the same. Change the actual logic? The fingerprint changes instantly.
+
+Semantic Firewall generates deterministic fingerprints of your Go code's **behavior**, not its bytes. It uses **Scalar Evolution (SCEV)** analysis to prove that syntactically different loops are mathematically identical, and a **Semantic Zipper** to diff architectural changes without the noise.
 
 ---
 
@@ -19,16 +21,35 @@ go install github.com/BlackVectorOps/semantic_firewall/cmd/sfw@latest
 
 # Fingerprint a file
 sfw check ./main.go
+
+# Semantic diff between two versions
+sfw diff old_version.go new_version.go
 ```
 
-**Output:**
+**Check Output:**
 ```json
 {
   "file": "./main.go",
   "functions": [
+    { "function": "main", "fingerprint": "005efb52a8c9d1e3..." }
+  ]
+}
+```
+
+**Diff Output (The Zipper):**
+```json
+{
+  "summary": {
+    "semantic_match_pct": 92.5,
+    "preserved": 12,
+    "modified": 1
+  },
+  "functions": [
     {
-      "function": "main",
-      "fingerprint": "005efb52a8c9d1e3f4b6..."
+      "function": "HandleLogin",
+      "status": "modified",
+      "added_ops": ["Call <log.Printf>", "Call <net.Dial>"],
+      "removed_ops": []
     }
   ]
 }
@@ -38,85 +59,81 @@ sfw check ./main.go
 
 ## Why Use This?
 
-| Traditional Hashing | Semantic Firewall |
+**"Don't unit tests solve this?"** No. Unit tests verify *correctness* (does input A produce output B?). `sfw` verifies *intent* and *integrity*.
+
+- A developer refactors a function but secretly adds a network call → **unit tests pass, `sfw` fails.**
+- A developer changes a `switch` to a Strategy Pattern → **`git diff` shows 100 lines changed, `sfw diff` shows zero logic changes.**
+
+| Traditional Tooling | Semantic Firewall |
 |---------------------|-------------------|
-| `key := rand()` → Hash A | `key := rand()` → Hash A |
-| `entropy := rand()` → **Hash B** ❌ | `entropy := rand()` → **Hash A** ✅ |
-| Rename breaks the hash | Rename preserves the hash |
+| **Git Diff** — Shows lines changed (whitespace, renaming = noise) | **sfw check** — Verifies control flow graph identity |
+| **Unit Tests** — Verify input/output (blind to side effects) | **sfw diff** — Isolates actual logic drift from cosmetic changes |
 
 **Use cases:**
--  **Supply chain security** — Detect backdoors like the xz attack that pass code review
--  **Safe refactoring** — Prove your refactor didn't change behavior
--  **CI/CD gates** — Block PRs that alter critical function logic
+- **Supply chain security** — Detect backdoors like the xz attack that pass code review
+- **Safe refactoring** — Prove your refactor didn't change behavior
+- **CI/CD gates** — Block PRs that alter critical function logic
 
 ---
 
-## Integration: The Truth Serum Workflow
+## CI Integration: Blocker & Reporter Modes
 
-Semantic Firewall is most powerful when used as a **verification gate for refactors**. Unlike a linter, you do not want it running on every feature commit (where logic changes are expected).
+`sfw` supports two distinct CI roles:
 
-Instead, configure your workflow to run **only when a developer claims to be preserving logic**.
+1. **Blocker Mode:** When a PR claims to be a refactor (via title or `semantic-safe` label), `sfw` enforces strict semantic equivalence. Any logic change fails the build.
 
-### Recommended Workflow (`.github/workflows/semantic-firewall.yml`)
+2. **Reporter Mode:** On feature PRs, `sfw` runs a semantic diff and generates a drift report (e.g., "Semantic Match: 80%"), helping reviewers focus on the code where behavior actually changed.
 
-This configuration listens for the `refactor` keyword in commit messages or PR titles, or looks for the `semantic-safe` label.
+### GitHub Actions Workflow
 
 ```yaml
 name: Semantic Firewall
 
 on:
-  push:
-    branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
     types: [opened, synchronize, reopened, labeled]
 
 jobs:
-  semantic-verify:
+  semantic-analysis:
     runs-on: ubuntu-latest
-    # Trigger ONLY if the developer claims this is a refactor
-    if: |
-      contains(toJSON(github.event.commits.*.message), 'refactor') ||
-      contains(github.event.pull_request.title, 'refactor') ||
-      contains(github.event.pull_request.labels.*.name, 'semantic-safe')
-    
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    - name: Run Semantic Firewall
-      uses: BlackVectorOps/semantic_firewall@v1.0.0
-      with:
-        # The root of your Go module
-        path: './' 
-        # Fail the CI pipeline if logic divergence is detected
-        strict: 'true' 
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install sfw
+        run: go install github.com/BlackVectorOps/semantic_firewall/cmd/sfw@latest
+
+      - name: Determine Mode
+        id: mode
+        run: |
+          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'semantic-safe') }}" == "true" ]] || \
+             [[ "${{ contains(github.event.pull_request.title, 'refactor') }}" == "true" ]]; then
+            echo "mode=BLOCKER" >> $GITHUB_OUTPUT
+          else
+            echo "mode=REPORTER" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Blocker Check
+        if: steps.mode.outputs.mode == 'BLOCKER'
+        run: sfw check ./
+
+      - name: Run Reporter Diff
+        if: steps.mode.outputs.mode == 'REPORTER'
+        run: |
+          BASE_SHA=${{ github.event.pull_request.base.sha }}
+          git diff --name-only "$BASE_SHA" HEAD -- '*.go' | while read file; do
+            [ -f "$file" ] || continue
+            git show "$BASE_SHA:$file" > old.go 2>/dev/null || touch old.go
+            sfw diff old.go "$file" | jq .
+            rm old.go
+          done
 ```
-
-### How to Use It
-
-1. **Feature Work:** Push standard commits (`feat: add login`). The firewall sleeps.
-
-2. **Refactoring:** Push a cleanup commit (`refactor: optimize loop`).
-   - **Pass:** The firewall confirms the refactor was truly safe.
-   - **Fail:** The firewall detects a logic change in a PR that claimed to be a refactor—a massive red flag for review.
-
-3. **Manual Trigger:** Add the `semantic-safe` label to any Pull Request to instantly audit it for semantic equivalence.
-
-### Suggested "Badge" Update
-
-If you are using a status badge in your README, you might want to add a note below it:
-
-> *Build status reflects the semantic integrity of the last refactor commit.*
-
----
-
-## How It Works
-
-1. **Parse** — Load Go source into SSA (Static Single Assignment) form
-2. **Canonicalize** — Normalize variable names, branch ordering, loop structures
-3. **Fingerprint** — SHA-256 hash of the canonical IR
-
-The result: semantically equivalent code produces identical fingerprints.
 
 ---
 
@@ -144,68 +161,41 @@ for _, r := range results {
 ## Technical Deep Dive
 
 <details>
-<summary><strong>Click to expand: Architecture & Theory</strong></summary>
+<summary><strong>Click to expand: SCEV & The Zipper</strong></summary>
 
-### Abstract
+### How It Works
 
-Modern software supply chain security relies heavily on cryptographic signatures that verify **provenance** (who signed it) but fail to verify **intent** (what the code actually does). This fragility allows malicious actors to introduce subtle logic corruption that bypasses traditional diff reviews and signature checks. This paper introduces the **Semantic Attestation Authority (SAA)**, a framework that utilizes Static Single Assignment (SSA) canonicalization and Scalar Evolution (SCEV) analysis to generate deterministic fingerprints of software logic. We demonstrate that this method can mathematically attest to the semantic equivalence of refactored code while detecting logic corruption, effectively decoupling software identity from its syntactic representation.
+1. **Parse** — Load Go source into SSA (Static Single Assignment) form
+2. **Canonicalize** — Normalize variable names, branch ordering, loop structures
+3. **Fingerprint** — SHA-256 hash of the canonical IR
 
-### 1. Introduction: The Limits of Syntactic Verification
+The result: semantically equivalent code produces identical fingerprints.
 
-Current integrity mechanisms (e.g., GPG, Sigstore) operate strictly at the byte level. If a developer changes a variable name from `key` to `entropy`, the binary hash changes entirely. This fragility means that "security" is often synonymous with "bit-perfect reproduction." This is insufficient for detecting subtle logic tampering—such as the `xz` backdoor—where the syntax is valid, the signature is valid, but the semantics are malicious.
+### Scalar Evolution (SCEV) Analysis
 
-This paper proposes a shift from **Syntactic Integrity** to **Semantic Integrity**, defined as:
+Standard hashing is brittle—changing `for i := 0` to `for range` breaks the hash. `sfw` solves this with an SCEV engine (`scev.go`) that algebraically solves loops:
 
-> *The property whereby two programs are considered identical if and only if their control flow graphs and data dependencies produce the same side effects, regardless of register allocation, variable naming, or loop structure.*
+- **Induction Variable Detection:** Classifies loop variables as Add Recurrences: $\{Start, +, Step\}$
+- **Trip Count Derivation:** Proves that a `range` loop and an index loop iterate the same number of times
+- **Loop Invariant Hoisting:** Invariant expressions (e.g., `len(s)`) are virtually hoisted, so manual optimizations don't alter fingerprints
 
-## 2. Architecture of the Semantic Firewall
+**Result:** Refactor loop syntax freely. If the math is the same, the fingerprint is the same.
 
-The Semantic Firewall operates on a three-stage pipeline designed to distill raw source code into a canonical Intermediate Representation (IR). By operating on the SSA graph rather than the AST, we eliminate syntactic noise early in the pipeline.
+### The Semantic Zipper
 
-### 2.1 The Canonicalization Engine
-The core of the system is a deterministic transformation engine (`canonicalizer.go`) that normalizes Go source code.
+When logic *does* change (e.g., architectural refactors), fingerprint comparison fails. The Zipper algorithm (`zipper.go`) takes two SSA graphs and "zips" them together starting from function parameters:
 
-* **Virtual Control Flow:** We utilize a virtualized representation of basic blocks to enforce deterministic ordering of independent branches. This mitigates non-determinism in compiler block ordering without mutating the underlying SSA graph, preserving thread safety during analysis.
-* **Register Renaming:** All SSA values are mapped to canonical names (e.g., `v0`, `v1`, `p0`) based on topological order. This eliminates noise from developer naming choices, ensuring that `func(a int)` and `func(b int)` produce identical IR.
-* **Instruction Normalization:** Operations are standardized to handle commutativity. Binary operations like `ADD` and `MUL` are sorted by the hash weight of their operands, ensuring $a + b$ fingerprints identically to $b + a$.
+- **Anchor Alignment:** Parameters and free variables establish deterministic entry points
+- **Forward Propagation:** Traverses use-def chains to match semantically equivalent nodes
+- **Divergence Isolation:** Reports exactly what changed (e.g., "added `Call <net.Dial>`, preserved all assignments")
 
-### 2.2 Scalar Evolution (SCEV) Analysis
-To handle loop variance (e.g., `for i := 0; i < n` vs `for range`), we implement a Scalar Evolution analysis engine (`scev.go`) capable of solving loop trip counts symbolically.
+**Result:** A semantic changelog that ignores renaming, reordering, and helper extraction.
 
-* **Induction Variable Detection:** The engine identifies loops and classifies induction variables into basic Add Recurrences: $\{Start, +, Step\}$.
-* **Trip Count Derivation:** We statically compute loop trip counts using ceiling division formulas (e.g., $\lceil(Diff + Step - 1) / Step\rceil$). This allows the system to verify that two loops iterate the same number of times regardless of their increment strategy (e.g., `i++` vs `i+=2`).
-* **Loop Invariant Code Motion:** Invariant calls (such as `len(s)` inside a loop) are virtually hoisted to the pre-header, ensuring that optimization levels or manual hoisting do not alter the fingerprint.
+### Security Hardening
 
-## 3. Security & Determinism
-
-To prevent the Attestation Authority itself from becoming an attack vector, strictly enforced defensive measures are integrated into the core pipeline.
-
-### 3.1 Cycle Detection & DoS Prevention
-Recursive analysis of logic graphs creates a risk of Stack Overflow Denial of Service (DoS) attacks via malformed cyclic graphs. I have implemented a robust renamer that detects recursion cycles during stringification (`stack[v]`), ensuring the analysis terminates even when processing hostile, self-referential code structures.
-
-### 3.2 IR Injection Prevention
-A unique class of vulnerabilities involves injecting fake IR instructions via string literals or struct tags. The Semantic Firewall sanitizes all type definitions and string constants (using quoted literals `%q`), preventing attackers from "breaking out" of the data layer to inject malicious control flow instructions into the canonical output.
-
-### 3.3 Logic Inversion Protection
-When normalizing control flow (e.g., converting `a >= b` to `a < b`), strict type checking is enforced. We limit virtual branch swapping to integers and strings. This prevents semantic corruption in floating-point operations where $NaN$ behavior makes standard inversion unsafe due to unordered comparison rules (i.e., `!(a < b)` does not imply `a >= b` if `a` is `NaN`).
-
-## 4. Case Study: Semantic Attestation
-
- The framework's capability is verified using a controlled reference implementation of a sensitive data wipe function.
-
-1.  **Reference Implementation:** The "Golden Logic."
-2.  **Refactored Implementation:** Variables renamed (`key` $\rightarrow$ `entropy`), loops altered (`range` $\rightarrow$ `index`), and helper functions extracted.
-3.  **Compromised Implementation:** Data wipe logic removed, but the function signature and control flow structure were superficially maintained.
-
-**Results:**
-* The **Refactored** version produced a hash identical to the Reference version: `005efb52...`.
-* The **Compromised** version produced a divergent hash: `82281950...`.
-
-This confirms the system successfully decoupled syntax from semantics, allowing for automated acceptance of safe refactors while instantaneously flagging genuine logic tampering.
-
-### 5. Conclusion
-
-The Semantic Attestation Authority provides a necessary layer of verification above standard cryptographic signing. By fingerprinting the *behavior* of code rather than its *bytes*, organizations can automate the acceptance of non-functional refactors while creating a robust "Semantic Firewall" for the software supply chain.
+- **Cycle Detection:** Prevents stack overflow DoS from malformed cyclic graphs
+- **IR Injection Prevention:** Sanitizes string literals and struct tags to prevent fake instruction injection
+- **NaN-Safe Comparisons:** Limits branch normalization to integer/string types to avoid floating-point edge cases
 
 </details>
 
