@@ -1,0 +1,48 @@
+name: 'Semantic Firewall'
+description: 'Generate semantic fingerprints for Go source files to detect logic corruption'
+author: 'BlackVectorOps'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  path:
+    description: 'Path to file or directory to fingerprint'
+    required: false
+    default: '.'
+  go-version:
+    description: 'Go version to use'
+    required: false
+    default: '1.24'
+
+outputs:
+  fingerprints:
+    description: 'JSON output of all function fingerprints'
+    value: ${{ steps.fingerprint.outputs.result }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ inputs.go-version }}
+
+    - name: Install sfw
+      shell: bash
+      run: go install github.com/BlackVectorOps/semantic_firewall/cmd/sfw@latest
+
+    - name: Generate fingerprints
+      id: fingerprint
+      shell: bash
+      run: |
+        echo "::group::Semantic Fingerprints"
+        OUTPUT=$(sfw check ${{ inputs.path }})
+        echo "$OUTPUT"
+        echo "::endgroup::"
+        
+        # Save to output
+        echo "result<<EOF" >> $GITHUB_OUTPUT
+        echo "$OUTPUT" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT

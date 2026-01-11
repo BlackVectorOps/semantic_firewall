@@ -1,14 +1,109 @@
-# Semantic Attestation: A Deterministic Approach to Supply Chain Integrity
+# Semantic Firewall
 
-**Version:** 0.2.0
-**Author:** Kyle McAllister
-**Date:** January 10, 2026
+**Detect logic corruption that bypasses code reviews.**
 
-## Abstract
+[![Go Reference](https://pkg.go.dev/badge/github.com/BlackVectorOps/semantic_firewall.svg)](https://pkg.go.dev/github.com/BlackVectorOps/semantic_firewall)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+Semantic Firewall generates deterministic fingerprints of your Go code's **behavior**, not its bytes. Rename variables, refactor loops, extract helpers—the fingerprint stays the same. Change the actual logic? The fingerprint changes instantly.
+
+---
+
+## Quick Start
+
+```bash
+# Install
+go install github.com/BlackVectorOps/semantic_firewall/cmd/sfw@latest
+
+# Fingerprint a file
+sfw check ./main.go
+```
+
+**Output:**
+```json
+{
+  "file": "./main.go",
+  "functions": [
+    {
+      "function": "main",
+      "fingerprint": "005efb52a8c9d1e3f4b6..."
+    }
+  ]
+}
+```
+
+---
+
+## Why Use This?
+
+| Traditional Hashing | Semantic Firewall |
+|---------------------|-------------------|
+| `key := rand()` → Hash A | `key := rand()` → Hash A |
+| `entropy := rand()` → **Hash B** ❌ | `entropy := rand()` → **Hash A** ✅ |
+| Rename breaks the hash | Rename preserves the hash |
+
+**Use cases:**
+- 🔒 **Supply chain security** — Detect backdoors like the xz attack that pass code review
+- 🔄 **Safe refactoring** — Prove your refactor didn't change behavior
+- 🤖 **CI/CD gates** — Block PRs that alter critical function logic
+
+---
+
+## GitHub Action
+
+Add semantic fingerprinting to your CI pipeline:
+
+```yaml
+- uses: BlackVectorOps/semantic_firewall@v1
+  with:
+    path: ./pkg/critical/
+```
+
+See [action.yml](action.yml) for configuration options.
+
+---
+
+## How It Works
+
+1. **Parse** — Load Go source into SSA (Static Single Assignment) form
+2. **Canonicalize** — Normalize variable names, branch ordering, loop structures
+3. **Fingerprint** — SHA-256 hash of the canonical IR
+
+The result: semantically equivalent code produces identical fingerprints.
+
+---
+
+## Library Usage
+
+```go
+import semanticfw "github.com/BlackVectorOps/semantic_firewall"
+
+src := `package main
+func Add(a, b int) int { return a + b }
+`
+
+results, err := semanticfw.FingerprintSource("example.go", src, semanticfw.DefaultLiteralPolicy)
+if err != nil {
+    log.Fatal(err)
+}
+
+for _, r := range results {
+    fmt.Printf("%s: %s\n", r.FunctionName, r.Fingerprint)
+}
+```
+
+---
+
+## Technical Deep Dive
+
+<details>
+<summary><strong>Click to expand: Architecture & Theory</strong></summary>
+
+### Abstract
 
 Modern software supply chain security relies heavily on cryptographic signatures that verify **provenance** (who signed it) but fail to verify **intent** (what the code actually does). This fragility allows malicious actors to introduce subtle logic corruption that bypasses traditional diff reviews and signature checks. This paper introduces the **Semantic Attestation Authority (SAA)**, a framework that utilizes Static Single Assignment (SSA) canonicalization and Scalar Evolution (SCEV) analysis to generate deterministic fingerprints of software logic. We demonstrate that this method can mathematically attest to the semantic equivalence of refactored code while detecting logic corruption, effectively decoupling software identity from its syntactic representation.
 
-## 1. Introduction: The Limits of Syntactic Verification
+### 1. Introduction: The Limits of Syntactic Verification
 
 Current integrity mechanisms (e.g., GPG, Sigstore) operate strictly at the byte level. If a developer changes a variable name from `key` to `entropy`, the binary hash changes entirely. This fragility means that "security" is often synonymous with "bit-perfect reproduction." This is insufficient for detecting subtle logic tampering—such as the `xz` backdoor—where the syntax is valid, the signature is valid, but the semantics are malicious.
 
@@ -61,6 +156,14 @@ When normalizing control flow (e.g., converting `a >= b` to `a < b`), strict typ
 
 This confirms the system successfully decoupled syntax from semantics, allowing for automated acceptance of safe refactors while instantaneously flagging genuine logic tampering.
 
-## 5. Conclusion
+### 5. Conclusion
 
 The Semantic Attestation Authority provides a necessary layer of verification above standard cryptographic signing. By fingerprinting the *behavior* of code rather than its *bytes*, organizations can automate the acceptance of non-functional refactors while creating a robust "Semantic Firewall" for the software supply chain.
+
+</details>
+
+---
+
+## License
+
+MIT License — See [LICENSE](LICENSE) for details.
