@@ -5,6 +5,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/BlackVectorOps/semantic_firewall.svg)](https://pkg.go.dev/github.com/BlackVectorOps/semantic_firewall)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Marketplace](https://img.shields.io/badge/Marketplace-Semantic%20Firewall-blue.svg)](https://github.com/marketplace/actions/semantic-firewall)
+[![Semantic Check](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic-check.yml/badge.svg)](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic-check.yml)
 Semantic Firewall generates deterministic fingerprints of your Go code's **behavior**, not its bytes. Rename variables, refactor loops, extract helpers—the fingerprint stays the same. Change the actual logic? The fingerprint changes instantly.
 
 ---
