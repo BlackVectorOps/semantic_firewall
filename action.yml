@@ -15,6 +15,10 @@ inputs:
     description: 'Go version to use'
     required: false
     default: '1.24'
+  strict:
+    description: 'Enforce strict analysis (fail on unhandled SSA instructions or non-determinism)'
+    required: false
+    default: 'false'
 
 outputs:
   fingerprints:
@@ -38,11 +42,20 @@ runs:
       shell: bash
       run: |
         echo "::group::Semantic Fingerprints"
-        OUTPUT=$(sfw check ${{ inputs.path }})
+        
+        # Construct arguments based on inputs
+        ARGS=""
+        if [ "${{ inputs.strict }}" == "true" ]; then
+          ARGS="--strict"
+        fi
+        
+        # Run the check with optional strict mode
+        OUTPUT=$(sfw check $ARGS ${{ inputs.path }})
+        
         echo "$OUTPUT"
         echo "::endgroup::"
         
-        # Save to output
+        # Save to output variable for downstream steps
         echo "result<<EOF" >> $GITHUB_OUTPUT
         echo "$OUTPUT" >> $GITHUB_OUTPUT
         echo "EOF" >> $GITHUB_OUTPUT

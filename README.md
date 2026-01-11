@@ -6,6 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Marketplace](https://img.shields.io/badge/Marketplace-Semantic%20Firewall-blue.svg)](https://github.com/marketplace/actions/semantic-firewall)
 [![Semantic Check](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic-check.yml/badge.svg)](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic-check.yml)
+---
 Semantic Firewall generates deterministic fingerprints of your Go code's **behavior**, not its bytes. Rename variables, refactor loops, extract helpers—the fingerprint stays the same. Change the actual logic? The fingerprint changes instantly.
 
 ---
@@ -44,23 +45,68 @@ sfw check ./main.go
 | Rename breaks the hash | Rename preserves the hash |
 
 **Use cases:**
-- 🔒 **Supply chain security** — Detect backdoors like the xz attack that pass code review
-- 🔄 **Safe refactoring** — Prove your refactor didn't change behavior
-- 🤖 **CI/CD gates** — Block PRs that alter critical function logic
+-  **Supply chain security** — Detect backdoors like the xz attack that pass code review
+-  **Safe refactoring** — Prove your refactor didn't change behavior
+-  **CI/CD gates** — Block PRs that alter critical function logic
 
 ---
 
-## GitHub Action
+## Integration: The Truth Serum Workflow
 
-Add semantic fingerprinting to your CI pipeline:
+Semantic Firewall is most powerful when used as a **verification gate for refactors**. Unlike a linter, you do not want it running on every feature commit (where logic changes are expected).
+
+Instead, configure your workflow to run **only when a developer claims to be preserving logic**.
+
+### Recommended Workflow (`.github/workflows/semantic-firewall.yml`)
+
+This configuration listens for the `refactor` keyword in commit messages or PR titles, or looks for the `semantic-safe` label.
 
 ```yaml
-- uses: BlackVectorOps/semantic_firewall@v1
-  with:
-    path: ./pkg/critical/
+name: Semantic Firewall
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+    types: [opened, synchronize, reopened, labeled]
+
+jobs:
+  semantic-verify:
+    runs-on: ubuntu-latest
+    # Trigger ONLY if the developer claims this is a refactor
+    if: |
+      contains(toJSON(github.event.commits.*.message), 'refactor') ||
+      contains(github.event.pull_request.title, 'refactor') ||
+      contains(github.event.pull_request.labels.*.name, 'semantic-safe')
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Run Semantic Firewall
+      uses: BlackVectorOps/semantic_firewall@v1.0.0
+      with:
+        # The root of your Go module
+        path: './' 
+        # Fail the CI pipeline if logic divergence is detected
+        strict: 'true' 
 ```
 
-See [action.yml](action.yml) for configuration options.
+### How to Use It
+
+1. **Feature Work:** Push standard commits (`feat: add login`). The firewall sleeps.
+
+2. **Refactoring:** Push a cleanup commit (`refactor: optimize loop`).
+   - **Pass:** The firewall confirms the refactor was truly safe.
+   - **Fail:** The firewall detects a logic change in a PR that claimed to be a refactor—a massive red flag for review.
+
+3. **Manual Trigger:** Add the `semantic-safe` label to any Pull Request to instantly audit it for semantic equivalence.
+
+### Suggested "Badge" Update
+
+If you are using a status badge in your README, you might want to add a note below it:
+
+> *Build status reflects the semantic integrity of the last refactor commit.*
 
 ---
 
