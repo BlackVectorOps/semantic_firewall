@@ -6,4 +6,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: BlackVectorOps/semantic_firewall@v1
+      - uses: BlackVectorOps/semantic_firewall@v1.0.0
