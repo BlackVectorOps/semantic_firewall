@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	semanticfw "github.com/BlackVectorOps/semantic_firewall"
 )
@@ -52,14 +53,33 @@ done:
 `
 
 func main() {
+	// Use a temporary directory for the virtual files to avoid package name conflicts
+	// with the actual project files in the root directory.
+	tmpDir := os.TempDir()
+
 	// 1. Analyze
 	// Note: We use the advanced policy to ensure we capture the logic correctly
-	resRange, _ := semanticfw.FingerprintSource("range.go", srcRange, semanticfw.DefaultLiteralPolicy)
-	resIndex, _ := semanticfw.FingerprintSource("index.go", srcIndex, semanticfw.DefaultLiteralPolicy)
-	resGoto, _ := semanticfw.FingerprintSource("goto.go", srcGoto, semanticfw.DefaultLiteralPolicy)
+	resRange, err := semanticfw.FingerprintSource(filepath.Join(tmpDir, "range.go"), srcRange, semanticfw.DefaultLiteralPolicy)
+	if err != nil {
+		log.Fatalf("Failed to analyze range loop: %v", err)
+	}
+
+	resIndex, err := semanticfw.FingerprintSource(filepath.Join(tmpDir, "index.go"), srcIndex, semanticfw.DefaultLiteralPolicy)
+	if err != nil {
+		log.Fatalf("Failed to analyze index loop: %v", err)
+	}
+
+	resGoto, err := semanticfw.FingerprintSource(filepath.Join(tmpDir, "goto.go"), srcGoto, semanticfw.DefaultLiteralPolicy)
+	if err != nil {
+		log.Fatalf("Failed to analyze goto loop: %v", err)
+	}
 
 	// 2. Extract Fingerprints
 	// We access the first function found in each file (which is 'sum')
+	if len(resRange) == 0 || len(resIndex) == 0 || len(resGoto) == 0 {
+		log.Fatalf("Analysis returned no functions (parsing failed?)")
+	}
+
 	h1 := resRange[0].Fingerprint
 	h2 := resIndex[0].Fingerprint
 	h3 := resGoto[0].Fingerprint
