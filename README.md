@@ -84,7 +84,20 @@ sfw diff old_version.go new_version.go
 
 2. **Reporter Mode:** On feature PRs, `sfw` runs a semantic diff and generates a drift report (e.g., "Semantic Match: 80%"), helping reviewers focus on the code where behavior actually changed.
 
-### GitHub Actions Workflow
+### GitHub Action (Easiest)
+
+Drop this into your workflow for **Blocker Mode**—enforces semantic immutability on every PR:
+
+```yaml
+- uses: BlackVectorOps/semantic_firewall@v1
+  with:
+    path: './'
+    go-version: '1.24'
+```
+
+> **Note:** The Marketplace Action runs `sfw check` (Blocker Mode). For semantic diff reports (Reporter Mode), use the CLI configuration below.
+
+### Advanced: Full Workflow with Reporter Mode
 
 ```yaml
 name: Semantic Firewall

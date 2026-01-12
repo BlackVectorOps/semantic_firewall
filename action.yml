@@ -1,5 +1,5 @@
 name: 'Semantic Firewall'
-description: 'Generate semantic fingerprints for Go source files to detect logic corruption'
+description: 'Enforce semantic immutability for Go source files (Blocker Mode). Generates deterministic fingerprints to detect logic corruption. For semantic diff reports, see CLI documentation.'
 author: 'BlackVectorOps'
 
 branding:
