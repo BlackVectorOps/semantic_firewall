@@ -29,7 +29,7 @@ jobs:
 
       - name: Install sfw
         run: |
-          go install github.com/BlackVectorOps/semantic_firewall/cmd/sfw@latest
+          go install github.com/BlackVectorOps/semantic_firewall/v2/cmd/sfw@latest
           if ! command -v sfw &> /dev/null; then
               echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
           fi

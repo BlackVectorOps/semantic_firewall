@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	sfw "github.com/BlackVectorOps/semantic_firewall"
+	sfw "github.com/BlackVectorOps/semantic_firewall/v2"
 )
 
 func TestCalculateEntropy(t *testing.T) {

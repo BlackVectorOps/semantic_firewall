@@ -68,7 +68,7 @@ runs:
 
     - name: Install sfw
       shell: bash
-      run: go install github.com/BlackVectorOps/semantic_firewall/cmd/sfw@latest
+      run: go install github.com/BlackVectorOps/semantic_firewall/v2/cmd/sfw@latest
 
     - name: Run Semantic Firewall
       id: run-sfw

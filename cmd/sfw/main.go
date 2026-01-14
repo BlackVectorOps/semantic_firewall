@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	semanticfw "github.com/BlackVectorOps/semantic_firewall"
+	semanticfw "github.com/BlackVectorOps/semantic_firewall/v2"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	sfw "github.com/BlackVectorOps/semantic_firewall"
+	sfw "github.com/BlackVectorOps/semantic_firewall/v2"
 )
 
 func TestScannerLoadDatabase(t *testing.T) {

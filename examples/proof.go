@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	semanticfw "github.com/BlackVectorOps/semantic_firewall"
+	semanticfw "github.com/BlackVectorOps/semantic_firewall/v2"
 )
 
 // PROOF OF EQUIVALENCE

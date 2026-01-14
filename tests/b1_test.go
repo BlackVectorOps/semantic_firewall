@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	sfw "github.com/BlackVectorOps/semantic_firewall"
+	sfw "github.com/BlackVectorOps/semantic_firewall/v2"
 )
 
 // TestSemanticCorruption_BinOpReuse ensures that normalization does not occur

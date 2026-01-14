@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	sfw "github.com/BlackVectorOps/semantic_firewall"
+	sfw "github.com/BlackVectorOps/semantic_firewall/v2"
 )
 
 // TestCanonicalizationDeterminism verifies that semantically identical functions produce the same canonical IR.

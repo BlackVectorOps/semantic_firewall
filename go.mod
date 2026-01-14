@@ -1,7 +1,7 @@
 //go.mod
 go 1.24.0
 
-module github.com/BlackVectorOps/semantic_firewall
+module github.com/BlackVectorOps/semantic_firewall/v2
 
 require (
 	go.etcd.io/bbolt v1.4.3

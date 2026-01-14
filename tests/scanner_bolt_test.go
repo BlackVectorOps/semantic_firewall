@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	sfw "github.com/BlackVectorOps/semantic_firewall"
+	sfw "github.com/BlackVectorOps/semantic_firewall/v2"
 )
 
 func TestNewBoltScanner(t *testing.T) {

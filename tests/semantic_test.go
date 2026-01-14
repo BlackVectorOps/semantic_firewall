@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	sfw "github.com/BlackVectorOps/semantic_firewall"
+	sfw "github.com/BlackVectorOps/semantic_firewall/v2"
 )
 
 // Verifies that the Authority logic correctly attests logic.

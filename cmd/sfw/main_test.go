@@ -95,8 +95,8 @@ func TestShortFunctionName(t *testing.T) {
 		{"a.b.c", "b.c"}, // Takes first dot outside parens (legacy behavior)
 		{"NoDot", "NoDot"},
 		// New cases for full module paths
-		{"github.com/BlackVectorOps/semantic_firewall/samples/clean.StartBeacon", "StartBeacon"},
-		{"github.com/BlackVectorOps/semantic_firewall/samples/dirty.z", "z"},
+		{"github.com/BlackVectorOps/semantic_firewall/v2/samples/clean.StartBeacon", "StartBeacon"},
+		{"github.com/BlackVectorOps/semantic_firewall/v2/samples/dirty.z", "z"},
 		{"github.com/foo/bar.(*Type).Method", "(*Type).Method"},
 		{"github.com/foo/bar.init", "init"},
 	}
