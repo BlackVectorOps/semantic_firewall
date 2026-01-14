@@ -212,9 +212,11 @@ func (z *Zipper) recordInstrMatch(old, new ssa.Instruction) {
 
 // Traverses use def chains to zip dependent nodes together.
 func (z *Zipper) propagate() {
-	for len(z.queue) > 0 {
-		curr := z.queue[0]
-		z.queue = z.queue[1:]
+	// Use index-based iteration to avoid repeated slice reallocations
+	queueIdx := 0
+	for queueIdx < len(z.queue) {
+		curr := z.queue[queueIdx]
+		queueIdx++
 
 		refsOldPtr := curr.old.Referrers()
 		refsNewPtr := curr.new.Referrers()
@@ -225,6 +227,8 @@ func (z *Zipper) propagate() {
 
 		z.matchUsers(*refsOldPtr, *refsNewPtr)
 	}
+	// Clear processed queue to free memory
+	z.queue = z.queue[:0]
 }
 
 // Limits comparison candidates per fingerprint bucket. Prevents algorithmic DoS

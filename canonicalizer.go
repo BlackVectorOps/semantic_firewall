@@ -108,6 +108,14 @@ func (c *Canonicalizer) CanonicalizeFunction(fn *ssa.Function) string {
 	}
 
 	c.resetScratch()
+	
+	// Pre-allocate strings.Builder capacity based on function size
+	// Estimate: ~50 bytes per instruction on average
+	estimatedSize := 0
+	for _, block := range fn.Blocks {
+		estimatedSize += len(block.Instrs) * 50
+	}
+	c.output.Grow(estimatedSize)
 
 	// PHASE 1: Semantic Analysis (Loops & SCEV)
 	// We run this before normalization to inform the canonicalization strategy.

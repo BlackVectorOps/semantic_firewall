@@ -13,8 +13,8 @@ func CalculateEntropy(data []byte) float64 {
 		return 0
 	}
 
-	// Count byte frequencies
-	frequencies := make(map[byte]float64)
+	// Count byte frequencies using fixed-size array (faster than map)
+	var frequencies [256]int
 	for _, b := range data {
 		frequencies[b]++
 	}
@@ -24,8 +24,10 @@ func CalculateEntropy(data []byte) float64 {
 	total := float64(len(data))
 
 	for _, count := range frequencies {
-		p := count / total
-		entropy -= p * math.Log2(p)
+		if count > 0 {
+			p := float64(count) / total
+			entropy -= p * math.Log2(p)
+		}
 	}
 
 	return entropy
