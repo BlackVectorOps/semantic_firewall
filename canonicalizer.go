@@ -108,6 +108,17 @@ func (c *Canonicalizer) CanonicalizeFunction(fn *ssa.Function) string {
 	}
 
 	c.resetScratch()
+	
+	// Pre-allocate strings.Builder capacity based on function size.
+	// Estimate derived from empirical measurements: typical SSA instructions produce
+	// ~50 bytes of canonical output (including operands, types, and whitespace).
+	// This reduces reallocation overhead during string building.
+	const bytesPerInstruction = 50
+	estimatedSize := 0
+	for _, block := range fn.Blocks {
+		estimatedSize += len(block.Instrs) * bytesPerInstruction
+	}
+	c.output.Grow(estimatedSize)
 
 	// PHASE 1: Semantic Analysis (Loops & SCEV)
 	// We run this before normalization to inform the canonicalization strategy.

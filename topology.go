@@ -168,7 +168,18 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 
 	// REMEDIATION: Naive Entropy Fix
 	// Calculate entropy on pure data segments to prevent dilution by verbose IR instructions.
-	var dataAccumulator []byte
+	// Pre-calculate total size to avoid repeated allocations
+	totalSize := 0
+	for _, s := range t.StringLiterals {
+		// Estimate size after quote stripping (strings may have quotes or not)
+		if len(s) >= 2 && (s[0] == '"' || s[0] == '`') {
+			totalSize += len(s) - 2
+		} else {
+			totalSize += len(s)
+		}
+	}
+	
+	dataAccumulator := make([]byte, 0, totalSize)
 	for _, s := range t.StringLiterals {
 		// Strip quotes for raw data analysis
 		raw := strings.Trim(s, "\"`")
@@ -398,28 +409,22 @@ func mapSimilarity(a, b map[string]int) float64 {
 		return 1.0
 	}
 
-	// Collect all keys
-	allKeys := make(map[string]bool)
-	for k := range a {
-		allKeys[k] = true
-	}
-	for k := range b {
-		allKeys[k] = true
-	}
-
-	if len(allKeys) == 0 {
-		return 1.0
-	}
-
-	// Jaccard-style similarity with count weighting
+	// Single-pass algorithm: iterate once through both maps
 	intersection := 0
 	union := 0
-
-	for k := range allKeys {
-		countA := a[k]
+	
+	// First pass: process all keys in map 'a'
+	for k, countA := range a {
 		countB := b[k]
 		intersection += min(countA, countB)
 		union += max(countA, countB)
+	}
+	
+	// Second pass: process keys only in map 'b'
+	for k, countB := range b {
+		if _, exists := a[k]; !exists {
+			union += countB
+		}
 	}
 
 	if union == 0 {

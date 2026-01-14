@@ -344,7 +344,11 @@ func (s *BoltScanner) ScanTopology(topo *FunctionTopology, funcName string) []Sc
 		// --- PHASE 2: FUZZY BUCKET INDEX (LSH-lite) ---
 		// Scan only the bucket corresponding to the fuzzy hash
 		c := bFuzzy.Cursor()
-		prefix := []byte(fuzzyHash + ":")
+		// Pre-allocate prefix to avoid string concatenation allocation
+		prefix := make([]byte, len(fuzzyHash)+1)
+		copy(prefix, fuzzyHash)
+		prefix[len(fuzzyHash)] = ':'
+		
 		for k, v := c.Seek(prefix); k != nil && len(k) >= len(prefix) && string(k[:len(prefix)]) == string(prefix); k, v = c.Next() {
 			sigID := string(v)
 			if seen[sigID] {
