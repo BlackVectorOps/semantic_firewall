@@ -171,10 +171,11 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 	// Pre-calculate total size to avoid repeated allocations
 	totalSize := 0
 	for _, s := range t.StringLiterals {
-		// Account for quote stripping
-		totalSize += len(s) - 2 // Subtract 2 for potential quotes
-		if totalSize < 0 {
-			totalSize = len(s)
+		// Estimate size after quote stripping (strings may have quotes or not)
+		if len(s) >= 2 && (s[0] == '"' || s[0] == '`') {
+			totalSize += len(s) - 2
+		} else {
+			totalSize += len(s)
 		}
 	}
 	
