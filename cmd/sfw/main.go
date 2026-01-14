@@ -291,9 +291,59 @@ Workflows:
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
+		if suggestion := suggestCommand(cmd); suggestion != "" {
+			fmt.Fprintf(os.Stderr, "Did you mean '%s'?\n\n", suggestion)
+		}
 		flag.Usage()
 		os.Exit(1)
 	}
+}
+
+func levenshtein(s1, s2 string) int {
+	r1, r2 := []rune(s1), []rune(s2)
+	n, m := len(r1), len(r2)
+	if n > m {
+		r1, r2 = r2, r1
+		n, m = m, n
+	}
+	current := make([]int, n+1)
+	for i := 0; i <= n; i++ {
+		current[i] = i
+	}
+	for j := 1; j <= m; j++ {
+		previous := current[0]
+		current[0] = j
+		for i := 1; i <= n; i++ {
+			temp := current[i]
+			cost := 0
+			if r1[i-1] != r2[j-1] {
+				cost = 1
+			}
+			current[i] = min(min(current[i-1]+1, current[i]+1), previous+cost)
+			previous = temp
+		}
+	}
+	return current[n]
+}
+
+func suggestCommand(cmd string) string {
+	commands := []string{"check", "diff", "index", "scan", "migrate", "stats"}
+	bestMatch := ""
+	minDist := 100 // Arbitrary high number
+
+	for _, c := range commands {
+		dist := levenshtein(cmd, c)
+		if dist < minDist {
+			minDist = dist
+			bestMatch = c
+		}
+	}
+
+	// Only suggest if distance is small (e.g. <= 2) and less than half the command length
+	if minDist <= 2 {
+		return bestMatch
+	}
+	return ""
 }
 
 // SYNERGY: Unified Pipeline - Integrity Check + Security Scanning
