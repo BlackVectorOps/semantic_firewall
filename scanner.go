@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -94,13 +95,15 @@ func NewScanner() *Scanner {
 
 // Loads signatures from a JSON file.
 func (s *Scanner) LoadDatabase(path string) error {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("failed to read signature database: %w", err)
+		return fmt.Errorf("failed to open signature database: %w", err)
 	}
+	defer f.Close()
 
 	var db SignatureDatabase
-	if err := json.Unmarshal(data, &db); err != nil {
+	// Use Decoder for better memory efficiency with large files compared to ReadFile
+	if err := json.NewDecoder(f).Decode(&db); err != nil {
 		return fmt.Errorf("failed to parse signature database: %w", err)
 	}
 
@@ -159,16 +162,32 @@ func generateTopologyHash(topo *FunctionTopology) string {
 	var builder strings.Builder
 
 	// Include structural metrics
-	fmt.Fprintf(&builder, "P%dR%dB%dI%dL%dBR%d",
-		topo.ParamCount, topo.ReturnCount, topo.BlockCount,
-		topo.InstrCount, topo.LoopCount, topo.BranchCount)
+	// Use explicit string building to avoid format string overhead and risks
+	builder.WriteString("P")
+	builder.WriteString(strconv.Itoa(topo.ParamCount))
+	builder.WriteString("R")
+	builder.WriteString(strconv.Itoa(topo.ReturnCount))
+	builder.WriteString("B")
+	builder.WriteString(strconv.Itoa(topo.BlockCount))
+	builder.WriteString("I")
+	builder.WriteString(strconv.Itoa(topo.InstrCount))
+	builder.WriteString("L")
+	builder.WriteString(strconv.Itoa(topo.LoopCount))
+	builder.WriteString("BR")
+	builder.WriteString(strconv.Itoa(topo.BranchCount))
 
 	// Include sorted call signatures
 	// SECURITY FIX: Use length-prefixed encoding to prevent hash collisions.
-	// Previous comma-separated list was vulnerable because function signatures contain commas.
+	// Switched from fmt.Sprintf to strings.Builder/strconv for safer, distinct string construction.
 	var calls []string
 	for call, count := range topo.CallSignatures {
-		calls = append(calls, fmt.Sprintf("%d:%s:%d", len(call), call, count))
+		var cb strings.Builder
+		cb.WriteString(strconv.Itoa(len(call)))
+		cb.WriteString(":")
+		cb.WriteString(call)
+		cb.WriteString(":")
+		cb.WriteString(strconv.Itoa(count))
+		calls = append(calls, cb.String())
 	}
 	sort.Strings(calls)
 	builder.WriteString(strings.Join(calls, ";"))
@@ -411,8 +430,10 @@ func matchCalls(topo *FunctionTopology, required []string) (score float64, match
 // Checks for string pattern matches.
 func matchStrings(topo *FunctionTopology, patterns []string) (score float64, matched []string) {
 	for _, pattern := range patterns {
+		// Optimization: Lowercase pattern once
+		patLower := strings.ToLower(pattern)
 		for _, lit := range topo.StringLiterals {
-			if strings.Contains(strings.ToLower(lit), strings.ToLower(pattern)) {
+			if strings.Contains(strings.ToLower(lit), patLower) {
 				matched = append(matched, pattern)
 				break
 			}

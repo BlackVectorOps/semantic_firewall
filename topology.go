@@ -7,11 +7,12 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/tools/go/ssa"
 )
 
-// Captures the structural "shape" of a function independent of names.
+// FunctionTopology captures the structural "shape" of a function independent of names.
 type FunctionTopology struct {
 	FuzzyHash string
 
@@ -24,8 +25,14 @@ type FunctionTopology struct {
 	BranchCount int // if statements
 	PhiCount    int
 
+	// Complexity metrics
+	CyclomaticComplexity int
+
 	// Call profile: map of "package.func" or "method" -> count
 	CallSignatures map[string]int
+
+	// Granular instruction tracking
+	InstrCounts map[string]int
 
 	// Type signature (normalized)
 	ParamTypes  []string
@@ -54,13 +61,20 @@ type FunctionTopology struct {
 	fn *ssa.Function
 }
 
-const (
+var (
 	// Hardening: Prevent Memory DoS from massive string literals
-	maxStringLiteralLen = 4096      // 4KB limit per string
-	maxTotalStringBytes = 1024 * 64 // 64KB limit per function
+	// These limits can be adjusted via SetTopologyLimits.
+	MaxStringLiteralLen = 4096      // 4KB limit per string
+	MaxTotalStringBytes = 1024 * 64 // 64KB limit per function
 )
 
-// Analyzes an SSA function and extracts its structural features.
+// SetTopologyLimits adjusts the memory safeguards for string processing.
+func SetTopologyLimits(maxLen, maxTotal int) {
+	MaxStringLiteralLen = maxLen
+	MaxTotalStringBytes = maxTotal
+}
+
+// ExtractTopology analyzes an SSA function and extracts its structural features.
 func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 	if fn == nil || len(fn.Blocks) == 0 {
 		return nil
@@ -71,6 +85,7 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 		ParamCount:     len(fn.Params),
 		BlockCount:     len(fn.Blocks),
 		CallSignatures: make(map[string]int),
+		InstrCounts:    make(map[string]int),
 		BinOpCounts:    make(map[string]int),
 		UnOpCounts:     make(map[string]int),
 		ParamTypes:     make([]string, 0, len(fn.Params)),
@@ -92,11 +107,16 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 	t.LoopCount = countLoops(loopInfo.Loops)
 
 	currentStringBytes := 0
+	edgeCount := 0
 
 	for _, block := range fn.Blocks {
 		t.InstrCount += len(block.Instrs)
+		edgeCount += len(block.Succs)
 
 		for _, instr := range block.Instrs {
+			// Track exact instruction types for granular similarity
+			t.InstrCounts[fmt.Sprintf("%T", instr)]++
+
 			switch i := instr.(type) {
 			case *ssa.If:
 				t.BranchCount++
@@ -133,11 +153,18 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 					if c.Value.Kind() == constant.String {
 						val := c.Value.ExactString()
 
-						if len(val) > maxStringLiteralLen {
-							val = val[:maxStringLiteralLen]
+						if len(val) > MaxStringLiteralLen {
+							// UTF-8 safe truncation to avoid invalid strings
+							val = val[:MaxStringLiteralLen]
+							for !utf8.ValidString(val) {
+								if len(val) == 0 {
+									break
+								}
+								val = val[:len(val)-1]
+							}
 						}
 
-						if currentStringBytes+len(val) <= maxTotalStringBytes {
+						if currentStringBytes+len(val) <= MaxTotalStringBytes {
 							t.StringLiterals = append(t.StringLiterals, val)
 							currentStringBytes += len(val)
 						}
@@ -146,6 +173,10 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 			}
 		}
 	}
+
+	// Calculate Cyclomatic Complexity: M = E - N + 2P
+	// For a single function, P (connected components) is usually 1.
+	t.CyclomaticComplexity = edgeCount - t.BlockCount + 2
 
 	if t.HasDefer {
 		for _, block := range fn.Blocks {
@@ -161,7 +192,10 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 		}
 	}
 
-	sort.Strings(t.StringLiterals)
+	// Use sort.SliceStable for deterministic string ordering
+	sort.SliceStable(t.StringLiterals, func(i, j int) bool {
+		return t.StringLiterals[i] < t.StringLiterals[j]
+	})
 
 	totalSize := 0
 	for _, s := range t.StringLiterals {
@@ -191,6 +225,7 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 	return t
 }
 
+// GenerateFuzzyHash creates a short representation of the function structure.
 func GenerateFuzzyHash(t *FunctionTopology) string {
 	bBucket := 0
 	if t.BlockCount > 0 {
@@ -278,6 +313,7 @@ func extractFunctionSig(fn *ssa.Function) string {
 	return fn.RelString(nil)
 }
 
+// TopologySimilarity calculates the similarity between two function topologies.
 func TopologySimilarity(a, b *FunctionTopology) float64 {
 	if a == nil || b == nil {
 		return 0.0
@@ -302,7 +338,8 @@ func TopologySimilarity(a, b *FunctionTopology) float64 {
 	weights += 2.0
 
 	branchDiff := abs(a.BranchCount - b.BranchCount)
-	maxBranch := max(a.BranchCount, b.BranchCount)
+	maxBranch := intMax(a.BranchCount, b.BranchCount)
+	// Guard against division by zero (0/0 = perfect match logic for this context)
 	if maxBranch > 0 {
 		score += (1.0 - float64(branchDiff)/float64(maxBranch)) * 1.5
 	} else {
@@ -317,6 +354,11 @@ func TopologySimilarity(a, b *FunctionTopology) float64 {
 	binOpScore := MapSimilarity(a.BinOpCounts, b.BinOpCounts)
 	score += binOpScore * 1.0
 	weights += 1.0
+
+	// Detailed instruction counts provide finer granularity
+	instrScore := MapSimilarity(a.InstrCounts, b.InstrCounts)
+	score += instrScore * 0.5
+	weights += 0.5
 
 	boolScore := 0.0
 	boolCount := 0.0
@@ -334,9 +376,12 @@ func TopologySimilarity(a, b *FunctionTopology) float64 {
 	weights += 1.0
 
 	blockDiff := abs(a.BlockCount - b.BlockCount)
-	maxBlock := max(a.BlockCount, b.BlockCount)
+	maxBlock := intMax(a.BlockCount, b.BlockCount)
+	// Guard against division by zero
 	if maxBlock > 0 {
 		score += (1.0 - float64(blockDiff)/float64(maxBlock*2)) * 0.5
+	} else {
+		score += 0.5
 	}
 	weights += 0.5
 
@@ -360,7 +405,6 @@ func typeListSimilarity(a, b []string) float64 {
 }
 
 // MapSimilarity calculates the similarity between two frequency maps.
-// It is exported to allow benchmarking by external tests.
 func MapSimilarity(a, b map[string]int) float64 {
 	if len(a) == 0 && len(b) == 0 {
 		return 1.0
@@ -371,8 +415,8 @@ func MapSimilarity(a, b map[string]int) float64 {
 
 	for k, countA := range a {
 		countB := b[k]
-		intersection += min(countA, countB)
-		union += max(countA, countB)
+		intersection += intMin(countA, countB)
+		union += intMax(countA, countB)
 	}
 
 	for k, countB := range b {
@@ -401,6 +445,20 @@ func abs(x int) int {
 	return x
 }
 
+func intMax(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func intMin(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 type TopologyMatch struct {
 	OldResult   FingerprintResult
 	NewResult   FingerprintResult
@@ -410,6 +468,7 @@ type TopologyMatch struct {
 	ByName      bool
 }
 
+// MatchFunctionsByTopology correlates functions across versions using structural analysis.
 func MatchFunctionsByTopology(oldResults, newResults []FingerprintResult, threshold float64) (
 	matched []TopologyMatch,
 	addedFuncs []FingerprintResult,
@@ -512,15 +571,10 @@ func MatchFunctionsByTopology(oldResults, newResults []FingerprintResult, thresh
 			}
 		}
 
-		// FIX: Stable sort
-		sort.Slice(candidates, func(i, j int) bool {
-			if candidates[i].sim != candidates[j].sim {
-				return candidates[i].sim > candidates[j].sim
-			}
-			if candidates[i].oldIdx != candidates[j].oldIdx {
-				return candidates[i].oldIdx < candidates[j].oldIdx
-			}
-			return candidates[i].newIdx < candidates[j].newIdx
+		// Use sort.SliceStable for deterministic ordering.
+		// Sort descending by similarity.
+		sort.SliceStable(candidates, func(i, j int) bool {
+			return candidates[i].sim > candidates[j].sim
 		})
 
 		usedOld := make(map[int]bool)

@@ -185,7 +185,12 @@ func identifyInductionVariables(loop *Loop) {
 		}
 	}
 
-	sccs := findLoopSCCs(loop, loopInstrs)
+	// Handle error from SCC detection to prevent processing invalid state
+	sccs, err := findLoopSCCs(loop, loopInstrs)
+	if err != nil {
+		// Log error in a real system; here we just skip analysis for this loop
+		return
+	}
 
 	for _, scc := range sccs {
 		var headerPhi *ssa.Phi
@@ -204,7 +209,8 @@ func identifyInductionVariables(loop *Loop) {
 	}
 }
 
-func findLoopSCCs(loop *Loop, instrs []ssa.Instruction) [][]ssa.Instruction {
+// Return error instead of silently failing or breaking on logic error.
+func findLoopSCCs(loop *Loop, instrs []ssa.Instruction) ([][]ssa.Instruction, error) {
 	var sccs [][]ssa.Instruction
 	index := 0
 	indices := make(map[ssa.Instruction]int)
@@ -212,8 +218,14 @@ func findLoopSCCs(loop *Loop, instrs []ssa.Instruction) [][]ssa.Instruction {
 	stack := []ssa.Instruction{}
 	onStack := make(map[ssa.Instruction]bool)
 
+	var recursionError error
 	var strongConnect func(v ssa.Instruction)
+
 	strongConnect = func(v ssa.Instruction) {
+		if recursionError != nil {
+			return
+		}
+
 		indices[v] = index
 		lowLink[v] = index
 		index++
@@ -239,9 +251,10 @@ func findLoopSCCs(loop *Loop, instrs []ssa.Instruction) [][]ssa.Instruction {
 		if lowLink[v] == indices[v] {
 			var component []ssa.Instruction
 			for {
-				// FIX: Stack safety check to prevent panic
+				// Handle stack emptiness gracefully by reporting logic error.
 				if len(stack) == 0 {
-					break
+					recursionError = fmt.Errorf("SCC stack corrupted: expected node %v but stack was empty", v)
+					return
 				}
 				w := stack[len(stack)-1]
 				stack = stack[:len(stack)-1]
@@ -258,9 +271,12 @@ func findLoopSCCs(loop *Loop, instrs []ssa.Instruction) [][]ssa.Instruction {
 	for _, instr := range instrs {
 		if _, visited := indices[instr]; !visited {
 			strongConnect(instr)
+			if recursionError != nil {
+				return nil, recursionError
+			}
 		}
 	}
-	return sccs
+	return sccs, nil
 }
 
 func classifyIV(loop *Loop, phi *ssa.Phi, scc []ssa.Instruction) {
@@ -307,7 +323,7 @@ func classifyIV(loop *Loop, phi *ssa.Phi, scc []ssa.Instruction) {
 					if !ok1 || !ok2 {
 						return
 					}
-					// FIX: Nil pointer check
+					// Handle nil pointer check
 					if c1.Value == nil || c2.Value == nil {
 						return
 					}
@@ -500,7 +516,7 @@ func toSCEV(v ssa.Value, loop *Loop) SCEV {
 	if cached, ok := loop.SCEVCache[v]; ok {
 		return cached
 	}
-	// FIX: Start recursion with depth 0
+	// Start recursion with depth 0
 	res := computeSCEV(v, loop, 0)
 	loop.SCEVCache[v] = res
 	return res
@@ -508,7 +524,7 @@ func toSCEV(v ssa.Value, loop *Loop) SCEV {
 
 // Internal worker with recursion depth limiting.
 func computeSCEV(v ssa.Value, loop *Loop, depth int) SCEV {
-	// SECURITY FIX: Check recursion depth to prevent stack overflow
+	// Check recursion depth to prevent stack overflow
 	if depth > MaxSCEVDepth {
 		return &SCEVUnknown{Value: v, IsInvariant: false}
 	}

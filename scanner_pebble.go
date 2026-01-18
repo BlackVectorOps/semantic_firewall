@@ -1,6 +1,7 @@
 package semanticfw
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -36,7 +37,7 @@ type PebbleScanner struct {
 	db               *pebble.DB
 	matchThreshold   float64
 	entropyTolerance float64
-	mu               sync.RWMutex // Protects threshold/tolerance updates
+	mu               sync.RWMutex // Protects threshold/tolerance updates and concurrent metadata writes
 }
 
 // PebbleScannerOptions configures the PebbleScanner initialization.
@@ -127,8 +128,9 @@ func generatePebbleRandomID() string {
 
 // -- ITERATOR HELPER --
 
-// FIX: Replaced mustIter with newIter to return errors instead of panicking
-func (s *PebbleScanner) newIter(opts *pebble.IterOptions) (*pebble.Iterator, error) {
+// createSafeIterator wraps s.db.NewIter to provide error handling and enforce safe usage patterns.
+// It replaces the generic 'newIter' to explicitly indicate error-handling behavior.
+func (s *PebbleScanner) createSafeIterator(opts *pebble.IterOptions) (*pebble.Iterator, error) {
 	iter, err := s.db.NewIter(opts)
 	if err != nil {
 		return nil, fmt.Errorf("pebble iterator creation failed: %w", err)
@@ -353,6 +355,10 @@ func (s *PebbleScanner) DeleteSignature(id string) error {
 
 // Updates a signature to record that it caused a false positive.
 func (s *PebbleScanner) MarkFalsePositive(id string, notes string) error {
+	// FIX: Added mutex lock to prevent race condition during Read-Modify-Write cycle
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	sigKey := buildSignatureKey(id)
 	data, closer, err := s.db.Get(sigKey)
 	if err != nil {
@@ -405,7 +411,9 @@ func (s *PebbleScanner) ScanTopology(topo *FunctionTopology, funcName string) ([
 	// --- PHASE 1: EXACT TOPOLOGY MATCH (O(K)) ---
 	// Use prefix scanning to handle multiple variants with the same topology hash.
 	topoPrefix := []byte(fmt.Sprintf("%s%s:", prefixIdxTopo, topoHash))
-	iter, err := s.newIter(&pebble.IterOptions{
+	// NOTE: incrementLastByte returns nil if prefix overflows. Pebble treats nil UpperBound as "End of DB".
+	// We must rely on manual prefix checking in the loop if UpperBound is nil to prevent unbounded scans.
+	iter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: topoPrefix,
 		UpperBound: incrementLastByte(topoPrefix),
 	})
@@ -415,6 +423,11 @@ func (s *PebbleScanner) ScanTopology(topo *FunctionTopology, funcName string) ([
 	defer iter.Close()
 
 	for iter.First(); iter.Valid(); iter.Next() {
+		// SAFETY: Manual bound check required if UpperBound is nil (overflow case)
+		if !bytes.HasPrefix(iter.Key(), topoPrefix) {
+			break
+		}
+
 		sigID := string(iter.Value())
 		if seen[sigID] {
 			continue
@@ -428,7 +441,7 @@ func (s *PebbleScanner) ScanTopology(topo *FunctionTopology, funcName string) ([
 
 	// --- PHASE 2: FUZZY BUCKET INDEX (LSH lite) ---
 	fuzzyPrefix := []byte(fmt.Sprintf("%s%s:", prefixIdxFuzzy, fuzzyHash))
-	fuzzyIter, err := s.newIter(&pebble.IterOptions{
+	fuzzyIter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: fuzzyPrefix,
 		UpperBound: incrementLastByte(fuzzyPrefix),
 	})
@@ -439,6 +452,11 @@ func (s *PebbleScanner) ScanTopology(topo *FunctionTopology, funcName string) ([
 	defer fuzzyIter.Close()
 
 	for fuzzyIter.First(); fuzzyIter.Valid(); fuzzyIter.Next() {
+		// SAFETY: Manual bound check
+		if !bytes.HasPrefix(fuzzyIter.Key(), fuzzyPrefix) {
+			break
+		}
+
 		sigID := string(fuzzyIter.Value())
 		if seen[sigID] {
 			continue
@@ -494,7 +512,7 @@ func (s *PebbleScanner) ScanTopologyExact(topo *FunctionTopology, funcName strin
 	var bestResult *ScanResult
 
 	topoPrefix := []byte(fmt.Sprintf("%s%s:", prefixIdxTopo, topoHash))
-	iter, err := s.newIter(&pebble.IterOptions{
+	iter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: topoPrefix,
 		UpperBound: incrementLastByte(topoPrefix),
 	})
@@ -504,6 +522,11 @@ func (s *PebbleScanner) ScanTopologyExact(topo *FunctionTopology, funcName strin
 	defer iter.Close()
 
 	for iter.First(); iter.Valid(); iter.Next() {
+		// SAFETY: Manual bound check
+		if !bytes.HasPrefix(iter.Key(), topoPrefix) {
+			break
+		}
+
 		sigID := iter.Value()
 		sigKey := append(append([]byte(nil), prefixSignatures...), sigID...)
 
@@ -553,7 +576,7 @@ func (s *PebbleScanner) GetSignature(id string) (*Signature, error) {
 // Retrieves the first signature matching a topology hash.
 func (s *PebbleScanner) GetSignatureByTopology(topoHash string) (*Signature, error) {
 	topoPrefix := []byte(fmt.Sprintf("%s%s:", prefixIdxTopo, topoHash))
-	iter, err := s.newIter(&pebble.IterOptions{
+	iter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: topoPrefix,
 		UpperBound: incrementLastByte(topoPrefix),
 	})
@@ -563,6 +586,10 @@ func (s *PebbleScanner) GetSignatureByTopology(topoHash string) (*Signature, err
 	defer iter.Close()
 
 	if !iter.First() {
+		return nil, fmt.Errorf("no signature with topology hash %q", topoHash)
+	}
+	// Bound check
+	if !bytes.HasPrefix(iter.Key(), topoPrefix) {
 		return nil, fmt.Errorf("no signature with topology hash %q", topoHash)
 	}
 
@@ -585,7 +612,7 @@ func (s *PebbleScanner) GetSignatureByTopology(topoHash string) (*Signature, err
 // Returns the number of signatures in the database.
 func (s *PebbleScanner) CountSignatures() (int, error) {
 	count := 0
-	iter, err := s.newIter(&pebble.IterOptions{
+	iter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: prefixSignatures,
 		UpperBound: incrementLastByte(prefixSignatures),
 	})
@@ -595,6 +622,10 @@ func (s *PebbleScanner) CountSignatures() (int, error) {
 	defer iter.Close()
 
 	for iter.First(); iter.Valid(); iter.Next() {
+		// Safety check
+		if !bytes.HasPrefix(iter.Key(), prefixSignatures) {
+			break
+		}
 		count++
 	}
 	return count, nil
@@ -603,7 +634,7 @@ func (s *PebbleScanner) CountSignatures() (int, error) {
 // ListSignatureIDs returns all signature IDs.
 func (s *PebbleScanner) ListSignatureIDs() ([]string, error) {
 	var ids []string
-	iter, err := s.newIter(&pebble.IterOptions{
+	iter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: prefixSignatures,
 		UpperBound: incrementLastByte(prefixSignatures),
 	})
@@ -613,6 +644,11 @@ func (s *PebbleScanner) ListSignatureIDs() ([]string, error) {
 	defer iter.Close()
 
 	for iter.First(); iter.Valid(); iter.Next() {
+		// Safety check
+		if !bytes.HasPrefix(iter.Key(), prefixSignatures) {
+			break
+		}
+
 		// Key format: "sig:ID" -> extract ID
 		key := iter.Key()
 		if len(key) > len(prefixSignatures) {
@@ -625,46 +661,95 @@ func (s *PebbleScanner) ListSignatureIDs() ([]string, error) {
 // -- IMPORT / EXPORT --
 
 // MigrateFromJSON imports signatures directly from a JSON file.
-// This bypasses legacy database structures to load raw JSON data into Pebble.
+// FIX: Uses streaming decoder to prevent OOM on large datasets.
 func (s *PebbleScanner) MigrateFromJSON(jsonPath string) (int, error) {
-	data, err := os.ReadFile(jsonPath)
+	f, err := os.Open(jsonPath)
 	if err != nil {
-		return 0, fmt.Errorf("read json file: %w", err)
+		return 0, fmt.Errorf("open json file: %w", err)
+	}
+	defer f.Close()
+
+	dec := json.NewDecoder(f)
+
+	// Navigate to the "signatures" array in the JSON object
+	// Expecting: { "signatures": [ ... ] }
+	t, err := dec.Token() // {
+	if err != nil {
+		return 0, fmt.Errorf("invalid json start: %w", err)
 	}
 
-	// Define a temporary struct matching the expected JSON schema
-	var dump struct {
-		Signatures []Signature `json:"signatures"`
-	}
+	processed := 0
+	foundSigs := false
 
-	if err := json.Unmarshal(data, &dump); err != nil {
-		return 0, fmt.Errorf("parse json database: %w", err)
-	}
-
-	if len(dump.Signatures) == 0 {
-		return 0, nil
-	}
-
-	// Batch process to prevent memory spikes on large imports
-	batchSize := 1000
-	total := len(dump.Signatures)
-	for i := 0; i < total; i += batchSize {
-		end := i + batchSize
-		if end > total {
-			end = total
+	// Loop through top-level keys
+	for dec.More() {
+		t, err = dec.Token()
+		if err != nil {
+			return processed, err
 		}
-		if err := s.AddSignatures(dump.Signatures[i:end]); err != nil {
-			return i, fmt.Errorf("bulk import signatures at batch %d: %w", i, err)
+		key, ok := t.(string)
+		if !ok {
+			continue
+		}
+
+		if key == "signatures" {
+			foundSigs = true
+			t, err = dec.Token() // [
+			if err != nil {
+				return processed, err
+			}
+
+			// Batch signatures to optimize DB writes
+			batchSize := 1000
+			var batch []Signature
+
+			for dec.More() {
+				var sig Signature
+				if err := dec.Decode(&sig); err != nil {
+					return processed, fmt.Errorf("decode signature error: %w", err)
+				}
+				batch = append(batch, sig)
+
+				if len(batch) >= batchSize {
+					if err := s.AddSignatures(batch); err != nil {
+						return processed, fmt.Errorf("batch import failed: %w", err)
+					}
+					processed += len(batch)
+					batch = batch[:0]
+				}
+			}
+
+			// Flush remaining
+			if len(batch) > 0 {
+				if err := s.AddSignatures(batch); err != nil {
+					return processed, fmt.Errorf("final batch import failed: %w", err)
+				}
+				processed += len(batch)
+			}
+
+			// Consume closing ]
+			t, err = dec.Token()
+			if err != nil {
+				// Non-fatal if we processed data
+			}
+		} else {
+			// Skip other fields
+			var ignore interface{}
+			dec.Decode(&ignore)
 		}
 	}
 
-	return total, nil
+	if !foundSigs {
+		return 0, fmt.Errorf("json file missing 'signatures' array")
+	}
+
+	return processed, nil
 }
 
 // ExportToJSON exports all signatures to a JSON file.
 func (s *PebbleScanner) ExportToJSON(jsonPath string) error {
 	var sigs []Signature
-	iter, err := s.newIter(&pebble.IterOptions{
+	iter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: prefixSignatures,
 		UpperBound: incrementLastByte(prefixSignatures),
 	})
@@ -674,6 +759,9 @@ func (s *PebbleScanner) ExportToJSON(jsonPath string) error {
 	defer iter.Close()
 
 	for iter.First(); iter.Valid(); iter.Next() {
+		if !bytes.HasPrefix(iter.Key(), prefixSignatures) {
+			break
+		}
 		var sig Signature
 		if err := json.Unmarshal(iter.Value(), &sig); err != nil {
 			return fmt.Errorf("corrupt signature data: %w", err)
@@ -708,6 +796,9 @@ func (s *PebbleScanner) ExportToJSON(jsonPath string) error {
 
 // Returns a byte slice that is just past the given prefix.
 // This is used for Pebble's UpperBound to create exclusive prefix scans.
+// Warning: Returns nil if the prefix cannot be incremented (e.g. all 0xff).
+// A nil UpperBound in Pebble means "no upper bound". Callers must ensure
+// they verify the prefix when iterating if UpperBound could be nil.
 func incrementLastByte(prefix []byte) []byte {
 	if len(prefix) == 0 {
 		return nil
@@ -802,7 +893,7 @@ func (s *PebbleScanner) matchSignaturePebble(topo *FunctionTopology, funcName st
 func (s *PebbleScanner) RebuildIndexes() error {
 	// First, collect all signatures
 	var sigs []Signature
-	iter, err := s.newIter(&pebble.IterOptions{
+	iter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: prefixSignatures,
 		UpperBound: incrementLastByte(prefixSignatures),
 	})
@@ -811,6 +902,9 @@ func (s *PebbleScanner) RebuildIndexes() error {
 	}
 
 	for iter.First(); iter.Valid(); iter.Next() {
+		if !bytes.HasPrefix(iter.Key(), prefixSignatures) {
+			break
+		}
 		var sig Signature
 		if err := json.Unmarshal(iter.Value(), &sig); err != nil {
 			iter.Close()
@@ -825,36 +919,45 @@ func (s *PebbleScanner) RebuildIndexes() error {
 	defer batch.Close()
 
 	// Delete topology index entries
-	topoIter, err := s.newIter(&pebble.IterOptions{
+	topoIter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: prefixIdxTopo,
 		UpperBound: incrementLastByte(prefixIdxTopo),
 	})
 	if err == nil {
 		for topoIter.First(); topoIter.Valid(); topoIter.Next() {
+			if !bytes.HasPrefix(topoIter.Key(), prefixIdxTopo) {
+				break
+			}
 			batch.Delete(topoIter.Key(), pebble.Sync)
 		}
 		topoIter.Close()
 	}
 
 	// Delete fuzzy index entries
-	fuzzyIter, err := s.newIter(&pebble.IterOptions{
+	fuzzyIter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: prefixIdxFuzzy,
 		UpperBound: incrementLastByte(prefixIdxFuzzy),
 	})
 	if err == nil {
 		for fuzzyIter.First(); fuzzyIter.Valid(); fuzzyIter.Next() {
+			if !bytes.HasPrefix(fuzzyIter.Key(), prefixIdxFuzzy) {
+				break
+			}
 			batch.Delete(fuzzyIter.Key(), pebble.Sync)
 		}
 		fuzzyIter.Close()
 	}
 
 	// Delete entropy index entries
-	entropyIter, err := s.newIter(&pebble.IterOptions{
+	entropyIter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: prefixIdxEntropy,
 		UpperBound: incrementLastByte(prefixIdxEntropy),
 	})
 	if err == nil {
 		for entropyIter.First(); entropyIter.Valid(); entropyIter.Next() {
+			if !bytes.HasPrefix(entropyIter.Key(), prefixIdxEntropy) {
+				break
+			}
 			batch.Delete(entropyIter.Key(), pebble.Sync)
 		}
 		entropyIter.Close()
@@ -903,7 +1006,7 @@ func (s *PebbleScanner) Stats() (*PebbleScannerStats, error) {
 	stats := &PebbleScannerStats{}
 
 	// Count signatures
-	sigIter, err := s.newIter(&pebble.IterOptions{
+	sigIter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: prefixSignatures,
 		UpperBound: incrementLastByte(prefixSignatures),
 	})
@@ -911,12 +1014,15 @@ func (s *PebbleScanner) Stats() (*PebbleScannerStats, error) {
 		return nil, err
 	}
 	for sigIter.First(); sigIter.Valid(); sigIter.Next() {
+		if !bytes.HasPrefix(sigIter.Key(), prefixSignatures) {
+			break
+		}
 		stats.SignatureCount++
 	}
 	sigIter.Close()
 
 	// Count topology index entries
-	topoIter, err := s.newIter(&pebble.IterOptions{
+	topoIter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: prefixIdxTopo,
 		UpperBound: incrementLastByte(prefixIdxTopo),
 	})
@@ -924,12 +1030,15 @@ func (s *PebbleScanner) Stats() (*PebbleScannerStats, error) {
 		return nil, err
 	}
 	for topoIter.First(); topoIter.Valid(); topoIter.Next() {
+		if !bytes.HasPrefix(topoIter.Key(), prefixIdxTopo) {
+			break
+		}
 		stats.TopoIndexCount++
 	}
 	topoIter.Close()
 
 	// Count fuzzy index entries
-	fuzzyIter, err := s.newIter(&pebble.IterOptions{
+	fuzzyIter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: prefixIdxFuzzy,
 		UpperBound: incrementLastByte(prefixIdxFuzzy),
 	})
@@ -937,12 +1046,15 @@ func (s *PebbleScanner) Stats() (*PebbleScannerStats, error) {
 		return nil, err
 	}
 	for fuzzyIter.First(); fuzzyIter.Valid(); fuzzyIter.Next() {
+		if !bytes.HasPrefix(fuzzyIter.Key(), prefixIdxFuzzy) {
+			break
+		}
 		stats.FuzzyIndexCount++
 	}
 	fuzzyIter.Close()
 
 	// Count entropy index entries
-	entropyIter, err := s.newIter(&pebble.IterOptions{
+	entropyIter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: prefixIdxEntropy,
 		UpperBound: incrementLastByte(prefixIdxEntropy),
 	})
@@ -950,6 +1062,9 @@ func (s *PebbleScanner) Stats() (*PebbleScannerStats, error) {
 		return nil, err
 	}
 	for entropyIter.First(); entropyIter.Valid(); entropyIter.Next() {
+		if !bytes.HasPrefix(entropyIter.Key(), prefixIdxEntropy) {
+			break
+		}
 		stats.EntropyIndexCount++
 	}
 	entropyIter.Close()
@@ -972,7 +1087,7 @@ func (s *PebbleScanner) ScanByEntropyRange(minEntropy, maxEntropy float64) ([]Si
 	minKey := []byte(fmt.Sprintf("%s%08.4f:", prefixIdxEntropy, minEntropy))
 	maxKey := []byte(fmt.Sprintf("%s%08.4f:", prefixIdxEntropy, maxEntropy+0.0001))
 
-	iter, err := s.newIter(&pebble.IterOptions{
+	iter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: minKey,
 		UpperBound: maxKey,
 	})
@@ -1041,6 +1156,9 @@ func (s *PebbleScanner) ScanTopologyWithSnapshot(snap *pebble.Snapshot, topo *Fu
 	}
 
 	for iter.First(); iter.Valid(); iter.Next() {
+		if !bytes.HasPrefix(iter.Key(), topoPrefix) {
+			break
+		}
 		sigID := string(iter.Value())
 		if seen[sigID] {
 			continue
@@ -1078,6 +1196,9 @@ func (s *PebbleScanner) ScanTopologyWithSnapshot(snap *pebble.Snapshot, topo *Fu
 	}
 
 	for fuzzyIter.First(); fuzzyIter.Valid(); fuzzyIter.Next() {
+		if !bytes.HasPrefix(fuzzyIter.Key(), fuzzyPrefix) {
+			break
+		}
 		sigID := string(fuzzyIter.Value())
 		if seen[sigID] {
 			continue
@@ -1187,12 +1308,15 @@ func (s *PebbleScanner) GetAllMetadata() (*DatabaseMetadata, error) {
 		Custom: make(map[string]string),
 	}
 
-	iter, err := s.newIter(&pebble.IterOptions{
+	iter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: prefixMeta,
 		UpperBound: incrementLastByte(prefixMeta),
 	})
 	if err == nil {
 		for iter.First(); iter.Valid(); iter.Next() {
+			if !bytes.HasPrefix(iter.Key(), prefixMeta) {
+				break
+			}
 			key := string(iter.Key()[len(prefixMeta):])
 			value := string(iter.Value())
 

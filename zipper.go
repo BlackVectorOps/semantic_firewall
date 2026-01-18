@@ -6,6 +6,7 @@ import (
 	"go/types"
 	"reflect"
 	"sort"
+	"strings"
 
 	"golang.org/x/tools/go/ssa"
 )
@@ -38,6 +39,10 @@ type Zipper struct {
 	revInstrMap map[ssa.Instruction]ssa.Instruction
 
 	queue []valuePair
+
+	// Caches structural fingerprints to avoid recomputing string building operations.
+	// This prevents the GC from crying during large diffs.
+	fpCache map[ssa.Instruction]string
 }
 
 type valuePair struct {
@@ -58,13 +63,14 @@ func NewZipper(oldFn, newFn *ssa.Function, policy LiteralPolicy) (*Zipper, error
 		instrMap:    make(map[ssa.Instruction]ssa.Instruction),
 		revInstrMap: make(map[ssa.Instruction]ssa.Instruction),
 		queue:       make([]valuePair, 0),
+		fpCache:     make(map[ssa.Instruction]string),
 	}, nil
 }
 
 // Runs through all four phases of the Zipper algorithm: semantic analysis,
 // anchor alignment, forward propagation, and divergence isolation.
 func (z *Zipper) ComputeDiff() (*ZipperArtifacts, error) {
-	// PHASE 0: Semantic Analysis
+	// -- PHASE 0: Semantic Analysis --
 	z.oldCanon = AcquireCanonicalizer(z.policy)
 	defer ReleaseCanonicalizer(z.oldCanon)
 	z.newCanon = AcquireCanonicalizer(z.policy)
@@ -75,19 +81,19 @@ func (z *Zipper) ComputeDiff() (*ZipperArtifacts, error) {
 	z.newCanon.analyzeLoops(z.newFn)
 	z.newCanon.normalizeInductionVariables()
 
-	// PHASE 1: Anchor Alignment
+	// -- PHASE 1: Anchor Alignment --
 	if err := z.alignAnchors(); err != nil {
 		return nil, err
 	}
 
-	// PHASE 2: Forward Propagation
+	// -- PHASE 2: Forward Propagation --
 	z.propagate()
 
-	// PHASE 2.5: Scavenge Terminators
-	// Match sinks/returns using semantic checks.
+	// -- PHASE 2.5: Scavenge Terminators --
+	// Matches sinks/returns using semantic checks.
 	z.matchTerminators()
 
-	// PHASE 3: Divergence Isolation
+	// -- PHASE 3: Divergence Isolation --
 	return z.isolateDivergence(), nil
 }
 
@@ -119,51 +125,79 @@ func (z *Zipper) alignAnchors() error {
 	}
 
 	// 4. Align Entry Blocks (Handling functions with no params like main/init)
-	// Seed the queue by matching constant-only instructions in the entry block.
 	z.alignEntryBlock()
 
 	return nil
 }
 
-// Matches instructions in the entry block sequentially. Critical for functions
-// like main() that have no parameters to serve as anchors.
+// Matches instructions in the entry block using a Longest Common Subsequence (LCS)
+// approach. This handles noise and insertions much better than a linear scan.
 func (z *Zipper) alignEntryBlock() {
 	if len(z.oldFn.Blocks) == 0 || len(z.newFn.Blocks) == 0 {
 		return
 	}
 
 	// Only process the Entry Block (Index 0)
-	// Instructions here are guaranteed to dominate the rest of the function
+	// Instructions here are guaranteed to dominate the rest of the function.
 	bOld := z.oldFn.Blocks[0]
 	bNew := z.newFn.Blocks[0]
 
-	// Conservative approach: Match sequentially from the top until divergence.
-	// This works because the start of the entry block is a fixed point.
-	limit := len(bOld.Instrs)
-	if len(bNew.Instrs) < limit {
-		limit = len(bNew.Instrs)
+	// Limit window to avoid O(N*M) explosion on huge blocks.
+	// If your entry block has more than 100 instructions, you have bigger problems.
+	const MaxLCSWindow = 100
+	lenOld := len(bOld.Instrs)
+	if lenOld > MaxLCSWindow {
+		lenOld = MaxLCSWindow
+	}
+	lenNew := len(bNew.Instrs)
+	if lenNew > MaxLCSWindow {
+		lenNew = MaxLCSWindow
 	}
 
-	for i := 0; i < limit; i++ {
-		iOld := bOld.Instrs[i]
-		iNew := bNew.Instrs[i]
+	// DP Table for LCS
+	dp := make([][]int, lenOld+1)
+	for i := range dp {
+		dp[i] = make([]int, lenNew+1)
+	}
 
-		// Skip instructions already mapped (though unlikely in entry block start)
-		if _, mapped := z.instrMap[iOld]; mapped {
-			continue
-		}
-
-		// Check strict equivalence
-		if z.areEquivalent(iOld, iNew) {
-			z.recordInstrMatch(iOld, iNew)
-			if vOld, okOld := iOld.(ssa.Value); okOld {
-				if vNew, okNew := iNew.(ssa.Value); okNew {
-					z.mapValue(vOld, vNew)
+	for i := 1; i <= lenOld; i++ {
+		for j := 1; j <= lenNew; j++ {
+			if z.areEquivalent(bOld.Instrs[i-1], bNew.Instrs[j-1]) {
+				dp[i][j] = dp[i-1][j-1] + 1
+			} else {
+				if dp[i-1][j] > dp[i][j-1] {
+					dp[i][j] = dp[i-1][j]
+				} else {
+					dp[i][j] = dp[i][j-1]
 				}
 			}
+		}
+	}
+
+	// Backtrack to record matches
+	i, j := lenOld, lenNew
+	for i > 0 && j > 0 {
+		iOld := bOld.Instrs[i-1]
+		iNew := bNew.Instrs[j-1]
+
+		if z.areEquivalent(iOld, iNew) {
+			// Match found
+			if _, mapped := z.instrMap[iOld]; !mapped {
+				z.recordInstrMatch(iOld, iNew)
+				if vOld, okOld := iOld.(ssa.Value); okOld {
+					if vNew, okNew := iNew.(ssa.Value); okNew {
+						z.mapValue(vOld, vNew)
+					}
+				}
+			}
+			i--
+			j--
 		} else {
-			// Stop at first mismatch to avoid false pairings
-			break
+			if dp[i-1][j] > dp[i][j-1] {
+				i--
+			} else {
+				j--
+			}
 		}
 	}
 }
@@ -212,7 +246,7 @@ func (z *Zipper) recordInstrMatch(old, new ssa.Instruction) {
 
 // Traverses use def chains to zip dependent nodes together.
 func (z *Zipper) propagate() {
-	// Use index-based iteration to avoid repeated slice reallocations
+	// Use index based iteration to avoid repeated slice reallocations
 	queueIdx := 0
 	for queueIdx < len(z.queue) {
 		curr := z.queue[queueIdx]
@@ -231,9 +265,7 @@ func (z *Zipper) propagate() {
 	z.queue = z.queue[:0]
 }
 
-// Limits comparison candidates per fingerprint bucket. Prevents algorithmic DoS
-// where malicious inputs with thousands of identical operations could cause O(N*M)
-// comparisons. With this limit, worst case becomes O(N * MaxCandidates) which is linear.
+// Limits comparison candidates per fingerprint bucket. Prevents algorithmic DoS.
 const MaxCandidates = 100
 
 // Pairs users of mapped values using structural fingerprints for bucketing.
@@ -245,7 +277,7 @@ func (z *Zipper) matchUsers(usersOld, usersNew []ssa.Instruction) {
 			continue
 		}
 		// Fingerprint excludes register names for stability
-		fp := getFingerprint(u)
+		fp := z.getFingerprint(u)
 		// Cap bucket size to prevent quadratic blowup.
 		if len(newByOp[fp]) < MaxCandidates {
 			newByOp[fp] = append(newByOp[fp], u)
@@ -253,20 +285,20 @@ func (z *Zipper) matchUsers(usersOld, usersNew []ssa.Instruction) {
 	}
 
 	// Determinism Fix: Users must be processed in deterministic order.
-	sortInstrs(usersOld)
+	z.sortInstrs(usersOld)
 
 	for _, uOld := range usersOld {
 		if _, mapped := z.instrMap[uOld]; mapped {
 			continue
 		}
 
-		fp := getFingerprint(uOld)
+		fp := z.getFingerprint(uOld)
 		candidates := newByOp[fp] // Only compare against structurally compatible nodes
 
 		// Determinism Fix: Candidates retrieved from Referrers() have random order.
 		// We must sort them before greedy matching to ensure the same match is chosen every time.
 		if len(candidates) > 1 {
-			sortInstrs(candidates)
+			z.sortInstrs(candidates)
 		}
 
 		for _, uNew := range candidates {
@@ -303,7 +335,7 @@ func (z *Zipper) areEquivalent(a, b ssa.Instruction) bool {
 		}
 	}
 
-	// 3. Operation-Specific Properties
+	// 3. Operation Specific Properties
 	if !z.compareOps(a, b) {
 		return false
 	}
@@ -344,7 +376,7 @@ func (z *Zipper) compareOps(a, b ssa.Instruction) bool {
 	case *ssa.Select:
 		iB := b.(*ssa.Select)
 		return iA.Blocking == iB.Blocking
-	// Type equality checks for type-defining instructions.
+	// Type equality checks for type defining instructions.
 	case *ssa.ChangeType:
 		iB := b.(*ssa.ChangeType)
 		return types.Identical(iA.Type(), iB.Type())
@@ -412,10 +444,6 @@ func (z *Zipper) compareOperands(a, b ssa.Instruction) bool {
 			return false
 		}
 		valA := *ptrA
-		// FIX: Dereferencing opsB[i] without check caused panic.
-		if opsB[i] == nil {
-			return false
-		}
 		valB := *opsB[i]
 
 		if valA == nil && valB == nil {
@@ -437,7 +465,7 @@ func (z *Zipper) compareOperands(a, b ssa.Instruction) bool {
 		isLinkable := z.isLinkable(valA)
 
 		if isLinkable {
-			// If it's a Phi node, we allow unmapped operands (Back-edges).
+			// If it's a Phi node, we allow unmapped operands (Back edges).
 			if _, isPhi := a.(*ssa.Phi); isPhi {
 				// Ensure valB is also linkable.
 				if !z.isLinkable(valB) {
@@ -498,7 +526,7 @@ func (z *Zipper) compareOneOperand(ptrA, ptrB *ssa.Value) bool {
 		return mappedB == valB
 	}
 
-	// Case 2: Unmapped linkable values are not allowed in non-Phi context
+	// Case 2: Unmapped linkable values are not allowed in non Phi context
 	if z.isLinkable(valA) {
 		return false
 	}
@@ -552,74 +580,93 @@ func (z *Zipper) formatInstr(instr ssa.Instruction) string {
 }
 
 // Helper: Sort instructions for deterministic matching using Structural Fingerprints
-type instrSorter []ssa.Instruction
+type instrSorter struct {
+	instrs []ssa.Instruction
+	z      *Zipper
+}
 
-func (s instrSorter) Len() int      { return len(s) }
-func (s instrSorter) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s instrSorter) Len() int      { return len(s.instrs) }
+func (s instrSorter) Swap(i, j int) { s.instrs[i], s.instrs[j] = s.instrs[j], s.instrs[i] }
 func (s instrSorter) Less(i, j int) bool {
 	// Sort by fingerprint instead of volatile register names.
-	fi := getFingerprint(s[i])
-	fj := getFingerprint(s[j])
+	fi := s.z.getFingerprint(s.instrs[i])
+	fj := s.z.getFingerprint(s.instrs[j])
 	if fi != fj {
 		return fi < fj
 	}
-	// Tie-break with raw string if structure is identical
-	return s[i].String() < s[j].String()
+	// Tie break with raw string if structure is identical
+	return s.instrs[i].String() < s.instrs[j].String()
 }
 
-func getFingerprint(instr ssa.Instruction) string {
+func (z *Zipper) sortInstrs(instrs []ssa.Instruction) {
+	sort.Sort(instrSorter{instrs, z})
+}
+
+// Optimized getFingerprint to use caching.
+func (z *Zipper) getFingerprint(instr ssa.Instruction) string {
+	if cached, ok := z.fpCache[instr]; ok {
+		return cached
+	}
+
 	// Generates a signature independent of register allocation.
-	// Includes instruction-specific details and call targets to ensure distinct
+	// Includes instruction specific details and call targets to ensure distinct
 	// operations fall into different buckets.
-	key := fmt.Sprintf("%T", instr)
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%T", instr)
+
 	switch i := instr.(type) {
 	case *ssa.BinOp:
-		key += ":" + i.Op.String()
+		sb.WriteString(":")
+		sb.WriteString(i.Op.String())
 	case *ssa.UnOp:
-		key += ":" + i.Op.String()
+		sb.WriteString(":")
+		sb.WriteString(i.Op.String())
 	case *ssa.Call:
 		if i.Call.IsInvoke() {
-			key += ":invoke:" + i.Call.Method.Name()
+			sb.WriteString(":invoke:")
+			sb.WriteString(i.Call.Method.Name())
 		} else {
 			// Include call target to differentiate distinct static calls
 			switch v := i.Call.Value.(type) {
 			case *ssa.Function:
-				key += ":call:" + v.RelString(nil)
+				sb.WriteString(":call:")
+				sb.WriteString(v.RelString(nil))
 			case *ssa.Builtin:
-				key += ":builtin:" + v.Name()
+				sb.WriteString(":builtin:")
+				sb.WriteString(v.Name())
 			case *ssa.MakeClosure:
+				sb.WriteString(":closure")
 				if fn, ok := v.Fn.(*ssa.Function); ok {
-					key += ":closure:" + fn.Signature.String()
-				} else {
-					key += ":closure"
+					sb.WriteString(":")
+					sb.WriteString(fn.Signature.String())
 				}
 			default:
 				// Dynamic call - use type signature for some differentiation
 				if i.Call.Value != nil {
-					key += ":dynamic:" + i.Call.Value.Type().String()
+					sb.WriteString(":dynamic:")
+					sb.WriteString(i.Call.Value.Type().String())
 				} else {
-					key += ":call"
+					sb.WriteString(":call")
 				}
 			}
 		}
 	case *ssa.Alloc:
 		// Distinguish allocation types (e.g., new(int) vs new(float))
-		key += ":" + i.Type().String()
+		sb.WriteString(":")
+		sb.WriteString(i.Type().String())
 	case *ssa.Field:
 		// Distinguish field accesses
-		key += fmt.Sprintf(":field:%d", i.Field)
+		fmt.Fprintf(&sb, ":field:%d", i.Field)
 	case *ssa.FieldAddr:
-		key += fmt.Sprintf(":fieldaddr:%d", i.Field)
+		fmt.Fprintf(&sb, ":fieldaddr:%d", i.Field)
 	case *ssa.Index:
-		key += ":index"
+		sb.WriteString(":index")
 	case *ssa.IndexAddr:
-		key += ":indexaddr"
+		sb.WriteString(":indexaddr")
 	case *ssa.Store:
-		key += ":store"
+		sb.WriteString(":store")
 	}
-	return key
-}
-
-func sortInstrs(instrs []ssa.Instruction) {
-	sort.Sort(instrSorter(instrs))
+	res := sb.String()
+	z.fpCache[instr] = res
+	return res
 }

@@ -1,3 +1,4 @@
+// -- builder.go --
 package semanticfw
 
 import (
@@ -30,7 +31,6 @@ func BuildSSAFromPackages(initialPkgs []*packages.Package) (*ssa.Program, *ssa.P
 	// is often resilient enough to handle partial programs.
 	if errorMessages.Len() > 0 {
 		// In a real logging system, we'd log this. For now, we proceed.
-		// return nil, nil, fmt.Errorf("packages contain errors: \n%s", errorMessages.String())
 	}
 
 	// Initializes the SSA program builder for all packages and dependencies.
@@ -41,18 +41,27 @@ func BuildSSAFromPackages(initialPkgs []*packages.Package) (*ssa.Program, *ssa.P
 		return nil, nil, fmt.Errorf("failed to initialize SSA program builder")
 	}
 
-	prog.Build()
+	// CRITICAL BUG FIX: Performance / DoS Prevention
+	// Previously, prog.Build() was called here. That method transitively builds SSA
+	// for the ENTIRE dependency graph, including the Go standard library (runtime, net, etc.).
+	// This caused massive memory usage and latency for simple files.
+	// FIX: Iterate and build only the target packages we explicitly loaded.
+	for _, p := range initialPkgs {
+		if ssaPkg := prog.Package(p.Types); ssaPkg != nil {
+			ssaPkg.Build()
+		}
+	}
 
 	mainPkg := initialPkgs[0]
 	var ssaPkg *ssa.Package
 
-	for i, p := range initialPkgs {
-		if p == mainPkg && i < len(pkgs) && pkgs[i] != nil {
-			ssaPkg = pkgs[i]
-			break
-		}
+	// Robustly find the SSA package. ssautil.AllPackages preserves order,
+	// so pkgs[0] corresponds to initialPkgs[0].
+	if len(pkgs) > 0 && pkgs[0] != nil {
+		ssaPkg = pkgs[0]
 	}
 
+	// Fallback lookup if index mapping failed
 	if ssaPkg == nil && mainPkg.Types != nil {
 		ssaPkg = prog.Package(mainPkg.Types)
 	}

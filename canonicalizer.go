@@ -1,3 +1,4 @@
+// -- canonicalizer.go --
 package semanticfw
 
 import (
@@ -134,6 +135,21 @@ func (c *Canonicalizer) CanonicalizeFunction(fn *ssa.Function) string {
 
 	// PHASE 4: Deterministic Ordering
 	sortedBlocks := c.deterministicTraversal(fn)
+
+	// Ensure unreachable blocks are also mapped to avoid lookup failures
+	visited := make(map[*ssa.BasicBlock]bool)
+	for _, b := range sortedBlocks {
+		visited[b] = true
+	}
+	var unreachables []*ssa.BasicBlock
+	for _, b := range fn.Blocks {
+		if !visited[b] {
+			unreachables = append(unreachables, b)
+		}
+	}
+	sort.Slice(unreachables, func(i, j int) bool { return unreachables[i].Index < unreachables[j].Index })
+	sortedBlocks = append(sortedBlocks, unreachables...)
+
 	for i, block := range sortedBlocks {
 		c.blockMap[block] = fmt.Sprintf("b%d", i)
 	}
@@ -228,7 +244,19 @@ func (c *Canonicalizer) reconstructBlockInstructions(fn *ssa.Function) {
 	for _, b := range fn.Blocks {
 		var combined []ssa.Instruction
 		combined = append(combined, nativeBody[b]...)
-		combined = append(combined, tailInstrs[b]...)
+
+		// Sort tail instructions to ensure deterministic canonicalization.
+		// When multiple instructions are moved to the same block (e.g., hoisted invariants),
+		// their relative order must be stable to produce consistent fingerprints.
+		tails := tailInstrs[b]
+		if len(tails) > 1 {
+			sort.SliceStable(tails, func(i, j int) bool {
+				// Use string representation as a stable tie-breaker for deterministic sorting
+				return tails[i].String() < tails[j].String()
+			})
+		}
+		combined = append(combined, tails...)
+
 		if t, ok := terminators[b]; ok {
 			combined = append(combined, t)
 		}
@@ -554,8 +582,7 @@ func (c *Canonicalizer) normalizeValue(v ssa.Value, preferredName ...string) str
 	return name
 }
 
-// FIX: Limits recursion depth to 20.
-// A depth of 100 was unsafe and allowed 2^100 expansion (Billion Laughs).
+// Limits recursion depth to 20.
 // 20 levels allows 2^20 (~1M) which is safe and sufficient for code analysis.
 const MaxRenamerDepth = 20
 
@@ -956,11 +983,12 @@ func (c *Canonicalizer) writePhi(w *strings.Builder, i *ssa.Phi, instr ssa.Instr
 		predBlock := preds[j]
 		predID := c.blockMap[predBlock]
 		if predID == "" || len(predID) < 2 {
-			continue
+			// Try to recover index if block is reachable but not yet mapped in this pass
+			predID = fmt.Sprintf("b%d", predBlock.Index)
 		}
 		idx, err := strconv.Atoi(predID[1:])
 		if err != nil {
-			continue
+			idx = -1
 		}
 
 		valStr := c.normalizeOperand(val, instr)
