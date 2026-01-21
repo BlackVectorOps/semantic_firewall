@@ -82,19 +82,10 @@ runs:
     - name: Install sfw
       shell: bash
       run: |
-        # Check if we are running inside the SFW repo itself (CI/CD context)
-        # If go.mod exists and contains the module name, we build from local source.
-        if [ -f "go.mod" ] && grep -q "module github.com/BlackVectorOps/semantic_firewall/v2" go.mod; then
-          echo "::notice::Building sfw from local source..."
-          go build -o sfw cmd/sfw/main.go || go build -o sfw main.go
-          
-          # Move to path so it can be called globally
-          mkdir -p $HOME/go/bin
-          mv sfw $HOME/go/bin/
-        else
-          echo "::notice::Installing sfw from remote registry..."
-          go install github.com/BlackVectorOps/semantic_firewall/v2/cmd/sfw@latest
-        fi
+        echo "::notice::Installing sfw from remote registry..."
+        # Pinned version preventing supply chain attacks (@latest removed)
+        # Removed "Dogfooding" implicit build logic (RCE Vector)
+        go install github.com/BlackVectorOps/semantic_firewall/v2/cmd/sfw@v2.2.1
 
     - name: Run Semantic Firewall
       id: run-sfw
@@ -108,20 +99,24 @@ runs:
         INPUT_SCAN_DEPS: ${{ inputs.scan-deps }}
         INPUT_DEPS_DEPTH: ${{ inputs.deps-depth }}
         INPUT_FAIL_ON_ALERT: ${{ inputs.fail-on-alert }}
-        INPUT_API_KEY: ${{ inputs.api-key }}
+        # SECURITY FIX: Passed via environment variable, not CLI argument
+        SFW_API_KEY: ${{ inputs.api-key }}
         INPUT_MODEL: ${{ inputs.model }}
         INPUT_API_BASE: ${{ inputs.api-base }}
         GITHUB_BASE_REF: ${{ github.base_ref }}
+        # Map safe context variables
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_BODY: ${{ github.event.pull_request.body }}
       run: |
         set -e
-        
+
         # Ensure path is formatted correctly
         if [[ "$INPUT_PATH" == -* ]]; then
           INPUT_PATH="./$INPUT_PATH"
         fi
 
         echo "::group::Semantic Firewall ($INPUT_MODE mode)"
-        
+
         EXIT_CODE=0
 
         case "$INPUT_MODE" in
@@ -133,73 +128,118 @@ runs:
             OUTPUT=$(sfw check $STRICT_FLAG -- "$INPUT_PATH")
             echo "$OUTPUT"
             ;;
-            
+
           diff)
-            # NOTE: User must set 'fetch-depth: 0' in actions/checkout for this to work reliably
+            # determine the correct base SHA for comparison
             if [[ -n "$GITHUB_BASE_REF" ]]; then
+              # Pull Request
               BASE_SHA=$(git rev-parse origin/$GITHUB_BASE_REF)
+            elif [[ "${{ github.event_name }}" == "push" ]]; then
+              # Push event -- use the 'before' SHA from the event payload
+              BASE_SHA="${{ github.event.before }}"
+              # Handle new branch creation where 'before' is all zeros
+              if [[ "$BASE_SHA" == "0000000000000000000000000000000000000000" ]]; then
+                 BASE_SHA="HEAD^"
+              fi
             else
+              # Fallback
               BASE_SHA=$(git rev-parse HEAD~1)
             fi
-            
-            echo "[" > sfw_diff_results.json
-            FIRST_ENTRY=true
+
+            # Setup temp directory for reliable AST parsing of old files
+            TEMP_DIR=".sfw_diff_temp_$$"
+            mkdir -p "$TEMP_DIR"
+            # Attempt to copy go.mod/sum to temp root to preserve module info
+            cp go.mod go.sum "$TEMP_DIR/" 2>/dev/null || true
+
+            STREAM_FILE="sfw_stream.jsonl"
+            rm -f "$STREAM_FILE"
+
+            # Find changed Go files
+            git diff -z --name-only "$BASE_SHA" HEAD -- '*.go' 2>/dev/null > "files_list.tmp" || find "$INPUT_PATH" -name '*.go' -not -name '*_test.go' -print0 > "files_list.tmp"
+
             TOTAL_MATCH_PCT=0
             FILE_COUNT=0
-            
-            OLD_FILE=$(mktemp)
-            FILES_LIST=$(mktemp)
-            
-            # Use 'git diff' to find changed Go files
-            git diff -z --name-only "$BASE_SHA" HEAD -- '*.go' 2>/dev/null > "$FILES_LIST" || find "$INPUT_PATH" -name '*.go' -not -name '*_test.go' -print0 > "$FILES_LIST"
-            
+
             while IFS= read -r -d '' file; do
-              if [[ -f "$file" ]]; then NEW_FILE="$file"; else NEW_FILE="/dev/null"; fi
-              if [[ ! -f "$file" ]] && [[ ! -e "$NEW_FILE" ]]; then continue; fi
+              # skip tests
               if [[ "$file" == *_test.go ]]; then continue; fi
-              if [[ "$file" != *.go ]]; then continue; fi
-              
-              # Extract old version from git history
-              git show "$BASE_SHA:$file" > "$OLD_FILE" 2>/dev/null || echo "" > "$OLD_FILE"
-              
+
+              # Determine New File Path
+              if [[ -f "$file" ]]; then
+                NEW_FILE="$file"
+              else
+                NEW_FILE="/dev/null"
+              fi
+
+              # Determine Old File Path
+              # we reconstruct the directory path in the temp folder
+              DIR_PATH=$(dirname "$file")
+              mkdir -p "$TEMP_DIR/$DIR_PATH"
+              TEMP_OLD="$TEMP_DIR/$file"
+
+              if git show "$BASE_SHA:$file" > "$TEMP_OLD" 2>/dev/null; then
+                 OLD_FILE="$TEMP_OLD"
+              else
+                 # If file didn't exist in base, treat as empty
+                 OLD_FILE="/dev/null"
+              fi
+
+              # skip if both are effectively gone
+              if [[ "$NEW_FILE" == "/dev/null" ]] && [[ "$OLD_FILE" == "/dev/null" ]]; then continue; fi
+
               # Run Diff
+              # captures only stdout to avoid JSON corruption from logs
               DIFF_OUT=$(sfw diff "$OLD_FILE" "$NEW_FILE" 2>/dev/null || echo '{}')
+
+              # append to stream file
+              echo "$DIFF_OUT" >> "$STREAM_FILE"
               echo "$DIFF_OUT"
-              
-              if [ "$FIRST_ENTRY" = true ]; then FIRST_ENTRY=false; else echo "," >> sfw_diff_results.json; fi
-              echo "$DIFF_OUT" >> sfw_diff_results.json
-              
+
               PCT=$(echo "$DIFF_OUT" | jq -r '.summary.semantic_match_pct // 0')
               TOTAL_MATCH_PCT=$(echo "$TOTAL_MATCH_PCT + $PCT" | bc)
               FILE_COUNT=$((FILE_COUNT + 1))
-              echo "" > "$OLD_FILE"
-            done < "$FILES_LIST"
-            
-            echo "]" >> sfw_diff_results.json
-            rm -f "$OLD_FILE" "$FILES_LIST"
-            
+
+            done < "files_list.tmp"
+
+            # Use jq to slurp the stream into a valid JSON array
+            if [[ -f "$STREAM_FILE" ]]; then
+              jq -s '.' "$STREAM_FILE" > sfw_diff_results.json
+            else
+              echo "[]" > sfw_diff_results.json
+            fi
+
             OUTPUT=$(cat sfw_diff_results.json)
-            rm -f sfw_diff_results.json
-            
-            if [[ $FILE_COUNT -gt 0 ]]; then AVG_PCT=$(echo "scale=1; $TOTAL_MATCH_PCT / $FILE_COUNT" | bc); else AVG_PCT="100.0"; fi
+            rm -f sfw_diff_results.json "$STREAM_FILE" "files_list.tmp"
+            rm -rf "$TEMP_DIR"
+
+            if [[ $FILE_COUNT -gt 0 ]]; then
+              AVG_PCT=$(echo "scale=1; $TOTAL_MATCH_PCT / $FILE_COUNT" | bc)
+            else
+              AVG_PCT="100.0"
+            fi
             echo "semantic-match-pct=$AVG_PCT" >> $GITHUB_OUTPUT
             ;;
 
           audit)
-            # LOGIC FIX: Check for Input OR Environment Variables
+            # Check for Key in Environment (SFW_API_KEY mapped from inputs or globals)
             HAS_KEY="false"
-            if [[ -n "$INPUT_API_KEY" ]]; then
-              HAS_KEY="true"
-            elif [[ -n "$OPENAI_API_KEY" ]] || [[ -n "$GEMINI_API_KEY" ]]; then
+            if [[ -n "$SFW_API_KEY" ]] || [[ -n "$OPENAI_API_KEY" ]] || [[ -n "$GEMINI_API_KEY" ]]; then
               HAS_KEY="true"
             fi
 
             if [[ "$HAS_KEY" == "false" ]]; then
-              echo "::warning::No API Key found in inputs or environment. Running in deterministic SIMULATION mode."
+              echo "::warning::No API Key found. Running in deterministic SIMULATION mode."
             fi
 
-            COMMIT_MSG=$(git log -1 --pretty=%B)
-            echo "::notice::Auditing Commit Message: $COMMIT_MSG"
+            # Uses PR Context if available, avoids injection by using Env Vars
+            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+               COMMIT_MSG="$PR_TITLE
+            $PR_BODY"
+            else
+               COMMIT_MSG=$(git log -1 --pretty=%B)
+            fi
+            echo "::notice::Auditing Context: $COMMIT_MSG"
 
             if [[ -n "$GITHUB_BASE_REF" ]]; then
               BASE_SHA=$(git rev-parse origin/$GITHUB_BASE_REF)
@@ -210,7 +250,7 @@ runs:
             OLD_FILE=$(mktemp)
             FILES_LIST=$(mktemp)
             AUDIT_FAILS=0
-            
+
             git diff -z --name-only "$BASE_SHA" HEAD -- '*.go' 2>/dev/null > "$FILES_LIST"
 
             while IFS= read -r -d '' file; do
@@ -221,16 +261,11 @@ runs:
 
               echo "Analyzing: $file"
               git show "$BASE_SHA:$file" > "$OLD_FILE" 2>/dev/null || echo "" > "$OLD_FILE"
-              
+
               # Construct arguments for audit
+              # API Key is passed implicitly via Environment (SFW_API_KEY)
               AUDIT_ARGS=("$OLD_FILE" "$NEW_FILE" "$COMMIT_MSG")
-              
-              # Only pass flags if inputs are explicitly provided.
-              # If INPUT_API_KEY is empty, we omit the flag so main.go falls back to os.Getenv
-              if [[ -n "$INPUT_API_KEY" ]]; then
-                 AUDIT_ARGS+=("--api-key" "$INPUT_API_KEY")
-              fi
-              
+
               AUDIT_ARGS+=("--model" "$INPUT_MODEL")
               if [[ -n "$INPUT_API_BASE" ]]; then
                  AUDIT_ARGS+=("--api-base" "$INPUT_API_BASE")
@@ -243,7 +278,7 @@ runs:
               set -e
 
               echo "$AUDIT_OUT"
-              
+
               if [[ $CMD_EXIT -ne 0 ]]; then
                  echo "::error file=$file::Deception Detected! Verdict: LIE"
                  AUDIT_FAILS=$((AUDIT_FAILS + 1))
@@ -252,9 +287,9 @@ runs:
 
               echo "" > "$OLD_FILE"
             done < "$FILES_LIST"
-            
+
             rm -f "$OLD_FILE" "$FILES_LIST"
-            
+
             if [[ $AUDIT_FAILS -eq 0 ]]; then
                echo "audit-verdict=PASS" >> $GITHUB_OUTPUT
                OUTPUT="Audit Passed. No deceptive commits detected."
@@ -263,45 +298,48 @@ runs:
                OUTPUT="Audit Failed. $AUDIT_FAILS file(s) flagged as deceptive."
             fi
             ;;
-            
+
           scan)
             DEPS_ARGS=()
             if [[ "$INPUT_SCAN_DEPS" == "true" ]]; then
               DEPS_ARGS+=("--deps")
               DEPS_ARGS+=("--deps-depth" "$INPUT_DEPS_DEPTH")
             fi
-            
+
             if [[ ! -f "$INPUT_SIGNATURES" ]]; then
-              echo "::warning::Signature database not found at $INPUT_SIGNATURES"
-              OUTPUT='{"alerts": [], "summary": {"total_alerts": 0}}'
+              # SECURITY FIX: Fail closed if database is missing
+              echo "::error::Signature database not found at $INPUT_SIGNATURES"
+              exit 1
             else
               OUTPUT=$(sfw scan --db "$INPUT_SIGNATURES" --threshold "$INPUT_THRESHOLD" "${DEPS_ARGS[@]}" -- "$INPUT_PATH")
               echo "$OUTPUT"
-              
+
               # jq -r checks for null to prevent pipe failures
               ALERT_COUNT=$(echo "$OUTPUT" | jq -r '.summary.total_alerts // 0')
               echo "alert-count=$ALERT_COUNT" >> $GITHUB_OUTPUT
-              
+
               DEPS_SCANNED=$(echo "$OUTPUT" | jq -r '.dependencies_scanned // 0')
               echo "deps-scanned=$DEPS_SCANNED" >> $GITHUB_OUTPUT
-              
+
               if [[ "$INPUT_FAIL_ON_ALERT" == "true" ]] && [[ "$ALERT_COUNT" -gt 0 ]]; then
                 echo "::error::Malware detected! $ALERT_COUNT alert(s) found."
                 EXIT_CODE=1
               fi
             fi
             ;;
-            
+
           *)
             echo "::error::Unknown mode: $INPUT_MODE. Use 'check', 'diff', 'scan', or 'audit'."
             EXIT_CODE=1
             ;;
         esac
-        
+
         echo "::endgroup::"
-        
-        echo "result<<EOF" >> $GITHUB_OUTPUT
+
+        # Uses random delimiter to prevent GITHUB_OUTPUT Injection
+        DELIMITER=$(openssl rand -hex 8)
+        echo "result<<$DELIMITER" >> $GITHUB_OUTPUT
         echo "$OUTPUT" >> $GITHUB_OUTPUT
-        echo "EOF" >> $GITHUB_OUTPUT
-        
+        echo "$DELIMITER" >> $GITHUB_OUTPUT
+
         exit $EXIT_CODE
