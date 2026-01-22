@@ -13,7 +13,7 @@ import (
 
 // -- Integration Test: Security Pipeline --
 
-// TestCallLLM_InjectionDefenses validates the full security pipeline:
+// TestCallLLM_InjectionDefenses checks the full security pipeline:
 // 1. Sentinel Pre-check (Input Filtering & Model Routing)
 // 2. Fail-Secure Logic (Blocking attacks before expensive calls)
 // 3. Context Scanning (Ensuring diffs are scanned)
@@ -121,6 +121,7 @@ func TestCallLLM_InjectionDefenses(t *testing.T) {
 		receivedModels = nil
 
 		evidence := []AuditEvidence{{Function: "main.go", AddedOperations: "fmt.Println"}}
+		// We pass "gpt-4o" as the requested model
 		result, err := callLLM("Valid commit", evidence, "key", "gpt-4o", server.URL)
 
 		if err != nil {
@@ -130,15 +131,16 @@ func TestCallLLM_InjectionDefenses(t *testing.T) {
 			t.Errorf("Expected MATCH, got %s", result.Verdict)
 		}
 
-		// Verify Hierarchy: Check (mini) -> Audit (gpt-4o)
+		// Verify Hierarchy: Sentinel Check -> Main Audit
 		if len(receivedModels) != 2 {
 			t.Fatalf("Expected 2 LLM calls (Sentinel + Auditor), got %d", len(receivedModels))
 		}
-		if receivedModels[0] != "gpt-4o-mini" {
-			t.Errorf("Architecture Violation: Step 1 should be 'gpt-4o-mini', got '%s'", receivedModels[0])
+		// logic update: Sentinel now defaults to ModelGPT5_2 for high security
+		if !strings.Contains(receivedModels[0], "gpt-5.2") {
+			t.Errorf("Architecture Violation: Sentinel (Step 1) should be 'gpt-5.2', got '%s'", receivedModels[0])
 		}
 		if receivedModels[1] != "gpt-4o" {
-			t.Errorf("Architecture Violation: Step 2 should be 'gpt-4o', got '%s'", receivedModels[1])
+			t.Errorf("Architecture Violation: Auditor (Step 2) should be 'gpt-4o', got '%s'", receivedModels[1])
 		}
 	})
 
@@ -165,8 +167,9 @@ func TestCallLLM_InjectionDefenses(t *testing.T) {
 		if len(receivedModels) != 1 {
 			t.Errorf("Fail-Secure Violation: Main model was called after attack detection! Calls: %v", receivedModels)
 		}
-		if receivedModels[0] != "gpt-4o-mini" {
-			t.Errorf("Expected sentinel model check, got %s", receivedModels[0])
+		// logic update: Sentinel uses the reasoning model (5.2)
+		if !strings.Contains(receivedModels[0], "gpt-5.2") {
+			t.Errorf("Expected sentinel model check with gpt-5.2, got %s", receivedModels[0])
 		}
 	})
 
@@ -175,7 +178,7 @@ func TestCallLLM_InjectionDefenses(t *testing.T) {
 		receivedModels = nil
 
 		evidence := []AuditEvidence{{Function: "main.go", AddedOperations: "fmt.Println"}}
-		// Requesting 'gemini-pro' (alias logic in llm.go maps this to 1.5-pro)
+		// Requesting 'gemini-pro' (logic in llm.go maps this to 3-pro-preview / ModelGeminiPro)
 		result, err := callLLM("Gemini Commit", evidence, "key", "gemini-pro", server.URL)
 
 		if err != nil {
@@ -185,16 +188,19 @@ func TestCallLLM_InjectionDefenses(t *testing.T) {
 			t.Errorf("Expected MATCH, got %s", result.Verdict)
 		}
 
-		// Verify Hierarchy: Flash (Check) -> Pro (Audit)
+		// Verify Hierarchy
 		if len(receivedModels) != 2 {
 			t.Fatalf("Expected 2 calls, got %d", len(receivedModels))
 		}
-		// Note: The mock extracts model from URL path
-		if !strings.Contains(receivedModels[0], "flash") {
-			t.Errorf("Step 1 should use Flash model, got '%s'", receivedModels[0])
+
+		// logic update: For Gemini, we now assume 'scanForInjection' upgrades to Gemini 3 Pro (Reasoning)
+		// rather than sticking with Flash, to match the "Smart Injection" defense logic.
+		// Both the sentinel and the main auditor should use Pro in this case.
+		if !strings.Contains(receivedModels[0], "pro") {
+			t.Errorf("Step 1 (Sentinel) should use Pro model, got '%s'", receivedModels[0])
 		}
 		if !strings.Contains(receivedModels[1], "pro") {
-			t.Errorf("Step 2 should use Pro model, got '%s'", receivedModels[1])
+			t.Errorf("Step 2 (Auditor) should use Pro model, got '%s'", receivedModels[1])
 		}
 	})
 
@@ -336,13 +342,13 @@ func TestValidateOutput_Guardrails(t *testing.T) {
 func mockOpenAIResponse(contentJSON string) string {
 	// OpenAI Responses API structure
 	return fmt.Sprintf(`{
-		"items": [
-			{
-				"role": "assistant",
-				"content": %q
-			}
-		]
-	}`, contentJSON)
+        "items": [
+            {
+                "role": "assistant",
+                "content": %q
+            }
+        ]
+    }`, contentJSON)
 }
 
 func mockGeminiResponse(contentJSON string) string {
@@ -350,14 +356,14 @@ func mockGeminiResponse(contentJSON string) string {
 	// We must escape the inner JSON quotes for the text field
 	escaped := strings.ReplaceAll(contentJSON, "\"", "\\\"")
 	return fmt.Sprintf(`{
-		"candidates": [
-			{
-				"content": {
-					"parts": [
-						{ "text": "%s" }
-					]
-				}
-			}
-		]
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        { "text": "%s" }
+                    ]
+                }
+            }
+        ]
 }`, escaped)
 }

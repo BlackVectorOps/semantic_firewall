@@ -1,27 +1,8 @@
-// types.go
+// -- ./cmd/sfw/types.go --
 package main
 
 import (
 	semanticfw "github.com/BlackVectorOps/semantic_firewall/v2"
-)
-
-// -- Constants & Configuration --
-
-const (
-	// MaxSourceFileSize limits the size of files read into memory to prevent OOM DoS attacks.
-	MaxSourceFileSize = 10 * 1024 * 1024 // 10 MB
-
-	// MaxAPIResponseSize limits the size of the response body from LLM providers
-	// to prevent memory exhaustion attacks from malicious endpoints.
-	MaxAPIResponseSize = 5 * 1024 * 1024 // 5 MB
-
-	// RiskThreshold determines the score at which a function diff is considered "High Risk".
-	// Scores >= 10 trigger the LLM audit pipeline.
-	RiskThreshold = 10
-
-	// MaxDiffOpsDisplay limits the number of operations shown in the audit log
-	// to prevent log flooding attacks.
-	MaxDiffOpsDisplay = 10
 )
 
 // -- Data Structures: Fingerprinting & Diffing --
@@ -115,7 +96,7 @@ type LLMResult struct {
 	Evidence string `json:"evidence"` // Reasoning provided by the LLM
 }
 
-// AuditEvidence describes specific high-risk changes passed to the LLM for analysis.
+// AuditEvidence describes specific high risk changes passed to the LLM for analysis.
 // This is the canonical definition used by cmd_audit.go.
 type AuditEvidence struct {
 	Function        string `json:"function"`
@@ -131,7 +112,7 @@ type AuditEvidence struct {
 type OpenAIResponsesRequest struct {
 	Model          string         `json:"model"`
 	Items          []OpenAIItem   `json:"items"`
-	Store          bool           `json:"store"` // Server-side state (Chapter 2.2)
+	Store          bool           `json:"store"` // Server side state (Chapter 2.2)
 	ResponseFormat *OpenAIRespFmt `json:"response_format,omitempty"`
 }
 
@@ -179,7 +160,7 @@ type GeminiGenConfig struct {
 
 // -- Data Structures: Sentinel --
 
-// SentinelResponse captures the verdict from the pre-flight injection check.
+// SentinelResponse captures the verdict from the pre flight injection check.
 type SentinelResponse struct {
 	Safe     bool   `json:"safe"`
 	Analysis string `json:"analysis,omitempty"`

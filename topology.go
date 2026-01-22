@@ -2,6 +2,7 @@ package semanticfw
 
 import (
 	"fmt"
+	"go/ast"
 	"go/constant"
 	"go/types"
 	"math"
@@ -105,6 +106,25 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 
 	loopInfo := DetectLoops(fn)
 	t.LoopCount = countLoops(loopInfo.Loops)
+
+	// Analyze AST for additional loop constructs.
+	// Fallback for broken CFGs
+	// SSA often drops back edges in these cases.
+	if fn.Syntax() != nil {
+		astLoops := 0
+		ast.Inspect(fn.Syntax(), func(n ast.Node) bool {
+			switch n.(type) {
+			case *ast.ForStmt, *ast.RangeStmt:
+				astLoops++
+			}
+			return true
+		})
+
+		// Security Heuristic: Trust the higher complexity.
+		if astLoops > t.LoopCount {
+			t.LoopCount = astLoops
+		}
+	}
 
 	currentStringBytes := 0
 	edgeCount := 0
@@ -220,12 +240,21 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 		t.EntropyProfile = EntropyProfile{Classification: EntropyLow}
 	}
 
+	// Generate hash last so all metrics are populated
 	t.FuzzyHash = GenerateFuzzyHash(t)
 
 	return t
 }
 
 // GenerateFuzzyHash creates a short representation of the function structure.
+//
+// Optimization Rationale:
+// Explicitly fold ParamCount (P) and ReturnCount (R) into the hash.
+// While Blocks/Loops/Branches define internal logic complexity, the signature (P/R)
+// provides "external" structural stability. This dramatically increases the entropy
+// of the hash, splitting massive buckets of small/generic functions (e.g., getters,
+// setters, wrappers) into distinct groups, ensuring the O(N*K) matching algorithm
+// keeps K small and approaches O(N).
 func GenerateFuzzyHash(t *FunctionTopology) string {
 	bBucket := 0
 	if t.BlockCount > 0 {
@@ -240,7 +269,9 @@ func GenerateFuzzyHash(t *FunctionTopology) string {
 		lBucket = 5
 	}
 
-	return fmt.Sprintf("B%dL%dBR%d", bBucket, lBucket, brBucket)
+	// Format: B{BlockLog2}L{LoopCap}BR{BranchLog2}P{ParamCount}R{ReturnCount}
+	// Example: B2L0BR1P2R1
+	return fmt.Sprintf("B%dL%dBR%dP%dR%d", bBucket, lBucket, brBucket, t.ParamCount, t.ReturnCount)
 }
 
 func normalizeTypeName(t types.Type) string {
@@ -489,6 +520,7 @@ func MatchFunctionsByTopology(oldResults, newResults []FingerprintResult, thresh
 	matchedOld := make(map[string]bool)
 	matchedNew := make(map[string]bool)
 
+	// Phase 1: Direct matches by Name
 	for name, oldR := range oldByName {
 		if newR, ok := newByName[name]; ok {
 			oldFn := oldR.GetSSAFunction()
@@ -534,6 +566,7 @@ func MatchFunctionsByTopology(oldResults, newResults []FingerprintResult, thresh
 		}
 	}
 
+	// Phase 2: Fuzzy matches by Topology
 	if len(unmatchedOld) > 0 && len(unmatchedNew) > 0 {
 		oldTopos := make([]*FunctionTopology, len(unmatchedOld))
 		newTopos := make([]*FunctionTopology, len(unmatchedNew))
@@ -554,19 +587,40 @@ func MatchFunctionsByTopology(oldResults, newResults []FingerprintResult, thresh
 			newIdx int
 			sim    float64
 		}
-		var candidates []candidate
+
+		// Optimization: Group new functions by FuzzyHash.
+		// By including ParamCount and ReturnCount in the hash, we significantly
+		// reduce bucket size (K), moving complexity from O(N*M) closer to O(N).
+		newBuckets := make(map[string][]int)
+		for j, newTopo := range newTopos {
+			if newTopo == nil {
+				continue
+			}
+			newBuckets[newTopo.FuzzyHash] = append(newBuckets[newTopo.FuzzyHash], j)
+		}
+
+		// Pre-allocate to avoid frequent resizing
+		candidates := make([]candidate, 0, len(oldTopos)*2)
 
 		for i, oldTopo := range oldTopos {
 			if oldTopo == nil {
 				continue
 			}
-			for j, newTopo := range newTopos {
-				if newTopo == nil {
-					continue
-				}
-				sim := TopologySimilarity(oldTopo, newTopo)
-				if sim >= threshold {
-					candidates = append(candidates, candidate{i, j, sim})
+
+			// Only compare against candidates in the same structural bucket
+			if indices, ok := newBuckets[oldTopo.FuzzyHash]; ok {
+				for _, j := range indices {
+					newTopo := newTopos[j]
+
+					// Defense in Depth: Explicit nil check
+					if newTopo == nil {
+						continue
+					}
+
+					sim := TopologySimilarity(oldTopo, newTopo)
+					if sim >= threshold {
+						candidates = append(candidates, candidate{i, j, sim})
+					}
 				}
 			}
 		}

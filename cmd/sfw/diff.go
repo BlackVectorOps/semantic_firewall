@@ -1,58 +1,141 @@
-// diff.go
+// -- ./cmd/sfw/diff.go --
 package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	semanticfw "github.com/BlackVectorOps/semantic_firewall/v2"
 )
 
+// computeDiff orchestrates the comparison between two Go source files.
+// It handles environment isolation to prevent loader collisions, computes
+// semantic fingerprints, and performs topology risk analysis to generate
+// a comprehensive diff report.
 func computeDiff(oldFile, newFile string) (*DiffOutput, error) {
-	oldResults, err := loadAndFingerprint(oldFile)
-	if err != nil {
-		// Handle non-existent old file (creation event)
+	// -- Helper Execution --
+
+	// processes files in strict isolation.
+	// CRITICAL_001_REDECLARATION_CRASH: We must write each file to a unique
+	// temporary directory so the Go loader treats them as separate packages.
+	// This prevents "redeclared in this block" errors when diffing versions
+	// that sit in the same parent directory.
+	fingerprintIsolated := func(path string) ([]semanticfw.FingerprintResult, error) {
+		if path == "" {
+			return []semanticfw.FingerprintResult{}, nil
+		}
+
+		// reads content safely while respecting MaxSourceFileSize constraints.
+		content, err := readSourceFile(path)
+		if err != nil {
+			return nil, err
+		}
+
+		// creates a unique temp dir for isolation.
+		tmpDir, err := os.MkdirTemp("", "sfw-diff-iso-*")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create temp isolation dir: %w", err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		// writes file to temp dir with original basename to preserve context hints.
+		baseName := filepath.Base(path)
+		if baseName == "." || baseName == "/" {
+			baseName = "file.go"
+		}
+		isoPath := filepath.Join(tmpDir, baseName)
+		if err := os.WriteFile(isoPath, content, FilePermReadWrite); err != nil {
+			return nil, fmt.Errorf("failed to write isolated file: %w", err)
+		}
+
+		return semanticfw.FingerprintSource(isoPath, string(content), semanticfw.DefaultLiteralPolicy)
+	}
+
+	var oldResults []semanticfw.FingerprintResult
+	var err error
+
+	// -- File Ingestion --
+
+	// checks for non existent old file which implies a Creation event.
+	if _, statErr := os.Stat(oldFile); os.IsNotExist(statErr) {
 		oldResults = []semanticfw.FingerprintResult{}
+	} else {
+		oldResults, err = fingerprintIsolated(oldFile)
+		if err != nil {
+			// propagates errors instead of swallowing them unless it is a pure file not found scenario.
+			if os.IsNotExist(err) || strings.Contains(err.Error(), "no such file") {
+				oldResults = []semanticfw.FingerprintResult{}
+			} else {
+				return nil, fmt.Errorf("failed to process old file: %w", err)
+			}
+		}
 	}
 
-	newResults, err := loadAndFingerprint(newFile)
-	if err != nil {
-		// Handle non-existent new file (deletion event)
+	var newResults []semanticfw.FingerprintResult
+	// checks for non existent new file which implies a Deletion event.
+	if _, statErr := os.Stat(newFile); os.IsNotExist(statErr) {
 		newResults = []semanticfw.FingerprintResult{}
+	} else {
+		newResults, err = fingerprintIsolated(newFile)
+		if err != nil {
+			if os.IsNotExist(err) || strings.Contains(err.Error(), "no such file") {
+				newResults = []semanticfw.FingerprintResult{}
+			} else {
+				return nil, fmt.Errorf("failed to process new file: %w", err)
+			}
+		}
 	}
 
+	// aligns functions based on their structural topology rather than just name matching.
 	matched, addedFuncs, removedFuncs := semanticfw.MatchFunctionsByTopology(
-		oldResults, newResults, 0.6,
+		oldResults, newResults, DefaultTopologyMatchThreshold,
 	)
 
 	var functionDiffs []FunctionDiff
 	var topologyMatches []TopologyMatchInfo
 	preserved, modified, renamed, highRisk := 0, 0, 0, 0
 
+	// -- Diff Analysis --
+
 	for _, m := range matched {
 		oldShort := shortFunctionName(m.OldResult.FunctionName)
 		newShort := shortFunctionName(m.NewResult.FunctionName)
 
+		// compares fingerprint and body first to determine basic modification status.
 		diff := compareFunctions(oldShort, m.OldResult, m.NewResult)
 
-		if !m.ByName {
-			diff.Function = fmt.Sprintf("%s → %s", oldShort, newShort)
-			renamed++
-		}
-
-		if diff.Status == "modified" && m.OldTopology != nil && m.NewTopology != nil {
+		// -- Topology Risk Analysis --
+		// We calculate risk BEFORE checking for renames. If a function was renamed
+		// AND modified, we still want to capture that risk data here.
+		if diff.Status == StatusModified && m.OldTopology != nil && m.NewTopology != nil {
 			delta, riskScore := calculateTopologyDelta(m.OldTopology, m.NewTopology)
 			diff.TopologyDelta = delta
 			diff.RiskScore = riskScore
-			if riskScore >= 10 {
+			if riskScore >= RiskScoreHigh {
 				highRisk++
 			}
 		}
 
+		// -- Rename Detection --
+		// If the topology matcher found a match but the names differ, it is a rename.
+		// We override the status here so the final output explicitly says "renamed".
+		if !m.ByName {
+			diff.Function = fmt.Sprintf("%s → %s", oldShort, newShort)
+			diff.Status = StatusRenamed
+			renamed++
+		}
+
 		functionDiffs = append(functionDiffs, diff)
-		if diff.Status == "preserved" {
+
+		// -- Stats Counting --
+		// updates counters based on the final status using a tagged switch for clarity.
+		// Note: We deliberately exclude "renamed" here because it was incremented above.
+		switch diff.Status {
+		case StatusPreserved:
 			preserved++
-		} else {
+		case StatusModified:
 			modified++
 		}
 
@@ -75,31 +158,32 @@ func computeDiff(oldFile, newFile string) (*DiffOutput, error) {
 		})
 	}
 
-	// Bypass vulnerability.
-	// Previously, added functions had a static risk score of 5.
-	// Now we analyze their topology to detect high-risk features (loops, C2 calls).
+	// -- New Vector Analysis --
+
+	// bypasses vulnerability remediation scans to analyze topology of added functions.
+	// This detects high risk features (loops, C2 calls) in code that has no history.
 	for _, r := range addedFuncs {
-		risk := 5
-		delta := "NewFunction"
+		risk := BaseRiskAddedFunc
+		delta := TopoDeltaNew
 
 		fn := r.GetSSAFunction()
 		if fn != nil {
 			topo := semanticfw.ExtractTopology(fn)
 			if topo != nil {
-				// Passing nil as oldT allows delta calc against empty state
+				// Passing nil as oldT allows delta calc against empty state.
 				d, s := calculateTopologyDelta(nil, topo)
 				delta = d
 				risk = s
 			}
 		}
 
-		if risk >= 10 {
+		if risk >= RiskScoreHigh {
 			highRisk++
 		}
 
 		functionDiffs = append(functionDiffs, FunctionDiff{
 			Function:       shortFunctionName(r.FunctionName),
-			Status:         "added",
+			Status:         StatusAdded,
 			NewFingerprint: r.Fingerprint,
 			RiskScore:      risk,
 			TopologyDelta:  delta,
@@ -109,10 +193,12 @@ func computeDiff(oldFile, newFile string) (*DiffOutput, error) {
 	for _, r := range removedFuncs {
 		functionDiffs = append(functionDiffs, FunctionDiff{
 			Function:       shortFunctionName(r.FunctionName),
-			Status:         "removed",
+			Status:         StatusRemoved,
 			OldFingerprint: r.Fingerprint,
 		})
 	}
+
+	// -- Summary Generation --
 
 	added := len(addedFuncs)
 	removed := len(removedFuncs)
@@ -145,12 +231,15 @@ func computeDiff(oldFile, newFile string) (*DiffOutput, error) {
 	}, nil
 }
 
+// calculateTopologyDelta computes the structural drift between two function states.
+// It assigns a risk score based on heuristics like added concurrency, loops,
+// or entropy changes which often indicate complex logic or obfuscation.
 func calculateTopologyDelta(oldT, newT *semanticfw.FunctionTopology) (string, int) {
-	// If new is nil, assume no change or error
+	// assumes no change or error if the new topology is missing.
 	if newT == nil {
-		return "Unknown", 0
+		return TopoDeltaUnknown, 0
 	}
-	// Handle nil oldT for Added functions
+	// handles nil oldT for Added functions by treating it as an empty baseline.
 	if oldT == nil {
 		oldT = &semanticfw.FunctionTopology{}
 	}
@@ -183,17 +272,17 @@ func calculateTopologyDelta(oldT, newT *semanticfw.FunctionTopology) (string, in
 	}
 
 	if newT.HasGo && !oldT.HasGo {
-		deltas = append(deltas, "AddedGoroutine")
+		deltas = append(deltas, TopoDeltaGoroutine)
 		riskScore += 15
 	}
 
 	if newT.HasDefer && !oldT.HasDefer {
-		deltas = append(deltas, "AddedDefer")
+		deltas = append(deltas, TopoDeltaDefer)
 		riskScore += 3
 	}
 
 	if newT.HasPanic && !oldT.HasPanic {
-		deltas = append(deltas, "AddedPanic")
+		deltas = append(deltas, TopoDeltaPanic)
 		riskScore += 5
 	}
 
@@ -204,12 +293,15 @@ func calculateTopologyDelta(oldT, newT *semanticfw.FunctionTopology) (string, in
 	}
 
 	if len(deltas) == 0 {
-		return "NoStructuralChange", 0
+		return TopoDeltaNone, 0
 	}
 
 	return strings.Join(deltas, ", "), riskScore
 }
 
+// compareFunctions performs a tiered comparison of two function states.
+// It starts with a cheap fingerprint check and escalates to a full SSA
+// zipper traversal if the fingerprints disagree.
 func compareFunctions(funcName string, oldResult, newResult semanticfw.FingerprintResult) FunctionDiff {
 	diff := FunctionDiff{
 		Function:       funcName,
@@ -218,7 +310,7 @@ func compareFunctions(funcName string, oldResult, newResult semanticfw.Fingerpri
 	}
 
 	if oldResult.Fingerprint == newResult.Fingerprint {
-		diff.Status = "preserved"
+		diff.Status = StatusPreserved
 		diff.FingerprintMatch = true
 		return diff
 	}
@@ -228,19 +320,20 @@ func compareFunctions(funcName string, oldResult, newResult semanticfw.Fingerpri
 	newFn := newResult.GetSSAFunction()
 
 	if oldFn == nil || newFn == nil {
-		diff.Status = "modified"
+		diff.Status = StatusModified
 		return diff
 	}
 
+	// computes the deep semantic difference between the two SSA forms.
 	zipper, err := semanticfw.NewZipper(oldFn, newFn, semanticfw.DefaultLiteralPolicy)
 	if err != nil {
-		diff.Status = "modified"
+		diff.Status = StatusModified
 		return diff
 	}
 
 	artifacts, err := zipper.ComputeDiff()
 	if err != nil {
-		diff.Status = "modified"
+		diff.Status = StatusModified
 		return diff
 	}
 
@@ -249,9 +342,9 @@ func compareFunctions(funcName string, oldResult, newResult semanticfw.Fingerpri
 	diff.RemovedOps = artifacts.Removed
 
 	if artifacts.Preserved {
-		diff.Status = "preserved"
+		diff.Status = StatusPreserved
 	} else {
-		diff.Status = "modified"
+		diff.Status = StatusModified
 	}
 
 	return diff

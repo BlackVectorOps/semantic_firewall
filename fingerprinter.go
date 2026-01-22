@@ -1,3 +1,4 @@
+// -- semantic_firewall/fingerprinter.go --
 package semanticfw
 
 import (
@@ -100,7 +101,7 @@ func GenerateFingerprint(fn *ssa.Function, policy LiteralPolicy, strictMode bool
 		filename = p.Filename
 	}
 
-	// HARDENING: Check for massive functions that could cause DoS.
+	// Check for massive functions that could cause DoS.
 	if len(fn.Blocks) > MaxFunctionBlocks {
 		return FingerprintResult{
 			FunctionName: fn.RelString(nil),
@@ -148,10 +149,8 @@ func FingerprintSourceAdvanced(filename string, src string, policy LiteralPolicy
 	return FingerprintPackages(initialPkgs, policy, strictMode)
 }
 
-// GetHardenedEnv returns a slice of environment variables configured for secure analysis.
+// Returns a slice of environment variables configured for secure analysis.
 func GetHardenedEnv() []string {
-	// Defense-in-depth hardening against RCE and SSRF:
-	// GOTOOLCHAIN=local prevents downloading arbitrary toolchains (Go 1.21+).
 	env := make([]string, 0, len(os.Environ())+7)
 	for _, e := range os.Environ() {
 		upperE := strings.ToUpper(e)
@@ -177,7 +176,7 @@ func loadPackagesFromSource(filename string, src string) ([]*packages.Package, e
 	}
 
 	sourceDir := filepath.Dir(filename)
-	// FIX: Ensure absolute path for correct overlay mapping
+	// Ensure absolute path for correct overlay mapping
 	absFilename, err := filepath.Abs(filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve absolute path for %s: %w", filename, err)
@@ -201,7 +200,7 @@ func loadPackagesFromSource(filename string, src string) ([]*packages.Package, e
 		return nil, fmt.Errorf("failed to execute loader: %w", err)
 	}
 
-	// SECURITY FIX: Relaxed error handling to allow analysis of partial/malformed code.
+	//  Relaxed error handling to allow analysis of partial/malformed code.
 	var errorMessages strings.Builder
 	packages.Visit(initialPkgs, nil, func(pkg *packages.Package) {
 		for _, e := range pkg.Errors {
@@ -270,6 +269,14 @@ func processFunctionAndAnons(fn *ssa.Function, policy LiteralPolicy, strictMode 
 		return
 	}
 	visited[fn] = true
+
+	// Filter synthetic functions, but allow the package 'init' function.
+	// The SSA package defines a synthetic 'init' function that calls all user-defined inits.
+	// We want to fingerprint this to capture global variable initialization logic.
+	// Use fn.Name() check to allow "init", even if it is marked synthetic.
+	if fn.Synthetic != "" && fn.Name() != "init" {
+		return
+	}
 
 	if len(fn.Blocks) > 0 {
 		result := GenerateFingerprint(fn, policy, strictMode)

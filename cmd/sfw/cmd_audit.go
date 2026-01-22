@@ -1,4 +1,4 @@
-// cmd_audit.go
+// -- ./cmd/sfw/cmd_audit.go --
 package main
 
 import (
@@ -18,17 +18,17 @@ func runAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 
 	var evidence []AuditEvidence
 	for _, fn := range diff.Functions {
-		// Use constants from types.go (already cleaned up)
-		if fn.RiskScore >= RiskThreshold {
+		// Use constants from constants.go (centralized configuration)
+		if fn.RiskScore >= RiskScoreHigh {
 			var ops string
-			// Security Fix: Prevent OOM by not joining a massive slice before checking length
+			// Security Fix: Prevent OOM by not joining a massive slice before checking length.
 			if len(fn.AddedOps) > MaxDiffOpsDisplay {
 				ops = fmt.Sprintf("%s (+%d more)", strings.Join(fn.AddedOps[:MaxDiffOpsDisplay], ", "), len(fn.AddedOps)-MaxDiffOpsDisplay)
 			} else {
 				ops = strings.Join(fn.AddedOps, ", ")
 			}
 
-			// Now correctly references the AuditEvidence struct in types.go
+			// Now correctly references the AuditEvidence struct in types.go.
 			evidence = append(evidence, AuditEvidence{
 				Function:        fn.Function,
 				RiskScore:       fn.RiskScore,
@@ -55,18 +55,18 @@ func runAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 		// If the verification fails due to network/API error, we treat it as an ERROR verdict.
 		result, err := callLLM(commitMsg, evidence, apiKey, model, apiBase)
 		if err != nil {
-			// FAIL-CLOSED: System errors fail the audit to prevent bypassing security
+			// FAIL-CLOSED: System errors fail the audit to prevent bypassing security.
 			output.Output = LLMResult{
-				Verdict:  "ERROR",
+				Verdict:  VerdictError,
 				Evidence: fmt.Sprintf("Verification Failed: %v", err),
 			}
 		} else {
 			output.Output = result
 		}
 	} else {
-		// Automatic pass only if no structural risk
+		// Automatic pass only if no structural risk.
 		output.Output = LLMResult{
-			Verdict:  "MATCH",
+			Verdict:  VerdictMatch,
 			Evidence: "Automatic Pass: No structural escalation detected.",
 		}
 	}
@@ -77,8 +77,8 @@ func runAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 		return 0, fmt.Errorf("json encode failed: %w", err)
 	}
 
-	// Security Policy: Non-zero exit code for LIE or ERROR
-	if output.Output.Verdict == "LIE" || output.Output.Verdict == "ERROR" {
+	// Security Policy: Non zero exit code for LIE or ERROR.
+	if output.Output.Verdict == VerdictLie || output.Output.Verdict == VerdictError {
 		return 1, nil
 	}
 

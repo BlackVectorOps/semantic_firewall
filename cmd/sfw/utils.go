@@ -155,6 +155,8 @@ func readSourceFile(path string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(f, MaxSourceFileSize+1))
 }
 
+// loadAndFingerprint reads a file and generates semantic fingerprints.
+// Deprecated: Use loadAndFingerprintIsolated for diff operations to avoid package collisions.
 func loadAndFingerprint(filename string) ([]semanticfw.FingerprintResult, error) {
 	absPath, err := filepath.Abs(filename)
 	if err != nil {
@@ -167,6 +169,49 @@ func loadAndFingerprint(filename string) ([]semanticfw.FingerprintResult, error)
 		return nil, err
 	}
 	return semanticfw.FingerprintSource(absPath, string(src), semanticfw.DefaultLiteralPolicy)
+}
+
+// Copies the target file to a unique temporary directory before fingerprinting.
+// This prevents "redeclared in this block" errors when 'old.go' and 'new.go'
+// are in the same directory and both belong to the same package.
+func FingerprintIsolated(filename string) ([]semanticfw.FingerprintResult, error) {
+	absPath, err := filepath.Abs(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	src, err := readSourceFile(absPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create a secure temporary directory
+	tmpDir, err := os.MkdirTemp("", "sfw-iso-")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create isolation dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Write the source to the temp dir with the same base name
+	baseName := filepath.Base(absPath)
+	tmpFile := filepath.Join(tmpDir, baseName)
+	if err := os.WriteFile(tmpFile, src, 0600); err != nil {
+		return nil, fmt.Errorf("failed to write isolated file: %w", err)
+	}
+
+	// Fingerprint the isolated file
+	results, err := semanticfw.FingerprintSource(tmpFile, string(src), semanticfw.DefaultLiteralPolicy)
+	if err != nil {
+		return nil, err
+	}
+
+	// Rewrite the filename in the results back to the original path
+	// so the user sees the file they asked for, not the temp path.
+	for i := range results {
+		results[i].Filename = absPath
+	}
+
+	return results, nil
 }
 
 func shortFunctionName(fullName string) string {
