@@ -120,10 +120,12 @@ func (s *PebbleScanner) SetEntropyTolerance(tolerance float64) {
 	s.entropyTolerance = tolerance
 }
 
-func generatePebbleRandomID() string {
+func generatePebbleRandomID() (string, error) {
 	b := make([]byte, 8)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to generate random ID: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // -- ITERATOR HELPER --
@@ -172,7 +174,11 @@ func formatEntropyKey(entropy float64, id string) string {
 func (s *PebbleScanner) AddSignature(sig Signature) error {
 	// Generate ID if not provided
 	if sig.ID == "" {
-		sig.ID = fmt.Sprintf("SFW-AUTO-%s", generatePebbleRandomID())
+		id, err := generatePebbleRandomID()
+		if err != nil {
+			return err
+		}
+		sig.ID = fmt.Sprintf("SFW-AUTO-%s", id)
 	}
 
 	// Validate required fields
@@ -251,7 +257,11 @@ func (s *PebbleScanner) AddSignatures(sigs []Signature) error {
 		sig := &sigs[i]
 
 		if sig.ID == "" {
-			sig.ID = fmt.Sprintf("SFW-AUTO-%s", generatePebbleRandomID())
+			id, err := generatePebbleRandomID()
+			if err != nil {
+				return err
+			}
+			sig.ID = fmt.Sprintf("SFW-AUTO-%s", id)
 		}
 		if sig.TopologyHash == "" {
 			return fmt.Errorf("signature %q missing TopologyHash", sig.ID)
