@@ -2,6 +2,11 @@
 package main
 
 const (
+	// -- Application Metadata --
+	// Version is the current semantic version of the application.
+	// Bump this before tagging a release.
+	Version = "2.3.0"
+
 	// -- File System Permissions --
 	FilePermReadWrite = 0644
 	FilePermSecure    = 0600
