@@ -3,9 +3,12 @@ package semanticfw
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/binary"
+	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"sync"
@@ -18,12 +21,17 @@ import (
 // Format: prefix:key -> value
 // This design allows efficient prefix scans while maintaining logical separation.
 var (
-	prefixSignatures = []byte("sig:")   // Master storage: sig:ID -> JSON blob
-	prefixIdxTopo    = []byte("topo:")  // Index: topo:TopologyHash:ID -> ID
-	prefixIdxFuzzy   = []byte("fuzzy:") // Index: fuzzy:FuzzyHash:ID -> ID
+	prefixSignatures = []byte("sig:")   // Master storage: sig:ID -> Gob/JSON blob
+	prefixIdxTopo    = []byte("topo:")  // Index: topo:TopologyHash:ID -> PackedIndexValue
+	prefixIdxFuzzy   = []byte("fuzzy:") // Index: fuzzy:FuzzyHash:ID -> PackedIndexValue
 	prefixIdxEntropy = []byte("entr:")  // Index: entr:EntropyKey -> ID
 	prefixMeta       = []byte("meta:")  // Metadata: meta:key -> value
 )
+
+// packedIndexMagic is the prefix byte used to distinguish optimized index entries
+// (containing entropy data) from legacy index entries (containing only ID strings).
+// ASCII characters (legacy IDs) never start with 0x01.
+const packedIndexMagic byte = 0x01
 
 // PebbleScanner performs semantic malware detection using CockroachDB's Pebble
 // for persistent storage. Pebble's LSM tree architecture provides:
@@ -128,10 +136,56 @@ func generatePebbleRandomID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// -- INDEX OPTIMIZATION HELPERS --
+
+// encodeIndexValue packs the ID and entropy data into a byte slice.
+// Format: [Magic(1b)] [Score(8b)] [Tol(8b)] [ID(bytes...)]
+// This allows filtering by entropy directly from the index without loading the full signature.
+func encodeIndexValue(id string, score, tol float64) []byte {
+	// Size: 1 (Magic) + 8 (Score) + 8 (Tol) + len(ID)
+	buf := make([]byte, 17+len(id))
+	buf[0] = packedIndexMagic
+	binary.LittleEndian.PutUint64(buf[1:9], math.Float64bits(score))
+	binary.LittleEndian.PutUint64(buf[9:17], math.Float64bits(tol))
+	copy(buf[17:], id)
+	return buf
+}
+
+// decodeIndexValue unpacks the index.
+// Returns: id, score, tol, validPacked (bool).
+// If validPacked is false, the entry is legacy (just an ID string).
+func decodeIndexValue(data []byte) (string, float64, float64, bool) {
+	// Legacy IDs (strings) won't start with 0x01 (Start of Heading)
+	if len(data) >= 17 && data[0] == packedIndexMagic {
+		score := math.Float64frombits(binary.LittleEndian.Uint64(data[1:9]))
+		tol := math.Float64frombits(binary.LittleEndian.Uint64(data[9:17]))
+		id := string(data[17:])
+		return id, score, tol, true
+	}
+	// Fallback for legacy data
+	return string(data), 0, 0, false
+}
+
+// -- STORAGE HELPERS --
+
+// decodeSignature transparently handles both legacy JSON and optimized Gob formats.
+// This ensures backward compatibility without downtime.
+func decodeSignature(data []byte, sig *Signature) error {
+	if len(data) == 0 {
+		return fmt.Errorf("empty signature data")
+	}
+	// Check for JSON start character '{'
+	if data[0] == '{' {
+		return json.Unmarshal(data, sig)
+	}
+	// Default to Gob (faster, binary)
+	buf := bytes.NewReader(data)
+	return gob.NewDecoder(buf).Decode(sig)
+}
+
 // -- ITERATOR HELPER --
 
 // createSafeIterator wraps s.db.NewIter to provide error handling and enforce safe usage patterns.
-// It replaces the generic 'newIter' to explicitly indicate error-handling behavior.
 func (s *PebbleScanner) createSafeIterator(opts *pebble.IterOptions) (*pebble.Iterator, error) {
 	iter, err := s.db.NewIter(opts)
 	if err != nil {
@@ -171,6 +225,7 @@ func formatEntropyKey(entropy float64, id string) string {
 
 // Atomically saves a signature and updates all indexes.
 // Safe for concurrent use. Uses Pebble's WriteBatch for atomic writes.
+// OPTIMIZATION: Writes Gob (faster storage) and Packed Index (faster lookups).
 func (s *PebbleScanner) AddSignature(sig Signature) error {
 	// Generate ID if not provided
 	if sig.ID == "" {
@@ -192,7 +247,8 @@ func (s *PebbleScanner) AddSignature(sig Signature) error {
 	var oldSig Signature
 	hasOldSig := false
 	if existingData, closer, err := s.db.Get(sigKey); err == nil {
-		if err := json.Unmarshal(existingData, &oldSig); err == nil {
+		// Use dual-mode decoder to safely read existing data (JSON or Gob)
+		if err := decodeSignature(existingData, &oldSig); err == nil {
 			hasOldSig = true
 		}
 		closer.Close()
@@ -216,30 +272,34 @@ func (s *PebbleScanner) AddSignature(sig Signature) error {
 		}
 	}
 
-	// 1. Serialize and save master record
-	data, err := json.Marshal(sig)
-	if err != nil {
-		return fmt.Errorf("marshal signature %q: %w", sig.ID, err)
+	// 1. Serialize and save master record using Gob (Optimization)
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	if err := enc.Encode(sig); err != nil {
+		return fmt.Errorf("encode signature %q: %w", sig.ID, err)
 	}
-	if err := batch.Set(sigKey, data, pebble.Sync); err != nil {
+	if err := batch.Set(sigKey, buf.Bytes(), pebble.Sync); err != nil {
 		return fmt.Errorf("store signature %q: %w", sig.ID, err)
 	}
 
-	// 2. Update topology index (composite key to handle variants)
+	// Prepare packed index value [Magic|Score|Tol|ID] (Optimization)
+	packedValue := encodeIndexValue(sig.ID, sig.EntropyScore, sig.EntropyTolerance)
+
+	// 2. Update topology index
 	topoKey := buildTopoIndexKey(sig.TopologyHash, sig.ID)
-	if err := batch.Set(topoKey, []byte(sig.ID), pebble.Sync); err != nil {
+	if err := batch.Set(topoKey, packedValue, pebble.Sync); err != nil {
 		return fmt.Errorf("index topology for %q: %w", sig.ID, err)
 	}
 
-	// 3. Index using Fuzzy Hash (LSH lite) for robust lookups
+	// 3. Index using Fuzzy Hash
 	if sig.FuzzyHash != "" {
 		fuzzyKey := buildFuzzyIndexKey(sig.FuzzyHash, sig.ID)
-		if err := batch.Set(fuzzyKey, []byte(sig.ID), pebble.Sync); err != nil {
+		if err := batch.Set(fuzzyKey, packedValue, pebble.Sync); err != nil {
 			return fmt.Errorf("index fuzzy hash for %q: %w", sig.ID, err)
 		}
 	}
 
-	// 4. Update entropy index
+	// 4. Update entropy index (Range scan, just ID is sufficient usually)
 	entropyKey := buildEntropyIndexKey(sig.EntropyScore, sig.ID)
 	if err := batch.Set(entropyKey, []byte(sig.ID), pebble.Sync); err != nil {
 		return fmt.Errorf("index entropy for %q: %w", sig.ID, err)
@@ -269,10 +329,10 @@ func (s *PebbleScanner) AddSignatures(sigs []Signature) error {
 
 		sigKey := buildSignatureKey(sig.ID)
 
-		// Check for existing signature to clean up stale indexes
+		// Check for existing signature
 		if existingData, closer, err := s.db.Get(sigKey); err == nil {
 			var oldSig Signature
-			if json.Unmarshal(existingData, &oldSig) == nil {
+			if decodeSignature(existingData, &oldSig) == nil {
 				if oldSig.TopologyHash != sig.TopologyHash {
 					batch.Delete(buildTopoIndexKey(oldSig.TopologyHash, oldSig.ID), nil)
 				}
@@ -286,23 +346,27 @@ func (s *PebbleScanner) AddSignatures(sigs []Signature) error {
 			closer.Close()
 		}
 
-		data, err := json.Marshal(sig)
-		if err != nil {
-			return fmt.Errorf("marshal signature %q: %w", sig.ID, err)
+		// Encode with Gob
+		var buf bytes.Buffer
+		enc := gob.NewEncoder(&buf)
+		if err := enc.Encode(sig); err != nil {
+			return fmt.Errorf("encode signature %q: %w", sig.ID, err)
 		}
 
-		if err := batch.Set(sigKey, data, pebble.Sync); err != nil {
+		if err := batch.Set(sigKey, buf.Bytes(), pebble.Sync); err != nil {
 			return fmt.Errorf("store signature %q: %w", sig.ID, err)
 		}
 
+		packedValue := encodeIndexValue(sig.ID, sig.EntropyScore, sig.EntropyTolerance)
+
 		topoKey := buildTopoIndexKey(sig.TopologyHash, sig.ID)
-		if err := batch.Set(topoKey, []byte(sig.ID), pebble.Sync); err != nil {
+		if err := batch.Set(topoKey, packedValue, pebble.Sync); err != nil {
 			return fmt.Errorf("index topology %q: %w", sig.ID, err)
 		}
 
 		if sig.FuzzyHash != "" {
 			fuzzyKey := buildFuzzyIndexKey(sig.FuzzyHash, sig.ID)
-			if err := batch.Set(fuzzyKey, []byte(sig.ID), pebble.Sync); err != nil {
+			if err := batch.Set(fuzzyKey, packedValue, pebble.Sync); err != nil {
 				return fmt.Errorf("index fuzzy hash %q: %w", sig.ID, err)
 			}
 		}
@@ -318,7 +382,6 @@ func (s *PebbleScanner) AddSignatures(sigs []Signature) error {
 
 // Removes a signature and its index entries atomically.
 func (s *PebbleScanner) DeleteSignature(id string) error {
-	// First, read the signature to get index keys
 	sigKey := buildSignatureKey(id)
 	data, closer, err := s.db.Get(sigKey)
 	if err != nil {
@@ -330,14 +393,14 @@ func (s *PebbleScanner) DeleteSignature(id string) error {
 	defer closer.Close()
 
 	var sig Signature
-	if err := json.Unmarshal(data, &sig); err != nil {
-		return fmt.Errorf("unmarshal signature %q: %w", id, err)
+	if err := decodeSignature(data, &sig); err != nil {
+		return fmt.Errorf("decode signature %q: %w", id, err)
 	}
 
 	batch := s.db.NewBatch()
 	defer batch.Close()
 
-	// Delete from indexes first using composite keys
+	// Delete from indexes
 	topoKey := buildTopoIndexKey(sig.TopologyHash, sig.ID)
 	if err := batch.Delete(topoKey, pebble.Sync); err != nil {
 		return fmt.Errorf("delete topology index %q: %w", id, err)
@@ -365,7 +428,6 @@ func (s *PebbleScanner) DeleteSignature(id string) error {
 
 // Updates a signature to record that it caused a false positive.
 func (s *PebbleScanner) MarkFalsePositive(id string, notes string) error {
-	// FIX: Added mutex lock to prevent race condition during Read-Modify-Write cycle
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -380,19 +442,20 @@ func (s *PebbleScanner) MarkFalsePositive(id string, notes string) error {
 	defer closer.Close()
 
 	var sig Signature
-	if err := json.Unmarshal(data, &sig); err != nil {
-		return fmt.Errorf("unmarshal signature %q: %w", id, err)
+	if err := decodeSignature(data, &sig); err != nil {
+		return fmt.Errorf("decode signature %q: %w", id, err)
 	}
 
 	fpNote := fmt.Sprintf("FP:%s:%s", time.Now().Format(time.RFC3339), notes)
 	sig.Metadata.References = append(sig.Metadata.References, fpNote)
 
-	updated, err := json.Marshal(sig)
-	if err != nil {
-		return fmt.Errorf("marshal updated signature %q: %w", id, err)
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	if err := enc.Encode(sig); err != nil {
+		return fmt.Errorf("encode updated signature %q: %w", id, err)
 	}
 
-	return s.db.Set(sigKey, updated, pebble.Sync)
+	return s.db.Set(sigKey, buf.Bytes(), pebble.Sync)
 }
 
 // READ PATH: Scanning (Hunter Phase)
@@ -401,7 +464,9 @@ func (s *PebbleScanner) MarkFalsePositive(id string, notes string) error {
 //   - Phase A (O(K)): Exact topology hash lookup (iterating collisions)
 //   - Phase B (O(K)): Fuzzy bucket index lookup (LSH lite)
 //
-// FIXED: Returns error if iteration fails instead of crashing.
+// OPTIMIZED:
+// 1. Reads packed index values to perform lightweight entropy filtering.
+// 2. Skips expensive database reads and decoding for candidates outside entropy tolerance.
 func (s *PebbleScanner) ScanTopology(topo *FunctionTopology, funcName string) ([]ScanResult, error) {
 	if topo == nil {
 		return nil, nil
@@ -418,11 +483,36 @@ func (s *PebbleScanner) ScanTopology(topo *FunctionTopology, funcName string) ([
 	var results []ScanResult
 	seen := make(map[string]bool)
 
+	// Helper to reduce code duplication in loop
+	processCandidate := func(idxValue []byte) {
+		sigID, sigScore, sigTol, isPacked := decodeIndexValue(idxValue)
+		if seen[sigID] {
+			return
+		}
+
+		// FAST FILTER: Check entropy distance before loading signature
+		// Only possible if index was packed (new format).
+		// If legacy, we must load to be safe.
+		if isPacked {
+			effectiveTol := sigTol
+			if effectiveTol == 0 {
+				effectiveTol = entropyTolerance
+			}
+			// Safe O(1) pruning without disk I/O
+			if math.Abs(sigScore-topo.EntropyScore) > effectiveTol {
+				// Skip expensive DB load and decode
+				return
+			}
+		}
+
+		seen[sigID] = true
+		if res := s.loadAndMatchPebble([]byte(sigID), topo, funcName, threshold, entropyTolerance); res != nil {
+			results = append(results, *res)
+		}
+	}
+
 	// --- PHASE 1: EXACT TOPOLOGY MATCH (O(K)) ---
-	// Use prefix scanning to handle multiple variants with the same topology hash.
 	topoPrefix := []byte(fmt.Sprintf("%s%s:", prefixIdxTopo, topoHash))
-	// NOTE: incrementLastByte returns nil if prefix overflows. Pebble treats nil UpperBound as "End of DB".
-	// We must rely on manual prefix checking in the loop if UpperBound is nil to prevent unbounded scans.
 	iter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: topoPrefix,
 		UpperBound: incrementLastByte(topoPrefix),
@@ -433,20 +523,10 @@ func (s *PebbleScanner) ScanTopology(topo *FunctionTopology, funcName string) ([
 	defer iter.Close()
 
 	for iter.First(); iter.Valid(); iter.Next() {
-		// SAFETY: Manual bound check required if UpperBound is nil (overflow case)
 		if !bytes.HasPrefix(iter.Key(), topoPrefix) {
 			break
 		}
-
-		sigID := string(iter.Value())
-		if seen[sigID] {
-			continue
-		}
-		seen[sigID] = true
-		// Pass thresholds to avoid locking inside loop
-		if res := s.loadAndMatchPebble([]byte(sigID), topo, funcName, threshold, entropyTolerance); res != nil {
-			results = append(results, *res)
-		}
+		processCandidate(iter.Value())
 	}
 
 	// --- PHASE 2: FUZZY BUCKET INDEX (LSH lite) ---
@@ -456,25 +536,15 @@ func (s *PebbleScanner) ScanTopology(topo *FunctionTopology, funcName string) ([
 		UpperBound: incrementLastByte(fuzzyPrefix),
 	})
 	if err != nil {
-		// Log error or return partial results? Returning error is safer.
 		return results, err
 	}
 	defer fuzzyIter.Close()
 
 	for fuzzyIter.First(); fuzzyIter.Valid(); fuzzyIter.Next() {
-		// SAFETY: Manual bound check
 		if !bytes.HasPrefix(fuzzyIter.Key(), fuzzyPrefix) {
 			break
 		}
-
-		sigID := string(fuzzyIter.Value())
-		if seen[sigID] {
-			continue
-		}
-		seen[sigID] = true
-		if res := s.loadAndMatchPebble([]byte(sigID), topo, funcName, threshold, entropyTolerance); res != nil {
-			results = append(results, *res)
-		}
+		processCandidate(fuzzyIter.Value())
 	}
 
 	// Sort by confidence (highest first)
@@ -486,7 +556,7 @@ func (s *PebbleScanner) ScanTopology(topo *FunctionTopology, funcName string) ([
 }
 
 // Loads a signature and matches it against the topology.
-// FIXED: Accepts thresholds as arguments to prevent deadlock and redundant locking.
+// OPTIMIZED: Uses dual-mode decoder (Gob/JSON).
 func (s *PebbleScanner) loadAndMatchPebble(sigID []byte, topo *FunctionTopology, funcName string, threshold, tolerance float64) *ScanResult {
 	sigKey := append(append([]byte(nil), prefixSignatures...), sigID...)
 	sigData, closer, err := s.db.Get(sigKey)
@@ -496,7 +566,7 @@ func (s *PebbleScanner) loadAndMatchPebble(sigID []byte, topo *FunctionTopology,
 	defer closer.Close()
 
 	var sig Signature
-	if err := json.Unmarshal(sigData, &sig); err != nil {
+	if err := decodeSignature(sigData, &sig); err != nil {
 		return nil
 	}
 
@@ -532,21 +602,31 @@ func (s *PebbleScanner) ScanTopologyExact(topo *FunctionTopology, funcName strin
 	defer iter.Close()
 
 	for iter.First(); iter.Valid(); iter.Next() {
-		// SAFETY: Manual bound check
 		if !bytes.HasPrefix(iter.Key(), topoPrefix) {
 			break
 		}
 
-		sigID := iter.Value()
-		sigKey := append(append([]byte(nil), prefixSignatures...), sigID...)
+		// Fast Filter Logic
+		sigID, sigScore, sigTol, isPacked := decodeIndexValue(iter.Value())
 
+		if isPacked {
+			effectiveTol := sigTol
+			if effectiveTol == 0 {
+				effectiveTol = tolerance
+			}
+			if math.Abs(sigScore-topo.EntropyScore) > effectiveTol {
+				continue
+			}
+		}
+
+		sigKey := append(append([]byte(nil), prefixSignatures...), []byte(sigID)...)
 		sigData, closer, err := s.db.Get(sigKey)
 		if err != nil {
 			continue
 		}
 
 		var sig Signature
-		if err := json.Unmarshal(sigData, &sig); err != nil {
+		if err := decodeSignature(sigData, &sig); err != nil {
 			closer.Close()
 			continue
 		}
@@ -577,8 +657,8 @@ func (s *PebbleScanner) GetSignature(id string) (*Signature, error) {
 	defer closer.Close()
 
 	sig := &Signature{}
-	if err := json.Unmarshal(data, sig); err != nil {
-		return nil, fmt.Errorf("unmarshal signature %q: %w", id, err)
+	if err := decodeSignature(data, sig); err != nil {
+		return nil, fmt.Errorf("decode signature %q: %w", id, err)
 	}
 	return sig, nil
 }
@@ -603,18 +683,18 @@ func (s *PebbleScanner) GetSignatureByTopology(topoHash string) (*Signature, err
 		return nil, fmt.Errorf("no signature with topology hash %q", topoHash)
 	}
 
-	sigID := iter.Value()
-	sigKey := append(append([]byte(nil), prefixSignatures...), sigID...)
+	sigID, _, _, _ := decodeIndexValue(iter.Value())
+	sigKey := append(append([]byte(nil), prefixSignatures...), []byte(sigID)...)
 
 	data, closer, err := s.db.Get(sigKey)
 	if err != nil {
-		return nil, fmt.Errorf("signature %q not found", string(sigID))
+		return nil, fmt.Errorf("signature %q not found", sigID)
 	}
 	defer closer.Close()
 
 	sig := &Signature{}
-	if err := json.Unmarshal(data, sig); err != nil {
-		return nil, fmt.Errorf("unmarshal signature: %w", err)
+	if err := decodeSignature(data, sig); err != nil {
+		return nil, fmt.Errorf("decode signature: %w", err)
 	}
 	return sig, nil
 }
@@ -632,7 +712,6 @@ func (s *PebbleScanner) CountSignatures() (int, error) {
 	defer iter.Close()
 
 	for iter.First(); iter.Valid(); iter.Next() {
-		// Safety check
 		if !bytes.HasPrefix(iter.Key(), prefixSignatures) {
 			break
 		}
@@ -654,12 +733,9 @@ func (s *PebbleScanner) ListSignatureIDs() ([]string, error) {
 	defer iter.Close()
 
 	for iter.First(); iter.Valid(); iter.Next() {
-		// Safety check
 		if !bytes.HasPrefix(iter.Key(), prefixSignatures) {
 			break
 		}
-
-		// Key format: "sig:ID" -> extract ID
 		key := iter.Key()
 		if len(key) > len(prefixSignatures) {
 			ids = append(ids, string(key[len(prefixSignatures):]))
@@ -672,6 +748,7 @@ func (s *PebbleScanner) ListSignatureIDs() ([]string, error) {
 
 // MigrateFromJSON imports signatures directly from a JSON file.
 // FIX: Uses streaming decoder to prevent OOM on large datasets.
+// NOTE: Reads JSON (external), Writes Gob (internal).
 func (s *PebbleScanner) MigrateFromJSON(jsonPath string) (int, error) {
 	f, err := os.Open(jsonPath)
 	if err != nil {
@@ -682,7 +759,6 @@ func (s *PebbleScanner) MigrateFromJSON(jsonPath string) (int, error) {
 	dec := json.NewDecoder(f)
 
 	// Navigate to the "signatures" array in the JSON object
-	// Expecting: { "signatures": [ ... ] }
 	t, err := dec.Token() // {
 	if err != nil {
 		return 0, fmt.Errorf("invalid json start: %w", err)
@@ -691,7 +767,6 @@ func (s *PebbleScanner) MigrateFromJSON(jsonPath string) (int, error) {
 	processed := 0
 	foundSigs := false
 
-	// Loop through top-level keys
 	for dec.More() {
 		t, err = dec.Token()
 		if err != nil {
@@ -709,7 +784,6 @@ func (s *PebbleScanner) MigrateFromJSON(jsonPath string) (int, error) {
 				return processed, err
 			}
 
-			// Batch signatures to optimize DB writes
 			batchSize := 1000
 			var batch []Signature
 
@@ -729,7 +803,6 @@ func (s *PebbleScanner) MigrateFromJSON(jsonPath string) (int, error) {
 				}
 			}
 
-			// Flush remaining
 			if len(batch) > 0 {
 				if err := s.AddSignatures(batch); err != nil {
 					return processed, fmt.Errorf("final batch import failed: %w", err)
@@ -737,13 +810,11 @@ func (s *PebbleScanner) MigrateFromJSON(jsonPath string) (int, error) {
 				processed += len(batch)
 			}
 
-			// Consume closing ]
-			t, err = dec.Token()
+			t, err = dec.Token() // ]
 			if err != nil {
-				// Non-fatal if we processed data
+				// Non-fatal
 			}
 		} else {
-			// Skip other fields
 			var ignore interface{}
 			dec.Decode(&ignore)
 		}
@@ -757,6 +828,7 @@ func (s *PebbleScanner) MigrateFromJSON(jsonPath string) (int, error) {
 }
 
 // ExportToJSON exports all signatures to a JSON file.
+// NOTE: Reads Gob (internal), Writes JSON (external).
 func (s *PebbleScanner) ExportToJSON(jsonPath string) error {
 	var sigs []Signature
 	iter, err := s.createSafeIterator(&pebble.IterOptions{
@@ -773,19 +845,18 @@ func (s *PebbleScanner) ExportToJSON(jsonPath string) error {
 			break
 		}
 		var sig Signature
-		if err := json.Unmarshal(iter.Value(), &sig); err != nil {
+		if err := decodeSignature(iter.Value(), &sig); err != nil {
 			return fmt.Errorf("corrupt signature data: %w", err)
 		}
 		sigs = append(sigs, sig)
 	}
 
-	// Wrap in the standard schema
 	export := struct {
 		Version    string      `json:"version"`
 		Generated  time.Time   `json:"generated_at"`
 		Signatures []Signature `json:"signatures"`
 	}{
-		Version:    "2.0 (Pebble)",
+		Version:    "2.1 (Pebble/Gob+PackedIdx)",
 		Generated:  time.Now(),
 		Signatures: sigs,
 	}
@@ -804,11 +875,6 @@ func (s *PebbleScanner) ExportToJSON(jsonPath string) error {
 
 // -- HELPER FUNCTIONS --
 
-// Returns a byte slice that is just past the given prefix.
-// This is used for Pebble's UpperBound to create exclusive prefix scans.
-// Warning: Returns nil if the prefix cannot be incremented (e.g. all 0xff).
-// A nil UpperBound in Pebble means "no upper bound". Callers must ensure
-// they verify the prefix when iterating if UpperBound could be nil.
 func incrementLastByte(prefix []byte) []byte {
 	if len(prefix) == 0 {
 		return nil
@@ -822,12 +888,9 @@ func incrementLastByte(prefix []byte) []byte {
 		}
 		result[i] = 0
 	}
-	// All bytes were 0xff, return nil to indicate unbounded
 	return nil
 }
 
-// FIXED: Removed internal lock acquisition to prevent deadlocks.
-// Accepted thresholds as arguments.
 func (s *PebbleScanner) matchSignaturePebble(topo *FunctionTopology, funcName string, sig Signature, tolerance float64) ScanResult {
 	result := ScanResult{
 		SignatureID:     sig.ID,
@@ -850,7 +913,6 @@ func (s *PebbleScanner) matchSignaturePebble(topo *FunctionTopology, funcName st
 		scores = append(scores, similarity)
 	}
 
-	// Use passed tolerance instead of locking to read s.entropyTolerance
 	sigTol := sig.EntropyTolerance
 	if sigTol == 0 {
 		sigTol = tolerance
@@ -900,8 +962,8 @@ func (s *PebbleScanner) matchSignaturePebble(topo *FunctionTopology, funcName st
 // -- DATABASE MAINTENANCE --
 
 // Recreates all indexes from master signature records.
+// IMPORTANT: Reads legacy or Gob records and writes Packed index values.
 func (s *PebbleScanner) RebuildIndexes() error {
-	// First, collect all signatures
 	var sigs []Signature
 	iter, err := s.createSafeIterator(&pebble.IterOptions{
 		LowerBound: prefixSignatures,
@@ -916,9 +978,9 @@ func (s *PebbleScanner) RebuildIndexes() error {
 			break
 		}
 		var sig Signature
-		if err := json.Unmarshal(iter.Value(), &sig); err != nil {
+		if err := decodeSignature(iter.Value(), &sig); err != nil {
 			iter.Close()
-			return fmt.Errorf("unmarshal signature: %w", err)
+			return fmt.Errorf("decode signature: %w", err)
 		}
 		sigs = append(sigs, sig)
 	}
@@ -928,61 +990,38 @@ func (s *PebbleScanner) RebuildIndexes() error {
 	batch := s.db.NewBatch()
 	defer batch.Close()
 
-	// Delete topology index entries
-	topoIter, err := s.createSafeIterator(&pebble.IterOptions{
-		LowerBound: prefixIdxTopo,
-		UpperBound: incrementLastByte(prefixIdxTopo),
-	})
-	if err == nil {
-		for topoIter.First(); topoIter.Valid(); topoIter.Next() {
-			if !bytes.HasPrefix(topoIter.Key(), prefixIdxTopo) {
-				break
+	cleanupPrefix := func(prefix []byte) {
+		it, err := s.createSafeIterator(&pebble.IterOptions{
+			LowerBound: prefix,
+			UpperBound: incrementLastByte(prefix),
+		})
+		if err == nil {
+			for it.First(); it.Valid(); it.Next() {
+				if !bytes.HasPrefix(it.Key(), prefix) {
+					break
+				}
+				batch.Delete(it.Key(), pebble.Sync)
 			}
-			batch.Delete(topoIter.Key(), pebble.Sync)
+			it.Close()
 		}
-		topoIter.Close()
 	}
 
-	// Delete fuzzy index entries
-	fuzzyIter, err := s.createSafeIterator(&pebble.IterOptions{
-		LowerBound: prefixIdxFuzzy,
-		UpperBound: incrementLastByte(prefixIdxFuzzy),
-	})
-	if err == nil {
-		for fuzzyIter.First(); fuzzyIter.Valid(); fuzzyIter.Next() {
-			if !bytes.HasPrefix(fuzzyIter.Key(), prefixIdxFuzzy) {
-				break
-			}
-			batch.Delete(fuzzyIter.Key(), pebble.Sync)
-		}
-		fuzzyIter.Close()
-	}
-
-	// Delete entropy index entries
-	entropyIter, err := s.createSafeIterator(&pebble.IterOptions{
-		LowerBound: prefixIdxEntropy,
-		UpperBound: incrementLastByte(prefixIdxEntropy),
-	})
-	if err == nil {
-		for entropyIter.First(); entropyIter.Valid(); entropyIter.Next() {
-			if !bytes.HasPrefix(entropyIter.Key(), prefixIdxEntropy) {
-				break
-			}
-			batch.Delete(entropyIter.Key(), pebble.Sync)
-		}
-		entropyIter.Close()
-	}
+	cleanupPrefix(prefixIdxTopo)
+	cleanupPrefix(prefixIdxFuzzy)
+	cleanupPrefix(prefixIdxEntropy)
 
 	// Rebuild indexes
 	for _, sig := range sigs {
+		packedValue := encodeIndexValue(sig.ID, sig.EntropyScore, sig.EntropyTolerance)
+
 		topoKey := buildTopoIndexKey(sig.TopologyHash, sig.ID)
-		if err := batch.Set(topoKey, []byte(sig.ID), pebble.Sync); err != nil {
+		if err := batch.Set(topoKey, packedValue, pebble.Sync); err != nil {
 			return err
 		}
 
 		if sig.FuzzyHash != "" {
 			fuzzyKey := buildFuzzyIndexKey(sig.FuzzyHash, sig.ID)
-			if err := batch.Set(fuzzyKey, []byte(sig.ID), pebble.Sync); err != nil {
+			if err := batch.Set(fuzzyKey, packedValue, pebble.Sync); err != nil {
 				return err
 			}
 		}
@@ -997,7 +1036,6 @@ func (s *PebbleScanner) RebuildIndexes() error {
 }
 
 // Triggers a manual compaction to reclaim space.
-// Pebble handles compaction automatically, but this can be useful after bulk deletes.
 func (s *PebbleScanner) Compact() error {
 	return s.db.Compact(nil, []byte{0xff}, true)
 }
@@ -1015,71 +1053,30 @@ type PebbleScannerStats struct {
 func (s *PebbleScanner) Stats() (*PebbleScannerStats, error) {
 	stats := &PebbleScannerStats{}
 
-	// Count signatures
-	sigIter, err := s.createSafeIterator(&pebble.IterOptions{
-		LowerBound: prefixSignatures,
-		UpperBound: incrementLastByte(prefixSignatures),
-	})
-	if err != nil {
-		return nil, err
-	}
-	for sigIter.First(); sigIter.Valid(); sigIter.Next() {
-		if !bytes.HasPrefix(sigIter.Key(), prefixSignatures) {
-			break
+	countPrefix := func(prefix []byte) int {
+		c := 0
+		iter, err := s.createSafeIterator(&pebble.IterOptions{
+			LowerBound: prefix,
+			UpperBound: incrementLastByte(prefix),
+		})
+		if err != nil {
+			return 0
 		}
-		stats.SignatureCount++
-	}
-	sigIter.Close()
-
-	// Count topology index entries
-	topoIter, err := s.createSafeIterator(&pebble.IterOptions{
-		LowerBound: prefixIdxTopo,
-		UpperBound: incrementLastByte(prefixIdxTopo),
-	})
-	if err != nil {
-		return nil, err
-	}
-	for topoIter.First(); topoIter.Valid(); topoIter.Next() {
-		if !bytes.HasPrefix(topoIter.Key(), prefixIdxTopo) {
-			break
+		for iter.First(); iter.Valid(); iter.Next() {
+			if !bytes.HasPrefix(iter.Key(), prefix) {
+				break
+			}
+			c++
 		}
-		stats.TopoIndexCount++
+		iter.Close()
+		return c
 	}
-	topoIter.Close()
 
-	// Count fuzzy index entries
-	fuzzyIter, err := s.createSafeIterator(&pebble.IterOptions{
-		LowerBound: prefixIdxFuzzy,
-		UpperBound: incrementLastByte(prefixIdxFuzzy),
-	})
-	if err != nil {
-		return nil, err
-	}
-	for fuzzyIter.First(); fuzzyIter.Valid(); fuzzyIter.Next() {
-		if !bytes.HasPrefix(fuzzyIter.Key(), prefixIdxFuzzy) {
-			break
-		}
-		stats.FuzzyIndexCount++
-	}
-	fuzzyIter.Close()
+	stats.SignatureCount = countPrefix(prefixSignatures)
+	stats.TopoIndexCount = countPrefix(prefixIdxTopo)
+	stats.FuzzyIndexCount = countPrefix(prefixIdxFuzzy)
+	stats.EntropyIndexCount = countPrefix(prefixIdxEntropy)
 
-	// Count entropy index entries
-	entropyIter, err := s.createSafeIterator(&pebble.IterOptions{
-		LowerBound: prefixIdxEntropy,
-		UpperBound: incrementLastByte(prefixIdxEntropy),
-	})
-	if err != nil {
-		return nil, err
-	}
-	for entropyIter.First(); entropyIter.Valid(); entropyIter.Next() {
-		if !bytes.HasPrefix(entropyIter.Key(), prefixIdxEntropy) {
-			break
-		}
-		stats.EntropyIndexCount++
-	}
-	entropyIter.Close()
-
-	// Get disk metrics from Pebble
 	metrics := s.db.Metrics()
 	stats.DiskSpaceUsed = int64(metrics.DiskSpaceUsage())
 
@@ -1089,11 +1086,9 @@ func (s *PebbleScanner) Stats() (*PebbleScannerStats, error) {
 // -- ENTROPY RANGE SCANNING -- (Advanced Feature)
 
 // Finds signatures within an entropy score range.
-// Useful for identifying suspicious functions based on behavioral entropy patterns.
 func (s *PebbleScanner) ScanByEntropyRange(minEntropy, maxEntropy float64) ([]Signature, error) {
 	var results []Signature
 
-	// Build range keys
 	minKey := []byte(fmt.Sprintf("%s%08.4f:", prefixIdxEntropy, minEntropy))
 	maxKey := []byte(fmt.Sprintf("%s%08.4f:", prefixIdxEntropy, maxEntropy+0.0001))
 
@@ -1127,13 +1122,11 @@ func (s *PebbleScanner) ScanByEntropyRange(minEntropy, maxEntropy float64) ([]Si
 // -- SNAPSHOT & CHECKPOINT -- (For CI/CD Integration)
 
 // Creates a durable snapshot of the database.
-// Returns after all data is flushed to disk.
 func (s *PebbleScanner) Checkpoint() error {
 	return s.db.Flush()
 }
 
 // Returns a read only snapshot of the database at a point in time.
-// The returned snapshot must be closed when done.
 func (s *PebbleScanner) GetSnapshot() *pebble.Snapshot {
 	return s.db.NewSnapshot()
 }
@@ -1169,12 +1162,24 @@ func (s *PebbleScanner) ScanTopologyWithSnapshot(snap *pebble.Snapshot, topo *Fu
 		if !bytes.HasPrefix(iter.Key(), topoPrefix) {
 			break
 		}
-		sigID := string(iter.Value())
+
+		// Decode packed index
+		sigID, sigScore, sigTol, isPacked := decodeIndexValue(iter.Value())
 		if seen[sigID] {
 			continue
 		}
-		seen[sigID] = true
 
+		if isPacked {
+			effectiveTol := sigTol
+			if effectiveTol == 0 {
+				effectiveTol = tolerance
+			}
+			if math.Abs(sigScore-topo.EntropyScore) > effectiveTol {
+				continue
+			}
+		}
+
+		seen[sigID] = true
 		sigKey := append(append([]byte(nil), prefixSignatures...), []byte(sigID)...)
 		sigData, closer, err := snap.Get(sigKey)
 		if err != nil {
@@ -1182,7 +1187,7 @@ func (s *PebbleScanner) ScanTopologyWithSnapshot(snap *pebble.Snapshot, topo *Fu
 		}
 
 		var sig Signature
-		if err := json.Unmarshal(sigData, &sig); err != nil {
+		if err := decodeSignature(sigData, &sig); err != nil {
 			closer.Close()
 			continue
 		}
@@ -1209,12 +1214,22 @@ func (s *PebbleScanner) ScanTopologyWithSnapshot(snap *pebble.Snapshot, topo *Fu
 		if !bytes.HasPrefix(fuzzyIter.Key(), fuzzyPrefix) {
 			break
 		}
-		sigID := string(fuzzyIter.Value())
+		sigID, sigScore, sigTol, isPacked := decodeIndexValue(fuzzyIter.Value())
 		if seen[sigID] {
 			continue
 		}
-		seen[sigID] = true
 
+		if isPacked {
+			effectiveTol := sigTol
+			if effectiveTol == 0 {
+				effectiveTol = tolerance
+			}
+			if math.Abs(sigScore-topo.EntropyScore) > effectiveTol {
+				continue
+			}
+		}
+
+		seen[sigID] = true
 		sigKey := append(append([]byte(nil), prefixSignatures...), []byte(sigID)...)
 		sigData, closer, err := snap.Get(sigKey)
 		if err != nil {
@@ -1222,7 +1237,7 @@ func (s *PebbleScanner) ScanTopologyWithSnapshot(snap *pebble.Snapshot, topo *Fu
 		}
 
 		var sig Signature
-		if err := json.Unmarshal(sigData, &sig); err != nil {
+		if err := decodeSignature(sigData, &sig); err != nil {
 			closer.Close()
 			continue
 		}
@@ -1245,11 +1260,9 @@ func (s *PebbleScanner) ScanTopologyWithSnapshot(snap *pebble.Snapshot, topo *Fu
 // -- BATCH SCANNING -- (Optimized for CI/CD Pipelines)
 
 // Scans multiple topologies efficiently using parallel lookups.
-// Returns a map from function name to scan results.
 func (s *PebbleScanner) ScanBatch(topologies map[string]*FunctionTopology) map[string][]ScanResult {
 	results := make(map[string][]ScanResult)
 
-	// Take a snapshot for consistent reads across all scans
 	snap := s.db.NewSnapshot()
 	defer snap.Close()
 
@@ -1270,28 +1283,24 @@ func (s *PebbleScanner) ScanBatch(topologies map[string]*FunctionTopology) map[s
 
 // DatabaseMetadata contains information about the signature database.
 type DatabaseMetadata struct {
-	Version        string            `json:"version"`          // Semantic version of the database schema
-	Description    string            `json:"description"`      // Human readable description
-	CreatedAt      time.Time         `json:"created_at"`       // When the database was created
-	LastUpdatedAt  time.Time         `json:"last_updated_at"`  // Last modification time
-	SignatureCount int               `json:"signature_count"`  // Cached count (for quick access)
-	SourceHash     string            `json:"source_hash"`      // Hash of source signatures.json (for drift detection)
-	Custom         map[string]string `json:"custom,omitempty"` // User defined metadata
+	Version        string            `json:"version"`
+	Description    string            `json:"description"`
+	CreatedAt      time.Time         `json:"created_at"`
+	LastUpdatedAt  time.Time         `json:"last_updated_at"`
+	SignatureCount int               `json:"signature_count"`
+	SourceHash     string            `json:"source_hash"`
+	Custom         map[string]string `json:"custom,omitempty"`
 }
 
-// Returns the key for a metadata entry.
 func buildMetaKey(key string) []byte {
 	return append(append([]byte(nil), prefixMeta...), []byte(key)...)
 }
 
-// Stores a metadata key value pair.
-// Common keys: "version", "description", "last_updated", "source_hash"
 func (s *PebbleScanner) SetMetadata(key, value string) error {
 	metaKey := buildMetaKey(key)
 	return s.db.Set(metaKey, []byte(value), pebble.Sync)
 }
 
-// Retrieves a metadata value by key.
 func (s *PebbleScanner) GetMetadata(key string) (string, error) {
 	metaKey := buildMetaKey(key)
 	data, closer, err := s.db.Get(metaKey)
@@ -1305,14 +1314,11 @@ func (s *PebbleScanner) GetMetadata(key string) (string, error) {
 	return string(data), nil
 }
 
-// Removes a metadata key.
 func (s *PebbleScanner) DeleteMetadata(key string) error {
 	metaKey := buildMetaKey(key)
 	return s.db.Delete(metaKey, pebble.Sync)
 }
 
-// Returns all metadata as a DatabaseMetadata struct.
-// Falls back to defaults for missing fields.
 func (s *PebbleScanner) GetAllMetadata() (*DatabaseMetadata, error) {
 	meta := &DatabaseMetadata{
 		Custom: make(map[string]string),
@@ -1352,14 +1358,12 @@ func (s *PebbleScanner) GetAllMetadata() (*DatabaseMetadata, error) {
 		iter.Close()
 	}
 
-	// Get current signature count
 	count, _ := s.CountSignatures()
 	meta.SignatureCount = count
 
 	return meta, nil
 }
 
-// Stores all fields from a DatabaseMetadata struct.
 func (s *PebbleScanner) SetAllMetadata(meta *DatabaseMetadata) error {
 	batch := s.db.NewBatch()
 	defer batch.Close()
@@ -1386,7 +1390,6 @@ func (s *PebbleScanner) SetAllMetadata(meta *DatabaseMetadata) error {
 	return batch.Commit(pebble.Sync)
 }
 
-// Sets up default metadata for a new database.
 func (s *PebbleScanner) InitializeMetadata(version, description string) error {
 	now := time.Now()
 	meta := &DatabaseMetadata{
@@ -1398,7 +1401,6 @@ func (s *PebbleScanner) InitializeMetadata(version, description string) error {
 	return s.SetAllMetadata(meta)
 }
 
-// Updates the last_updated_at timestamp to now.
 func (s *PebbleScanner) TouchLastUpdated() error {
 	return s.SetMetadata("last_updated_at", time.Now().Format(time.RFC3339))
 }
