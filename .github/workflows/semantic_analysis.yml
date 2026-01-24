@@ -25,8 +25,7 @@ jobs:
 
       # Install the tool 
       - name: Install SFW
-        run: go install github.com/BlackVectorOps/semantic_firewall/v2/cmd/sfw@v2.2.1
-
+        run: go install ./cmd/sfw
       # Make BLOCKER mode reachable for PRs and check mode for pushes
       - name: Determine Mode
         id: mode
@@ -103,7 +102,7 @@ jobs:
               mkdir -p "$TEMP_DIR/$DIR_PATH"
               TEMP_OLD="$TEMP_DIR/$OLD_FILE_REF"
               
-              if git show "$BASE_SHA:$OLD_FILE_REF" > "$TEMP_OLD" 2>/dev/null; then
+              if git show "$BASE_SHA:$OLD_FILE_REF" > "$TEMP_OLD"; then
                   OLD_FILE="$TEMP_OLD"
               else
                   OLD_FILE="/dev/null"

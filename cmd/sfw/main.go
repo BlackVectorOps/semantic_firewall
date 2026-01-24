@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	semanticfw "github.com/BlackVectorOps/semantic_firewall/v2"
 )
 
 // -- Main Entry Point --
@@ -41,13 +43,14 @@ Commands:
   scan    Scan target code for malware signatures (Hunter Phase)
   migrate Migrate legacy JSON database to PebbleDB format
   stats   Display database statistics
-
+  version Display CLI and Engine version
 Examples:
   sfw check ./cmd/app
   sfw diff old.go new.go
   sfw audit old.go new.go "fix typo" --api-key sk-...
   sfw index malware.go --name "Beacon_v1" --severity CRITICAL
   sfw scan ./src --db signatures.db
+  sfw version
 `)
 	}
 
@@ -205,7 +208,10 @@ Examples:
 		if err := runStats(resolveDBPath(*statsDB)); err != nil {
 			exitError(err)
 		}
-
+	case "version":
+		fmt.Println("Semantic Firewall CLI")
+		// Automatically pulls "v2.4.1" from the build tag, or "(devel)" if running locally
+		fmt.Printf("Build: %s\n", semanticfw.EngineVersion())
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
 		if suggestion := suggestCommand(cmd); suggestion != "" {
