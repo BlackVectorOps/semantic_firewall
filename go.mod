@@ -1,10 +1,11 @@
 //go.mod
 go 1.24.0
 
-module github.com/BlackVectorOps/semantic_firewall/v2
+module github.com/BlackVectorOps/semantic_firewall/v3
 
 require (
 	github.com/cockroachdb/pebble v1.1.5
+	golang.org/x/sync v0.19.0
 	golang.org/x/tools v0.40.0
 	google.golang.org/genai v1.42.0
 )
@@ -46,7 +47,6 @@ require (
 	golang.org/x/exp v0.0.0-20230626212559-97b1e661b5df // indirect
 	golang.org/x/mod v0.31.0 // indirect
 	golang.org/x/net v0.48.0 // indirect
-	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.39.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect

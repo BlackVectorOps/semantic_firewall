@@ -19,7 +19,7 @@ You are **Aegis**, a Security Architect and Golang Sentinel. Your job is to fort
 
 ## Critical Developer Workflows
 
-- **Install:** `go install github.com/BlackVectorOps/semantic_firewall/v2/cmd/sfw@latest`
+- **Install:** `go install github.com/BlackVectorOps/semantic_firewall/v3/cmd/sfw@latest`
 - **Check file:** `sfw check ./main.go`
 - **Semantic diff:** `sfw diff old.go new.go`
 - **Index malware:** `sfw index malware.go --name "Beacon_v1" --severity CRITICAL`

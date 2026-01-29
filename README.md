@@ -5,7 +5,7 @@
 
 ### Next-Gen Code Integrity & Malware Detection for Go
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/BlackVectorOps/semantic_firewall.svg)](https://pkg.go.dev/github.com/BlackVectorOps/semantic_firewall/v2)
+[![Go Reference](https://pkg.go.dev/badge/github.com/BlackVectorOps/semantic_firewall.svg)](https://pkg.go.dev/github.com/BlackVectorOps/semantic_firewall/v3)
 [![License: MIT](https://img.shields.io/badge/License-MIT-00d4aa.svg)](LICENSE)
 [![Marketplace](https://img.shields.io/badge/Marketplace-Semantic_Firewall-7c3aed.svg)](https://github.com/marketplace/actions/semantic-firewall)
 [![Semantic Check](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic-check.yml/badge.svg)](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic-check.yml)
@@ -66,7 +66,7 @@
 ## Getting Started
 
 ```bash
-go install github.com/BlackVectorOps/semantic_firewall/v2/cmd/sfw@latest
+go install github.com/BlackVectorOps/semantic_firewall/v3/cmd/sfw@latest
 ```
 
 
@@ -241,7 +241,7 @@ jobs:
       - uses: actions/checkout@v3
       - name: Run Semantic Firewall
         run: |
-          go install github.com/BlackVectorOps/semantic_firewall/v2/cmd/sfw@latest
+          go install github.com/BlackVectorOps/semantic_firewall/v3/cmd/sfw@latest
           sfw diff old.go new.go
           sfw scan . --deps
 ```
@@ -692,7 +692,7 @@ Functions are matched by their **structural fingerprint** (block count, call pro
 ### Fingerprinting
 
 ```go
-import semanticfw "github.com/BlackVectorOps/semantic_firewall/v2"
+import semanticfw "github.com/BlackVectorOps/semantic_firewall/v3"
 
 src := `package main
 func Add(a, b int) int { return a + b }
@@ -711,7 +711,7 @@ for _, r := range results {
 ### Malware Scanning with BoltDB
 
 ```go
-import semanticfw "github.com/BlackVectorOps/semantic_firewall/v2"
+import semanticfw "github.com/BlackVectorOps/semantic_firewall/v3"
 
 // Open the signature database
 scanner, err := semanticfw.NewBoltScanner("signatures.db", semanticfw.DefaultBoltScannerOptions())
@@ -739,7 +739,7 @@ for _, alert := range alerts {
 ### Topology Extraction
 
 ```go
-import semanticfw "github.com/BlackVectorOps/semantic_firewall/v2"
+import semanticfw "github.com/BlackVectorOps/semantic_firewall/v3"
 
 // Extract structural features from an SSA function
 topo := semanticfw.ExtractTopology(ssaFunction)

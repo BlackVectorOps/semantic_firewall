@@ -61,8 +61,15 @@ jobs:
           mkdir -p "$TEMP_DIR"
           
           cp go.mod go.sum "$TEMP_DIR/" 2>/dev/null || true
+          
+          # Check for runsc/gVisor. If missing, use --no-sandbox to prevent hard failure.
+          SANDBOX_OPT=""
+          if ! command -v runsc &> /dev/null; then
+            echo "::notice::runsc not found. Using --no-sandbox."
+            SANDBOX_OPT="--no-sandbox"
+          fi
 
-          # FIX: Robust Diff Handling for Renames
+          #  Robust Diff Handling for Renames
           # Original used --name-only which broke on renames (treating them as del+add)
           # We use --name-status -z to parse strict file moves.
           
@@ -110,7 +117,8 @@ jobs:
 
               if [[ "$NEW_FILE" == "/dev/null" ]] && [[ "$OLD_FILE" == "/dev/null" ]]; then continue; fi
               
-              if ! OUTPUT=$(sfw diff "$OLD_FILE" "$NEW_FILE"); then
+              # AUDIT FIX: Applied SANDBOX_OPT
+              if ! OUTPUT=$(sfw diff $SANDBOX_OPT "$OLD_FILE" "$NEW_FILE"); then
                   echo "::error::sfw failed on $NEW_FILE_REF"
                   continue
               fi

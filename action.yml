@@ -85,7 +85,7 @@ runs:
         echo "::notice::Installing sfw from remote registry..."
         # Pinned version preventing supply chain attacks (@latest removed)
         # Removed "Dogfooding" implicit build logic (RCE Vector)
-        go install github.com/BlackVectorOps/semantic_firewall/v2/cmd/sfw@v2.2.1
+        go install github.com/BlackVectorOps/semantic_firewall/v3/cmd/sfw@v2.2.1
 
     - name: Run Semantic Firewall
       id: run-sfw
@@ -115,6 +115,14 @@ runs:
           INPUT_PATH="./$INPUT_PATH"
         fi
 
+        # Check for runsc (gVisor). If missing, soft-fail to --no-sandbox mode
+        # to prevent lookPathFunc hard failures in standard CI environments.
+        SANDBOX_OPT=""
+        if ! command -v runsc &> /dev/null; then
+          echo "::warning::runsc (gVisor) not found. Falling back to --no-sandbox mode."
+          SANDBOX_OPT="--no-sandbox"
+        fi
+
         echo "::group::Semantic Firewall ($INPUT_MODE mode)"
 
         EXIT_CODE=0
@@ -125,7 +133,7 @@ runs:
             if [[ "$INPUT_STRICT" == "true" ]]; then
               STRICT_FLAG="--strict"
             fi
-            OUTPUT=$(sfw check $STRICT_FLAG -- "$INPUT_PATH")
+            OUTPUT=$(sfw check $STRICT_FLAG $SANDBOX_OPT -- "$INPUT_PATH")
             echo "$OUTPUT"
             ;;
 
@@ -190,7 +198,7 @@ runs:
 
               # Run Diff
               # captures only stdout to avoid JSON corruption from logs
-              DIFF_OUT=$(sfw diff "$OLD_FILE" "$NEW_FILE" 2>/dev/null || echo '{}')
+              DIFF_OUT=$(sfw diff $SANDBOX_OPT "$OLD_FILE" "$NEW_FILE" 2>/dev/null || echo '{}')
 
               # append to stream file
               echo "$DIFF_OUT" >> "$STREAM_FILE"
@@ -270,6 +278,10 @@ runs:
               if [[ -n "$INPUT_API_BASE" ]]; then
                  AUDIT_ARGS+=("--api-base" "$INPUT_API_BASE")
               fi
+              
+              if [[ -n "$SANDBOX_OPT" ]]; then
+                 AUDIT_ARGS+=("$SANDBOX_OPT")
+              fi
 
               # sfw audit returns 0 on MATCH/SUSPICIOUS, 1 on LIE/ERROR
               set +e
@@ -278,6 +290,17 @@ runs:
               set -e
 
               echo "$AUDIT_OUT"
+
+              # AUDIT FIX: Logic Fail-Open Mitigation
+              # If sfw audit returns 0 (Pass) but output implies an internal error (e.g., json unmarshal failure),
+              # we must treat it as a failure (Fail-Closed).
+              if [[ $CMD_EXIT -eq 0 ]]; then
+                 # Check for common Go JSON errors or empty output which might indicate crash
+                 if [[ -z "$AUDIT_OUT" ]] || echo "$AUDIT_OUT" | grep -qE "json: error|unexpected end of JSON|invalid character"; then
+                    echo "::error file=$file::Internal Audit Error Detected (Unmarshaling or Crash). Failing closed."
+                    CMD_EXIT=1
+                 fi
+              fi
 
               if [[ $CMD_EXIT -ne 0 ]]; then
                  echo "::error file=$file::Deception Detected! Verdict: LIE"
@@ -306,13 +329,24 @@ runs:
               DEPS_ARGS+=("--deps-depth" "$INPUT_DEPS_DEPTH")
             fi
 
-            if [[ ! -f "$INPUT_SIGNATURES" ]]; then
+            #  Check -e instead of -f to support PebbleDB directories
+            if [[ ! -e "$INPUT_SIGNATURES" ]]; then
               # SECURITY FIX: Fail closed if database is missing
               echo "::error::Signature database not found at $INPUT_SIGNATURES"
               exit 1
             else
-              OUTPUT=$(sfw scan --db "$INPUT_SIGNATURES" --threshold "$INPUT_THRESHOLD" "${DEPS_ARGS[@]}" -- "$INPUT_PATH")
+              # : PebbleDB Locking and Concurrency
+              # Copy the signature database to a temporary location to ensure
+              # unique access if multiple jobs/processes run in parallel.
+              TEMP_DB="sfw_sigs_copy_$$"
+              cp -R "$INPUT_SIGNATURES" "$TEMP_DB"
+
+              # Applied SANDBOX_OPT and used TEMP_DB
+              OUTPUT=$(sfw scan $SANDBOX_OPT --db "$TEMP_DB" --threshold "$INPUT_THRESHOLD" "${DEPS_ARGS[@]}" -- "$INPUT_PATH")
               echo "$OUTPUT"
+
+              # Cleanup temporary DB copy
+              rm -rf "$TEMP_DB"
 
               # jq -r checks for null to prevent pipe failures
               ALERT_COUNT=$(echo "$OUTPUT" | jq -r '.summary.total_alerts // 0')
