@@ -46,7 +46,8 @@
 - **Malware & backdoor detection**: Find threats by structure, not just by name or hash.
 - **Risk-aware diffs**: Instantly see if a PR adds risky logic, not just lines changed.
 - **Obfuscation & entropy analysis**: Spot packed or encrypted payloads.
-- **Zero-config persistent database**: Fast, scalable, and easy to use.
+- **Zero-config persistent database**: Fast, scalable PebbleDB backend.
+- **gVisor Sandboxing**: Isolated execution for untrusted code analysis.
 
 <details>
 <summary><strong>See full feature table</strong></summary>
@@ -58,6 +59,7 @@
 | **Malware Indexing** | Store and hunt for known malware patterns |
 | **Obfuscation Detection** | Flags suspiciously complex or packed code |
 | **Dependency Scanning** | Scans your code and all its dependencies |
+| **gVisor Isolation** | Sandboxed execution via runsc for defense-in-depth |
 
 </details>
 
@@ -141,7 +143,7 @@ sfw stats
 ```json
 {
   "target": "./suspicious/",
-  "backend": "boltdb",
+  "backend": "pebbledb",
   "total_functions_scanned": 47,
   "alerts": [
     {
@@ -256,7 +258,7 @@ jobs:
 |---------|---------|-----------------|-------|
 | `sfw check` | Generate semantic fingerprints | O(N) | O(N) |
 | `sfw diff` | Semantic delta via Zipper algorithm | O(I) | O(I) |
-| `sfw index` | Index malware samples into BoltDB | O(N) | O(1) per sig |
+| `sfw index` | Index malware samples into PebbleDB | O(N) | O(1) per sig |
 | `sfw scan` | Hunt malware via topology matching | **O(1) exact** / O(M) fuzzy | O(M) |
 | `sfw migrate` | Migrate JSON signatures to PebbleDB | O(S) | O(S) |
 | `sfw stats` | Display database statistics | O(1) | O(1) |
@@ -267,12 +269,12 @@ Where N = source size, I = instructions, S = signatures, M = signatures in entro
 ### Command Details
 
 ```bash
-sfw check [--strict] [--scan --db <path>] <file.go|directory>
+sfw check [--strict] [--scan --db <path>] [--no-sandbox] <file.go|directory>
 ```
-Generate semantic fingerprints. Use `--strict` for validation mode. Use `--scan` to enable unified security scanning during fingerprinting.
+Generate semantic fingerprints. Use `--strict` for validation mode. Use `--scan` to enable unified security scanning during fingerprinting. Use `--no-sandbox` to disable gVisor isolation.
 
 ```bash
-sfw diff <old.go> <new.go>
+sfw diff [--no-sandbox] <old.go> <new.go>
 ```
 Compute semantic delta using the Zipper algorithm with topology-based function matching. Outputs risk scores and structural deltas.
 
@@ -282,9 +284,9 @@ sfw index <file.go> --name <name> --severity <CRITICAL|HIGH|MEDIUM|LOW> [--categ
 Index a reference malware sample. Generates topology hash, fuzzy hash, and entropy score.
 
 ```bash
-sfw scan <file.go|directory> [--db <path>] [--threshold <0.0-1.0>] [--exact] [--deps] [--deps-depth <direct|transitive>]
+sfw scan <file.go|directory> [--db <path>] [--threshold <0.0-1.0>] [--exact] [--deps] [--deps-depth <direct|transitive>] [--no-sandbox]
 ```
-Scan target code for malware signatures. Use `--exact` for O(1) topology-only matching. Use `--deps` to scan imported dependencies.
+Scan target code for malware signatures. Use `--exact` for O(1) topology-only matching. Use `--deps` to scan imported dependencies. Use `--no-sandbox` to disable gVisor isolation.
 
 ```bash
 sfw migrate --from <json> --to <db>
@@ -292,9 +294,33 @@ sfw migrate --from <json> --to <db>
 Migrate legacy JSON database to PebbleDB format for O(1) lookups.
 
 ```bash
-sfw audit <old.go> <new.go> "<commit message>" [--api-key <key>]
+sfw audit <old.go> <new.go> "<commit message>" [--api-key <key>] [--model <model>]
 ```
-Verify if a commit message matches the structural code changes. Uses an LLM to detect deception (e.g., hiding a backdoor in a "typo fix").
+Verify if a commit message matches the structural code changes. Uses an LLM (default: gpt-4o, supports gemini-1.5-pro) to detect deception (e.g., hiding a backdoor in a "typo fix"). API key can also be set via `OPENAI_API_KEY` or `GEMINI_API_KEY` environment variables.
+
+---
+
+### gVisor Sandboxing
+
+By default, `sfw check`, `sfw diff`, and `sfw scan` execute untrusted code analysis inside a **gVisor sandbox** (runsc) for defense-in-depth. This provides:
+
+- **Syscall filtering**: Only whitelisted system calls are permitted
+- **Memory isolation**: 512MB limit prevents resource exhaustion
+- **Network isolation**: No outbound connections during analysis
+- **Filesystem isolation**: Read-only access to target files only
+
+**Requirements:**
+- gVisor's `runsc` must be installed and available in `$PATH`
+- On Linux, KVM acceleration is preferred (falls back to ptrace)
+
+**Disabling the sandbox:**
+```bash
+# For development/debugging or environments without gVisor
+sfw check ./main.go --no-sandbox
+sfw scan ./suspicious/ --no-sandbox
+```
+
+> **Note:** The sandbox is automatically skipped if `runsc` is not available, with a warning message.
 
 ---
 
@@ -323,15 +349,16 @@ Display database statistics including signature count and index sizes.
 
 <!-- All the advanced math, graphs, and technical details are moved here for power users -->
 
-## Persistent Signature Database (Pebble)
+## Persistent Signature Database (PebbleDB)
 
-The scanner uses **Pebble**, an embedded key-value store inspired by RocksDB, for signature storage. This enables:
+The scanner uses **PebbleDB**, CockroachDB's embedded LSM-tree key-value store, for signature storage. This enables:
 
 - **O(1) exact topology lookups** via indexed hash keys
 - **O(M) fuzzy matching** via range scans on entropy indexes
 - **Atomic writes**: no partial updates on crash
 - **Concurrent reads**: safe for parallel scanning
-- **Zero configuration**: single file, no server required
+- **Zero configuration**: single directory, no server required
+- **Gob+PackedIdx encoding**: Efficient binary serialization
 
 ### Database Schema
 
@@ -377,13 +404,13 @@ sfw migrate --from old_signatures.json --to signatures.db
 
 ```go
 // Open database with options
-opts := semanticfw.BoltScannerOptions{
+opts := pebbledb.PebbleScannerOptions{
     MatchThreshold:   0.75,    // Minimum confidence for alerts
     EntropyTolerance: 0.5,     // Fuzzy entropy window
-    Timeout:          5*time.Second,
     ReadOnly:         false,   // Set true for scan-only mode
+    CacheSize:        8 << 20, // 8MB cache
 }
-scanner, err := semanticfw.NewBoltScanner("signatures.db", opts)
+scanner, err := pebbledb.NewPebbleScanner("signatures.db", opts)
 defer scanner.Close()
 
 // Add signatures (single or bulk)
@@ -414,7 +441,7 @@ The Semantic Firewall includes a **behavioral malware scanner** that matches cod
 ```
 1. Extract FunctionTopology from target SSA function
 2. Compute topology hash: SHA-256(blockCount || callProfile || controlFlowFlags)
-3. BoltDB lookup: idx_topology[hash] → signature IDs
+3. PebbleDB lookup: topo:TopologyHash:ID → signature IDs
 4. Return exact matches with 100% topology confidence
 ```
 
@@ -422,7 +449,7 @@ The Semantic Firewall includes a **behavioral malware scanner** that matches cod
 
 ```
 1. Compute fuzzy hash: GenerateFuzzyHash(topology) → "B3L1BR2"
-2. Look up all signatures in the same fuzzy bucket
+2. PebbleDB prefix scan: fuzzy:FuzzyHash:* → candidate IDs
 3. Verify call signature overlap and entropy distance
 4. Return matches above confidence threshold
 ```
@@ -431,7 +458,7 @@ The Semantic Firewall includes a **behavioral malware scanner** that matches cod
 
 - **Renaming evasion fails**: `backdoor()` → `helper()` still matches (names aren't part of topology)
 - **Obfuscation-resistant**: Variable renaming and code shuffling don't change block/call structure
-- **O(1) at scale**: BoltDB indexes enable instant lookups even with thousands of signatures
+- **O(1) at scale**: PebbleDB indexes enable instant lookups even with thousands of signatures
 
 ### Fuzzy Hash Buckets (LSH-lite)
 
@@ -490,15 +517,15 @@ sfw scan . --deps --exact --db signatures.db
 
 ```mermaid
 flowchart LR
-    subgraph Lab["Lab Phase"]
-        M1["Known Malware"] --> I["sfw index"]
+    subgraph Lab
+        M1[Known Malware] --> I[sfw index]
         I --> DB[(signatures.db)]
     end
     
-    subgraph Hunt["Hunter Phase"]
-        T["Target Code"] --> S["sfw scan"]
+    subgraph Hunt
+        T[Target Code] --> S[sfw scan]
         DB --> S
-        S --> A["Alerts"]
+        S --> A[Alerts]
     end
     
     style Lab fill:#1e1b4b,stroke:#8b5cf6,stroke-width:2px
@@ -529,7 +556,7 @@ sfw index samples/dirty/dirty_beacon.go \
       "control_flow": { "has_infinite_loop": true, "has_reconnect_logic": true }
     }
   }],
-  "backend": "boltdb",
+  "backend": "pebbledb",
   "total_signatures": 1
 }
 ```
@@ -626,7 +653,7 @@ The diff command now uses **structural topology matching** to detect renamed or 
 │       return c.Close()                                       ▼              │
 │   }                                              ┌──────────────────────┐   │
 │                                                  │  SIMILARITY: 94%     │   │
-│   Different names, SAME topology ───────────────│  ✓ MATCH DETECTED    │   │
+│   Different names, SAME topology  ───────────────│  ✓ MATCH DETECTED    │   │
 │                                                  └──────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -635,26 +662,31 @@ The diff command now uses **structural topology matching** to detect renamed or 
 
 ```mermaid
 flowchart LR
-    subgraph old["Old Version"]
-        O1["processData()"]
-        O2["sendPacket()"]
-        O3["initConn()"]
+    subgraph old[Old Version]
+        O1[processData]
+        O2[sendPacket]
+        O3[initConn]
     end
     
-    subgraph new["New Version (Obfuscated)"]
-        N1["handleInput()"]
-        N2["xmit()"]
-        N3["setup()"]
+    subgraph new[New Version]
+        N1[handleInput]
+        N2[xmit]
+        N3[setup]
     end
     
-    O1 -.->|"Name: ✗"| N1
-    O1 ==>|"Topology: 94%"| N1
-    O2 ==>|"Topology: 91%"| N2
-    O3 ==>|"Topology: 88%"| N3
+    O1 --> N1
+    O2 --> N2
+    O3 --> N3
+    
+    linkStyle 0 stroke:#10b981,stroke-width:3px
+    linkStyle 1 stroke:#10b981,stroke-width:3px
+    linkStyle 2 stroke:#10b981,stroke-width:3px
     
     style old fill:#1e1b4b,stroke:#8b5cf6,stroke-width:2px
     style new fill:#064e3b,stroke:#10b981,stroke-width:2px
 ```
+
+> **Legend:** Green lines = topology match (94%+ similarity). Function names changed but structural fingerprints match.
 
 ```bash
 sfw diff old_version.go refactored_version.go
@@ -708,13 +740,13 @@ for _, r := range results {
 }
 ```
 
-### Malware Scanning with BoltDB
+### Malware Scanning with PebbleDB
 
 ```go
 import semanticfw "github.com/BlackVectorOps/semantic_firewall/v3"
 
 // Open the signature database
-scanner, err := semanticfw.NewBoltScanner("signatures.db", semanticfw.DefaultBoltScannerOptions())
+scanner, err := semanticfw.NewPebbleScanner("signatures.db", semanticfw.DefaultPebbleScannerOptions())
 if err != nil {
     log.Fatal(err)
 }
@@ -818,16 +850,16 @@ type ControlFlowHints struct {
 
 ```mermaid
 flowchart LR
-    A["Source"] --> B["SSA"]
-    B --> C["Loop Analysis"]
-    C --> D["SCEV"]
-    D --> E["Canonicalization"]
-    E --> F["SHA-256"]
+    A[Source] --> B[SSA]
+    B --> C[Loop Analysis]
+    C --> D[SCEV]
+    D --> E[Canonicalization]
+    E --> F[SHA-256]
     
-    B -.-> B1["go/ssa"]
-    C -.-> C1["Tarjan's SCC"]
-    D -.-> D1["Symbolic Evaluation"]
-    E -.-> E1["Virtual IR Normalization"]
+    B -.-> B1[go/ssa]
+    C -.-> C1[Tarjans SCC]
+    D -.-> D1[Symbolic Evaluation]
+    E -.-> E1[Virtual IR Normalization]
     
     style A fill:#4c1d95,stroke:#8b5cf6,stroke-width:2px,color:#e9d5ff
     style B fill:#1e3a8a,stroke:#3b82f6,stroke-width:2px,color:#dbeafe
@@ -986,6 +1018,7 @@ Bucket size is capped at 100 to bound worst case complexity.
 
 | Threat | Mitigation |
 |--------|------------|
+| **Untrusted code execution** | gVisor sandbox (`runsc`) isolates analysis |
 | **Algorithmic DoS** (exponential SCEV) | Memoization cache per loop: `loop.SCEVCache` |
 | **Quadratic Zipper** (5000 identical ADDs) | Fingerprint bucketing + `MaxCandidates=100` |
 | **RCE via CGO** | `CGO_ENABLED=0` during `packages.Load` |
@@ -994,6 +1027,8 @@ Bucket size is capped at 100 to bound worst case complexity.
 | **NaN comparison instability** | Branch normalization restricted to `IsInteger \| IsString` types |
 | **IR injection** (fake instructions in strings) | Struct tags and literals sanitized before hashing |
 | **TypeParam edge cases** | Generic types excluded from branch swap (may hide floats) |
+| **DB path traversal** | Sensitive system directories (`/etc`, `/usr`) blocked |
+| **Resource exhaustion** | 512MB memory limit, 64 PIDs max in sandbox |
 
 ### Complexity Analysis
 
@@ -1005,21 +1040,21 @@ Bucket size is capped at 100 to bound worst case complexity.
 | Canonicalization | $O(I \times \log B)$ | $O(I + B)$ |
 | Zipper | $O(I^2)$ worst, $O(I)$ typical | $O(I)$ |
 | **Topology Extract** | $O(I)$ | $O(C)$ |
-| **Scan (BoltDB exact)** | **$O(1)$** | $O(1)$ |
+| **Scan (PebbleDB exact)** | **$O(1)$** | $O(1)$ |
 | **Scan (fuzzy entropy)** | $O(M)$ | $O(M)$ |
 
 Where $N$ = source size, $V$ = blocks, $E$ = edges, $L$ = loops, $I$ = instructions, $B$ = blocks, $C$ = unique calls, $M$ = signatures in entropy range.
 
 ### Malware Scanner Architecture
 
-The scanner (`scanner_bolt.go`, 780 LOC) provides two-phase detection with ACID-compliant persistence:
+The scanner (`pkg/storage/pebbledb/store.go`, 1454 LOC) provides two-phase detection with ACID-compliant persistence:
 
 **Phase 1: O(1) Exact Topology Match**
 
 ```
 1. Extract FunctionTopology from target SSA function
 2. Compute topology hash: SHA-256(blockCount || callProfile || controlFlowFlags)
-3. BoltDB lookup: idx_topology[hash] → signature ID
+3. PebbleDB lookup: topo:TopologyHash:ID → signature ID
 4. Return exact matches with 100% topology confidence
 ```
 
@@ -1027,23 +1062,25 @@ The scanner (`scanner_bolt.go`, 780 LOC) provides two-phase detection with ACID-
 
 ```
 1. Compute fuzzy hash: GenerateFuzzyHash(topo) → "B3L1BR2"
-2. BoltDB prefix scan: idx_fuzzy[fuzzyHash:*] → candidate IDs
+2. PebbleDB prefix scan: fuzzy:FuzzyHash:* → candidate IDs
 3. For each candidate:
-   a. Load signature from signatures bucket
+   a. Load signature from sig: prefix
    b. Verify call signature overlap
    c. Check entropy distance within tolerance
    d. Compute composite confidence score
 4. Return matches above threshold
 ```
 
-**BoltDB Storage Schema**
+**PebbleDB Storage Schema**
+
+PebbleDB uses a flat key-space with prefixes to simulate logical buckets:
 
 ```
-Bucket: signatures     → ID → JSON blob (full signature)
-Bucket: idx_topology   → TopologyHash → ID (exact match index)
-Bucket: idx_fuzzy      → FuzzyHash:ID → ID (LSH bucket index)
-Bucket: idx_entropy    → "08.4321:ID" → ID (range scan index)
-Bucket: meta           → version, stats, maintenance info
+sig:ID         → Gob-encoded signature blob (full signature)
+topo:Hash:ID   → PackedIndexValue (O(1) exact match index)
+fuzzy:Hash:ID  → PackedIndexValue (LSH bucket index)
+entr:Key       → ID (range scan index, "05.1234:SFW-MAL-001")
+meta:key       → value (version, stats, maintenance info)
 ```
 
 **Entropy Key Encoding**
@@ -1112,9 +1149,11 @@ type FunctionTopology struct {
 
 **Similarity Score**
 
-Functions are compared via weighted Jaccard similarity:
+Functions are compared via weighted Jaccard similarity, returning a **normalized float from 0.0 to 1.0**:
 
 $$Similarity = \frac{\sum_i w_i \cdot match_i}{\sum_i w_i}$$
+
+> **Output format:** CLI and JSON outputs express similarity as a decimal (e.g., `0.94` = 94% match). The default topology match threshold is `0.6` (60%).
 
 Where weights prioritize:
 1. **Call profile** (w=3): Most discriminative feature
@@ -1149,6 +1188,6 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 ---
 
-**Built for every developer who cares about code integrity and security**
+*Prove intent. Detect deception. Ship with confidence.*
 
 </div>
