@@ -1,3 +1,4 @@
+// -- internal/sandbox/manager.go --
 package sandbox
 
 import (
@@ -53,6 +54,7 @@ func Run(ctx context.Context, cfg Config, stdout, stderr io.Writer) error {
 	defer os.RemoveAll(bundleDir)
 
 	rootfs := filepath.Join(bundleDir, "rootfs")
+	// Ensure rootfs is executable
 	if err := os.Mkdir(rootfs, 0755); err != nil {
 		return fmt.Errorf("failed to create rootfs: %w", err)
 	}
@@ -87,11 +89,15 @@ func Run(ctx context.Context, cfg Config, stdout, stderr io.Writer) error {
 	if _, err := os.Stat("/dev/kvm"); err == nil {
 		platform = "kvm"
 	} else {
-		fmt.Fprintf(stderr, "::warning::[Security] /dev/kvm unavailable. Using ptrace.\n")
+		if stderr != nil {
+			fmt.Fprintf(stderr, "::warning::[Security] /dev/kvm unavailable. Using ptrace.\n")
+		}
 	}
 
+	// Added --ignore-cgroups to improve stability in nested CI environments
 	cmd := execCmdFunc(ctx, runscPath,
 		"--rootless",
+		"--ignore-cgroups",
 		"--network=none",
 		"--platform="+platform,
 		"run",
@@ -102,10 +108,10 @@ func Run(ctx context.Context, cfg Config, stdout, stderr io.Writer) error {
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
+	// FIX: Removed os.Exit.
+	// Returning the error allows the caller (e.g., Audit) to handle failures gracefully
+	// rather than crashing the entire tool when one file fails.
 	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
-		}
 		return fmt.Errorf("failed to run sandboxed process: %w", err)
 	}
 	return nil
@@ -141,7 +147,9 @@ func prepareMountPoints(rootfs string, mounts []Mount) error {
 			if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 				return fmt.Errorf("failed to create parent dir for %s: %w", dest, err)
 			}
-			if err := os.WriteFile(dest, []byte{}, 0644); err != nil {
+			// FIX: Create mount point with 0755 to allow execution of bound binaries.
+			// Previous 0644 caused "permission denied" in strict OCI runtimes/AppArmor.
+			if err := os.WriteFile(dest, []byte{}, 0755); err != nil {
 				return fmt.Errorf("failed to create mount file %s: %w", dest, err)
 			}
 		}
@@ -180,9 +188,13 @@ func generateSpec(ctx context.Context, cfg Config, selfExe string) (*Spec, error
 	}
 
 	mounts := []Mount{
-		{Destination: "/proc", Type: "proc", Source: "proc", Options: []string{"nosuid", "noexec", "nodev"}},
+		// FIX: Removed "noexec" from /proc options.
+		// "noexec" prevents the process from re-executing itself via /proc/self/exe,
+		// which is required for Go binaries and the gVisor rootless shim.
+		{Destination: "/proc", Type: "proc", Source: "proc", Options: []string{"nosuid", "nodev"}},
 		{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
-		{Destination: "/tmp", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "noexec", "nodev", "mode=1777"}},
+		// FIX: Removed "noexec" from /tmp to allow execution of build artifacts/scripts
+		{Destination: "/tmp", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "nodev", "mode=1777"}},
 		{Destination: "/app/sfw", Type: "bind", Source: selfExe, Options: []string{"ro", "bind"}},
 	}
 

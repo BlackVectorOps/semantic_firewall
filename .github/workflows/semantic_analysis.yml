@@ -1,3 +1,4 @@
+# -- semantic_analysis.yml --
 name: Semantic Analysis
 
 # 1. The Trigger ("on") is required at the root
@@ -60,11 +61,18 @@ jobs:
           
           # Move to path; /usr/local/bin is required as runsc may re-execute itself
           sudo mv runsc containerd-shim-runsc-v1 /usr/local/bin/
+
+          # Ubuntu 24.04 AppArmor Mitigation
+          # Allows runsc --rootless to create user namespaces.
+          if [[ "$(uname -s)" == "Linux" ]]; then
+             echo "::notice::Applying AppArmor workaround for Ubuntu 24.04..."
+             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          fi
           
           # Verify installation
           runsc --version
       # Run semantic analysis
-      - name: Run Semantic Analysiss
+      - name: Run Semantic Analysis
         shell: bash
         run: |
           set -e
@@ -85,8 +93,9 @@ jobs:
           echo "| :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
 
           FAILED_REFACTOR=false
+          ERROR_COUNT=0
           
-          # FIX 1: Semantic Context
+          # Semantic Context
           # Use git worktree instead of isolated file extraction to preserve package integrity.
           WORKTREE_DIR=".sfw_base_$$"
           trap 'git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"' EXIT
@@ -94,7 +103,7 @@ jobs:
           echo "::notice::Checking out base state to $WORKTREE_DIR..."
           git worktree add --detach "$WORKTREE_DIR" "$BASE_SHA" >/dev/null
           
-          # FIX 2: Fail-Closed Security
+          # Fail-Closed Security
           if ! command -v runsc &> /dev/null; then
             echo "::error::Critical: runsc (gVisor) not found. Aborting to prevent unsafe execution."
             exit 1
@@ -128,7 +137,7 @@ jobs:
                   NEW_FILE="/dev/null"
               fi
 
-              # FIX: Point to the Worktree for the old file
+              # Point to the Worktree for the old file
               OLD_FILE="$WORKTREE_DIR/$OLD_FILE_REF"
               if [ ! -f "$OLD_FILE" ]; then
                   OLD_FILE="/dev/null"
@@ -138,11 +147,14 @@ jobs:
               
               if ! OUTPUT=$(sfw diff $SANDBOX_OPT "$OLD_FILE" "$NEW_FILE"); then
                   echo "::error::sfw failed on $NEW_FILE_REF"
+                  ERROR_COUNT=$((ERROR_COUNT + 1))
                   continue
               fi
               
               if ! echo "$OUTPUT" | jq -e . >/dev/null 2>&1; then
-                  echo "::error::Invalid JSON output for $NEW_FILE_REF"; continue
+                  echo "::error::Invalid JSON output for $NEW_FILE_REF"
+                  ERROR_COUNT=$((ERROR_COUNT + 1))
+                  continue
               fi
 
               PCT=$(echo "$OUTPUT" | jq -r '.summary.semantic_match_pct // 0')
@@ -165,6 +177,13 @@ jobs:
             
           else
               echo "No Go files changed." >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Fail the job if tool errors occurred during execution
+          if [ $ERROR_COUNT -gt 0 ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo " **CI FAILED**: Tool execution failures detected." >> $GITHUB_STEP_SUMMARY
+              exit 1
           fi
 
           if [ -f /tmp/failed_refactor ] && [ "$(cat /tmp/failed_refactor)" = "true" ]; then

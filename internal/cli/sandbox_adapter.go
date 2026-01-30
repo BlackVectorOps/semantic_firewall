@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -103,7 +102,7 @@ func SandboxExec(sb Sandboxer, stdout, stderr io.Writer, command string, args []
 		}
 		addMount(p)
 
-		// FIX: Auto-detect and bind-mount Worktree/Module Root
+		//  Auto detect and bind mount Worktree/Module Root
 		// This ensures that even if we analyze a single file deep in a worktree,
 		// the toolchain sees the 'go.mod' and '.git' at the root.
 		if root := findContextRoot(p); root != "" {
@@ -123,12 +122,8 @@ func SandboxExec(sb Sandboxer, stdout, stderr io.Writer, command string, args []
 	defer cancel()
 
 	if err := sb.Run(ctx, cfg, stdout, stderr); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
-				os.Exit(status.ExitStatus())
-			}
-		}
+		// Bubble up the error to the caller
+		// so it can decide whether to fail closed, report a warning, or continue.
 		if errors.Is(err, context.Canceled) {
 			return fmt.Errorf("operation cancelled")
 		}

@@ -1,3 +1,4 @@
+// -- internal/cli/audit.go --
 package cli
 
 import (
@@ -5,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -21,7 +23,8 @@ func RunAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 	sb := RealSandboxer{}
 
 	var outputBuf bytes.Buffer
-	err := SandboxExec(sb, &outputBuf, nil, "diff", args, cleanOld, cleanNew)
+	// FIX: Pass os.Stderr instead of nil to capture sandbox runtime errors.
+	err := SandboxExec(sb, &outputBuf, os.Stderr, "diff", args, cleanOld, cleanNew)
 	if err != nil {
 		// FAIL-CLOSED: Infrastructure error must not allow bypass.
 		return 1, fmt.Errorf("audit failed during sandboxed diff: %w", err)
