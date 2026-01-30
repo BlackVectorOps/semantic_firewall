@@ -83,9 +83,7 @@ runs:
       shell: bash
       run: |
         echo "::notice::Installing sfw from remote registry..."
-        # Pinned version preventing supply chain attacks (@latest removed)
-        # Removed "Dogfooding" implicit build logic (RCE Vector)
-        go install github.com/BlackVectorOps/semantic_firewall/v3/cmd/sfw@v2.2.1
+        go install github.com/BlackVectorOps/semantic_firewall/v3/cmd/sfw@v3.1.0
 
     - name: Run Semantic Firewall
       id: run-sfw
@@ -99,33 +97,43 @@ runs:
         INPUT_SCAN_DEPS: ${{ inputs.scan-deps }}
         INPUT_DEPS_DEPTH: ${{ inputs.deps-depth }}
         INPUT_FAIL_ON_ALERT: ${{ inputs.fail-on-alert }}
-        # SECURITY FIX: Passed via environment variable, not CLI argument
+        # SECURITY FIX: Passed via environment variable
         SFW_API_KEY: ${{ inputs.api-key }}
         INPUT_MODEL: ${{ inputs.model }}
         INPUT_API_BASE: ${{ inputs.api-base }}
         GITHUB_BASE_REF: ${{ github.base_ref }}
-        # Map safe context variables
         PR_TITLE: ${{ github.event.pull_request.title }}
         PR_BODY: ${{ github.event.pull_request.body }}
       run: |
         set -e
 
-        # Ensure path is formatted correctly
-        if [[ "$INPUT_PATH" == -* ]]; then
-          INPUT_PATH="./$INPUT_PATH"
+        # Input Sanitization: Robust Path Validation
+        TARGET_ABS=$(realpath -m "$INPUT_PATH")
+        BASE_ABS=$(realpath -m ".")
+        REL_PATH=$(realpath -m --relative-to="$BASE_ABS" "$TARGET_ABS")
+        
+        if [[ "$REL_PATH" == ".."* ]] || [[ "$REL_PATH" == /* ]]; then
+           echo "::error::Security Violation: Path Traversal Detected! Target '$INPUT_PATH' is outside the workspace."
+           exit 1
         fi
+        
+        TARGET_PATH="./$REL_PATH"
 
-        # Check for runsc (gVisor). If missing, soft-fail to --no-sandbox mode
-        # to prevent lookPathFunc hard failures in standard CI environments.
+        # FIX: Fail-Closed Check for runsc
         SANDBOX_OPT=""
         if ! command -v runsc &> /dev/null; then
-          echo "::warning::runsc (gVisor) not found. Falling back to --no-sandbox mode."
-          SANDBOX_OPT="--no-sandbox"
+          echo "::error::Security Requirement Failed: runsc (gVisor) is not installed."
+          exit 1
         fi
 
         echo "::group::Semantic Firewall ($INPUT_MODE mode)"
 
         EXIT_CODE=0
+
+        # FIX: Local temp dir to prevent /tmp shadowing in sandbox
+        LOCAL_TEMP=".sfw_temp_$$"
+        mkdir -p "$LOCAL_TEMP"
+        trap 'rm -rf "$LOCAL_TEMP"' EXIT
 
         case "$INPUT_MODE" in
           check)
@@ -133,84 +141,68 @@ runs:
             if [[ "$INPUT_STRICT" == "true" ]]; then
               STRICT_FLAG="--strict"
             fi
-            OUTPUT=$(sfw check $STRICT_FLAG $SANDBOX_OPT -- "$INPUT_PATH")
+            OUTPUT=$(sfw check $STRICT_FLAG $SANDBOX_OPT -- "$TARGET_PATH")
             echo "$OUTPUT"
             ;;
 
           diff)
-            # determine the correct base SHA for comparison
             if [[ -n "$GITHUB_BASE_REF" ]]; then
-              # Pull Request
               BASE_SHA=$(git rev-parse origin/$GITHUB_BASE_REF)
             elif [[ "${{ github.event_name }}" == "push" ]]; then
-              # Push event -- use the 'before' SHA from the event payload
               BASE_SHA="${{ github.event.before }}"
-              # Handle new branch creation where 'before' is all zeros
               if [[ "$BASE_SHA" == "0000000000000000000000000000000000000000" ]]; then
                  BASE_SHA="HEAD^"
               fi
             else
-              # Fallback
               BASE_SHA=$(git rev-parse HEAD~1)
             fi
 
-            # Setup temp directory for reliable AST parsing of old files
-            TEMP_DIR=".sfw_diff_temp_$$"
-            mkdir -p "$TEMP_DIR"
-            # Attempt to copy go.mod/sum to temp root to preserve module info
-            cp go.mod go.sum "$TEMP_DIR/" 2>/dev/null || true
+            echo "::notice::Diffing against Base SHA: $BASE_SHA"
 
-            STREAM_FILE="sfw_stream.jsonl"
-            rm -f "$STREAM_FILE"
+            WORKTREE_DIR=".sfw_worktree_$$"
+            trap 'git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"; rm -rf "$LOCAL_TEMP"' EXIT
 
-            # Find changed Go files
-            git diff -z --name-only "$BASE_SHA" HEAD -- '*.go' 2>/dev/null > "files_list.tmp" || find "$INPUT_PATH" -name '*.go' -not -name '*_test.go' -print0 > "files_list.tmp"
+            git worktree add --detach "$WORKTREE_DIR" "$BASE_SHA" >/dev/null
 
+            STREAM_FILE="$LOCAL_TEMP/sfw_stream.jsonl"
+            
             TOTAL_MATCH_PCT=0
             FILE_COUNT=0
 
-            while IFS= read -r -d '' file; do
-              # skip tests
-              if [[ "$file" == *_test.go ]]; then continue; fi
+            while IFS= read -r -d '' status; do
+              case "$status" in
+                R*)
+                   IFS= read -r -d '' old_rel_path
+                   IFS= read -r -d '' new_rel_path
+                   ;;
+                *)
+                   IFS= read -r -d '' path
+                   old_rel_path="$path"
+                   new_rel_path="$path"
+                   ;;
+              esac
 
-              # Determine New File Path
-              if [[ -f "$file" ]]; then
-                NEW_FILE="$file"
-              else
-                NEW_FILE="/dev/null"
-              fi
+              if [[ "$new_rel_path" != *.go ]]; then continue; fi
+              if [[ "$new_rel_path" == *_test.go ]]; then continue; fi
 
-              # Determine Old File Path
-              # we reconstruct the directory path in the temp folder
-              DIR_PATH=$(dirname "$file")
-              mkdir -p "$TEMP_DIR/$DIR_PATH"
-              TEMP_OLD="$TEMP_DIR/$file"
+              NEW_FILE="$new_rel_path"
+              OLD_FILE="$WORKTREE_DIR/$old_rel_path"
 
-              if git show "$BASE_SHA:$file" > "$TEMP_OLD" 2>/dev/null; then
-                 OLD_FILE="$TEMP_OLD"
-              else
-                 # If file didn't exist in base, treat as empty
-                 OLD_FILE="/dev/null"
-              fi
-
-              # skip if both are effectively gone
+              if [[ ! -f "$NEW_FILE" ]]; then NEW_FILE="/dev/null"; fi
+              if [[ ! -f "$OLD_FILE" ]]; then OLD_FILE="/dev/null"; fi
               if [[ "$NEW_FILE" == "/dev/null" ]] && [[ "$OLD_FILE" == "/dev/null" ]]; then continue; fi
 
-              # Run Diff
-              # captures only stdout to avoid JSON corruption from logs
+              echo "Analyzing: $new_rel_path"
               DIFF_OUT=$(sfw diff $SANDBOX_OPT "$OLD_FILE" "$NEW_FILE" 2>/dev/null || echo '{}')
 
-              # append to stream file
               echo "$DIFF_OUT" >> "$STREAM_FILE"
-              echo "$DIFF_OUT"
-
+              
               PCT=$(echo "$DIFF_OUT" | jq -r '.summary.semantic_match_pct // 0')
               TOTAL_MATCH_PCT=$(echo "$TOTAL_MATCH_PCT + $PCT" | bc)
               FILE_COUNT=$((FILE_COUNT + 1))
 
-            done < "files_list.tmp"
+            done < <(git diff -z --name-status "$BASE_SHA" HEAD)
 
-            # Use jq to slurp the stream into a valid JSON array
             if [[ -f "$STREAM_FILE" ]]; then
               jq -s '.' "$STREAM_FILE" > sfw_diff_results.json
             else
@@ -218,8 +210,7 @@ runs:
             fi
 
             OUTPUT=$(cat sfw_diff_results.json)
-            rm -f sfw_diff_results.json "$STREAM_FILE" "files_list.tmp"
-            rm -rf "$TEMP_DIR"
+            rm -f sfw_diff_results.json
 
             if [[ $FILE_COUNT -gt 0 ]]; then
               AVG_PCT=$(echo "scale=1; $TOTAL_MATCH_PCT / $FILE_COUNT" | bc)
@@ -230,7 +221,6 @@ runs:
             ;;
 
           audit)
-            # Check for Key in Environment (SFW_API_KEY mapped from inputs or globals)
             HAS_KEY="false"
             if [[ -n "$SFW_API_KEY" ]] || [[ -n "$OPENAI_API_KEY" ]] || [[ -n "$GEMINI_API_KEY" ]]; then
               HAS_KEY="true"
@@ -240,14 +230,12 @@ runs:
               echo "::warning::No API Key found. Running in deterministic SIMULATION mode."
             fi
 
-            # Uses PR Context if available, avoids injection by using Env Vars
             if [[ "${{ github.event_name }}" == "pull_request" ]]; then
                COMMIT_MSG="$PR_TITLE
             $PR_BODY"
             else
                COMMIT_MSG=$(git log -1 --pretty=%B)
             fi
-            echo "::notice::Auditing Context: $COMMIT_MSG"
 
             if [[ -n "$GITHUB_BASE_REF" ]]; then
               BASE_SHA=$(git rev-parse origin/$GITHUB_BASE_REF)
@@ -255,35 +243,40 @@ runs:
               BASE_SHA=$(git rev-parse HEAD~1)
             fi
 
-            OLD_FILE=$(mktemp)
-            FILES_LIST=$(mktemp)
+            WORKTREE_DIR=".sfw_audit_worktree_$$"
+            trap 'git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"; rm -rf "$LOCAL_TEMP"' EXIT
+            git worktree add --detach "$WORKTREE_DIR" "$BASE_SHA" >/dev/null
+
+            FILES_LIST="$LOCAL_TEMP/files_list.txt"
             AUDIT_FAILS=0
 
             git diff -z --name-only "$BASE_SHA" HEAD -- '*.go' 2>/dev/null > "$FILES_LIST"
 
             while IFS= read -r -d '' file; do
-              if [[ -f "$file" ]]; then NEW_FILE="$file"; else NEW_FILE="/dev/null"; fi
-              if [[ ! -f "$file" ]] && [[ ! -e "$NEW_FILE" ]]; then continue; fi
+              if [[ ! -f "$file" ]]; then continue; fi
               if [[ "$file" == *_test.go ]]; then continue; fi
-              if [[ "$file" != *.go ]]; then continue; fi
 
-              echo "Analyzing: $file"
-              git show "$BASE_SHA:$file" > "$OLD_FILE" 2>/dev/null || echo "" > "$OLD_FILE"
+              echo "Auditing: $file"
+              
+              NEW_FILE="$file"
+              OLD_FILE="$WORKTREE_DIR/$file"
+              
+              # Handle new files (Old file won't exist in worktree)
+              if [[ ! -f "$OLD_FILE" ]]; then
+                 # FIX: Create temp file in LOCAL_TEMP (inside workspace)
+                 # This prevents the sandbox from masking the file via /tmp overlay
+                 OLD_FILE=$(mktemp -p "$LOCAL_TEMP")
+              fi
 
-              # Construct arguments for audit
-              # API Key is passed implicitly via Environment (SFW_API_KEY)
               AUDIT_ARGS=("$OLD_FILE" "$NEW_FILE" "$COMMIT_MSG")
-
               AUDIT_ARGS+=("--model" "$INPUT_MODEL")
               if [[ -n "$INPUT_API_BASE" ]]; then
                  AUDIT_ARGS+=("--api-base" "$INPUT_API_BASE")
               fi
-              
               if [[ -n "$SANDBOX_OPT" ]]; then
                  AUDIT_ARGS+=("$SANDBOX_OPT")
               fi
 
-              # sfw audit returns 0 on MATCH/SUSPICIOUS, 1 on LIE/ERROR
               set +e
               AUDIT_OUT=$(sfw audit "${AUDIT_ARGS[@]}")
               CMD_EXIT=$?
@@ -291,13 +284,9 @@ runs:
 
               echo "$AUDIT_OUT"
 
-              # AUDIT FIX: Logic Fail-Open Mitigation
-              # If sfw audit returns 0 (Pass) but output implies an internal error (e.g., json unmarshal failure),
-              # we must treat it as a failure (Fail-Closed).
               if [[ $CMD_EXIT -eq 0 ]]; then
-                 # Check for common Go JSON errors or empty output which might indicate crash
                  if [[ -z "$AUDIT_OUT" ]] || echo "$AUDIT_OUT" | grep -qE "json: error|unexpected end of JSON|invalid character"; then
-                    echo "::error file=$file::Internal Audit Error Detected (Unmarshaling or Crash). Failing closed."
+                    echo "::error file=$file::Internal Audit Error. Failing closed."
                     CMD_EXIT=1
                  fi
               fi
@@ -308,17 +297,14 @@ runs:
                  EXIT_CODE=1
               fi
 
-              echo "" > "$OLD_FILE"
             done < "$FILES_LIST"
-
-            rm -f "$OLD_FILE" "$FILES_LIST"
 
             if [[ $AUDIT_FAILS -eq 0 ]]; then
                echo "audit-verdict=PASS" >> $GITHUB_OUTPUT
-               OUTPUT="Audit Passed. No deceptive commits detected."
+               OUTPUT="Audit Passed."
             else
                echo "audit-verdict=FAIL" >> $GITHUB_OUTPUT
-               OUTPUT="Audit Failed. $AUDIT_FAILS file(s) flagged as deceptive."
+               OUTPUT="Audit Failed."
             fi
             ;;
 
@@ -329,26 +315,16 @@ runs:
               DEPS_ARGS+=("--deps-depth" "$INPUT_DEPS_DEPTH")
             fi
 
-            #  Check -e instead of -f to support PebbleDB directories
             if [[ ! -e "$INPUT_SIGNATURES" ]]; then
-              # SECURITY FIX: Fail closed if database is missing
               echo "::error::Signature database not found at $INPUT_SIGNATURES"
               exit 1
             else
-              # : PebbleDB Locking and Concurrency
-              # Copy the signature database to a temporary location to ensure
-              # unique access if multiple jobs/processes run in parallel.
-              TEMP_DB="sfw_sigs_copy_$$"
+              TEMP_DB="$LOCAL_TEMP/sfw_sigs_copy.db"
               cp -R "$INPUT_SIGNATURES" "$TEMP_DB"
 
-              # Applied SANDBOX_OPT and used TEMP_DB
-              OUTPUT=$(sfw scan $SANDBOX_OPT --db "$TEMP_DB" --threshold "$INPUT_THRESHOLD" "${DEPS_ARGS[@]}" -- "$INPUT_PATH")
+              OUTPUT=$(sfw scan $SANDBOX_OPT --db "$TEMP_DB" --threshold "$INPUT_THRESHOLD" "${DEPS_ARGS[@]}" -- "$TARGET_PATH")
               echo "$OUTPUT"
 
-              # Cleanup temporary DB copy
-              rm -rf "$TEMP_DB"
-
-              # jq -r checks for null to prevent pipe failures
               ALERT_COUNT=$(echo "$OUTPUT" | jq -r '.summary.total_alerts // 0')
               echo "alert-count=$ALERT_COUNT" >> $GITHUB_OUTPUT
 
@@ -363,14 +339,13 @@ runs:
             ;;
 
           *)
-            echo "::error::Unknown mode: $INPUT_MODE. Use 'check', 'diff', 'scan', or 'audit'."
+            echo "::error::Unknown mode: $INPUT_MODE."
             EXIT_CODE=1
             ;;
         esac
 
         echo "::endgroup::"
 
-        # Uses random delimiter to prevent GITHUB_OUTPUT Injection
         DELIMITER=$(openssl rand -hex 8)
         echo "result<<$DELIMITER" >> $GITHUB_OUTPUT
         echo "$OUTPUT" >> $GITHUB_OUTPUT

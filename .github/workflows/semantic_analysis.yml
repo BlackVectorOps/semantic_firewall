@@ -35,11 +35,39 @@ jobs:
           else
              echo "mode=check" >> $GITHUB_OUTPUT
           fi
-
-      # Run semantic analysis
-      - name: Run Semantic Analysis
+      - name: Install gVisor (runsc)
         shell: bash
         run: |
+          set -e
+          
+          # Architecture detection for multi-platform robustness
+          ARCH=$(uname -m)
+          URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
+          
+          echo "::notice::Downloading gVisor binaries for ${ARCH}..."
+          
+          # Fetch binaries and checksums
+          wget -q "${URL}/runsc" "${URL}/runsc.sha512"
+          wget -q "${URL}/containerd-shim-runsc-v1" "${URL}/containerd-shim-runsc-v1.sha512"
+          
+          # Security validation: Verify SHA512 signatures before execution
+          sha512sum -c runsc.sha512
+          sha512sum -c containerd-shim-runsc-v1.sha512
+          
+          # Cleanup metadata and elevate permissions
+          rm -f *.sha512
+          chmod a+rx runsc containerd-shim-runsc-v1
+          
+          # Move to path; /usr/local/bin is required as runsc may re-execute itself
+          sudo mv runsc containerd-shim-runsc-v1 /usr/local/bin/
+          
+          # Verify installation
+          runsc --version
+      # Run semantic analysis
+      - name: Run Semantic Analysiss
+        shell: bash
+        run: |
+          set -e
           MODE="${{ steps.mode.outputs.mode }}"
           
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
@@ -57,44 +85,40 @@ jobs:
           echo "| :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
 
           FAILED_REFACTOR=false
-          TEMP_DIR=".sfw_temp_$$"
-          mkdir -p "$TEMP_DIR"
           
-          cp go.mod go.sum "$TEMP_DIR/" 2>/dev/null || true
+          # FIX 1: Semantic Context
+          # Use git worktree instead of isolated file extraction to preserve package integrity.
+          WORKTREE_DIR=".sfw_base_$$"
+          trap 'git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"' EXIT
           
-          # Check for runsc/gVisor. If missing, use --no-sandbox to prevent hard failure.
-          SANDBOX_OPT=""
+          echo "::notice::Checking out base state to $WORKTREE_DIR..."
+          git worktree add --detach "$WORKTREE_DIR" "$BASE_SHA" >/dev/null
+          
+          # FIX 2: Fail-Closed Security
           if ! command -v runsc &> /dev/null; then
-            echo "::notice::runsc not found. Using --no-sandbox."
-            SANDBOX_OPT="--no-sandbox"
+            echo "::error::Critical: runsc (gVisor) not found. Aborting to prevent unsafe execution."
+            exit 1
           fi
+          SANDBOX_OPT=""
 
-          #  Robust Diff Handling for Renames
-          # Original used --name-only which broke on renames (treating them as del+add)
-          # We use --name-status -z to parse strict file moves.
-          
           # Check if there are any go files changed first to avoid empty loop errors
           if git diff --name-only "$BASE_SHA" HEAD | grep -q '\.go$'; then
             
-            # Using process substitution to safely read null-terminated stream
             while IFS= read -r -d '' status; do
               case "$status" in
                 R*)
-                   # Rename: reads OLD_PATH then NEW_PATH
                    IFS= read -r -d '' old_path
                    IFS= read -r -d '' new_path
                    OLD_FILE_REF="$old_path"
                    NEW_FILE_REF="$new_path"
                    ;;
                 *)
-                   # Modified/Added/Deleted: reads PATH
                    IFS= read -r -d '' path
                    OLD_FILE_REF="$path"
                    NEW_FILE_REF="$path"
                    ;;
               esac
 
-              # Filter: Only analyze Go files
               if [[ "$NEW_FILE_REF" != *.go ]] && [[ "$OLD_FILE_REF" != *.go ]]; then continue; fi
 
               # Determine filesystem paths
@@ -104,27 +128,19 @@ jobs:
                   NEW_FILE="/dev/null"
               fi
 
-              # Extract old file content from git
-              DIR_PATH=$(dirname "$OLD_FILE_REF")
-              mkdir -p "$TEMP_DIR/$DIR_PATH"
-              TEMP_OLD="$TEMP_DIR/$OLD_FILE_REF"
-              
-              if git show "$BASE_SHA:$OLD_FILE_REF" > "$TEMP_OLD"; then
-                  OLD_FILE="$TEMP_OLD"
-              else
+              # FIX: Point to the Worktree for the old file
+              OLD_FILE="$WORKTREE_DIR/$OLD_FILE_REF"
+              if [ ! -f "$OLD_FILE" ]; then
                   OLD_FILE="/dev/null"
               fi
 
               if [[ "$NEW_FILE" == "/dev/null" ]] && [[ "$OLD_FILE" == "/dev/null" ]]; then continue; fi
               
-              # AUDIT FIX: Applied SANDBOX_OPT
               if ! OUTPUT=$(sfw diff $SANDBOX_OPT "$OLD_FILE" "$NEW_FILE"); then
                   echo "::error::sfw failed on $NEW_FILE_REF"
                   continue
               fi
               
-              rm -f "$TEMP_OLD"
-
               if ! echo "$OUTPUT" | jq -e . >/dev/null 2>&1; then
                   echo "::error::Invalid JSON output for $NEW_FILE_REF"; continue
               fi
@@ -135,7 +151,6 @@ jobs:
               if (( $(echo "$PCT < 100" | bc -l) )); then
                   STATUS_ICON=" Modified ($MODIFIED)"
                   
-                  # This block is now reachable thanks to the 'Determine Mode' fix
                   if [ "$MODE" == "BLOCKER" ]; then
                       echo "true" > /tmp/failed_refactor
                       echo "::error file=$NEW_FILE_REF::Logic change detected in safe refactor! ($PCT%)"
@@ -151,8 +166,6 @@ jobs:
           else
               echo "No Go files changed." >> $GITHUB_STEP_SUMMARY
           fi
-
-          rm -rf "$TEMP_DIR"
 
           if [ -f /tmp/failed_refactor ] && [ "$(cat /tmp/failed_refactor)" = "true" ]; then
               echo "" >> $GITHUB_STEP_SUMMARY

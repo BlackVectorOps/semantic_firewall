@@ -21,20 +21,16 @@ func RunAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 	sb := RealSandboxer{}
 
 	var outputBuf bytes.Buffer
-	// Capture output, allow stderr to pass through for logging
 	err := SandboxExec(sb, &outputBuf, nil, "diff", args, cleanOld, cleanNew)
 	if err != nil {
-		// Critical Fix: Audit Logic Fail-Open
-		// We must return a non-zero exit code (1) if the analysis infrastructure fails.
-		// Failing open here would allow attackers to bypass the gate by crashing the scanner.
+		// FAIL-CLOSED: Infrastructure error must not allow bypass.
 		return 1, fmt.Errorf("audit failed during sandboxed diff: %w", err)
 	}
 
 	var diffOutput models.DiffOutput
 	if err := json.Unmarshal(outputBuf.Bytes(), &diffOutput); err != nil {
-		// Critical Fix: Lie Detector Risk / Fail-Open
-		// If the JSON is malformed (e.g. oversized or contains panic text), we must fail closed.
-		return 1, fmt.Errorf("failed to parse sandboxed diff output (possible exploit or runtime error): %w", err)
+		// FAIL-CLOSED: Malformed JSON suggests exploit attempt or tool crash.
+		return 1, fmt.Errorf("failed to parse sandboxed diff output (invalid JSON): %w", err)
 	}
 
 	var evidence []models.AuditEvidence
@@ -68,6 +64,11 @@ func RunAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 		},
 	}
 
+	output.Output = models.LLMResult{
+		Verdict:  models.VerdictError,
+		Evidence: "Analysis incomplete.",
+	}
+
 	if highRiskDetected {
 		result, err := llm.CallLLM(commitMsg, evidence, apiKey, model, apiBase)
 		if err != nil {
@@ -75,8 +76,6 @@ func RunAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 				Verdict:  models.VerdictError,
 				Evidence: fmt.Sprintf("Verification Failed: %v", err),
 			}
-			// Note: We proceed to encode the error response below, but the
-			// function will return exit code 1 due to the verdict check at the end.
 		} else {
 			output.Output = result
 		}
@@ -93,10 +92,13 @@ func RunAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 		return 1, fmt.Errorf("json encode failed: %w", err)
 	}
 
-	// Fail-Closed: If the verdict indicates a lie, error, or suspicion, return non-zero exit code.
-	if output.Output.Verdict == models.VerdictLie || output.Output.Verdict == models.VerdictError || output.Output.Verdict == models.VerdictSuspicious {
+	// FAIL-CLOSED: Strict Verdict Enforcement
+	switch output.Output.Verdict {
+	case models.VerdictMatch, models.StatusPreserved:
+		return 0, nil
+	case models.VerdictLie, models.VerdictSuspicious, models.VerdictError:
 		return 1, nil
+	default:
+		return 1, fmt.Errorf("unknown verdict received: %s", output.Output.Verdict)
 	}
-
-	return 0, nil
 }
