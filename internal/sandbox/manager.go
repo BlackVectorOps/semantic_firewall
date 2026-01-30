@@ -95,7 +95,7 @@ func Run(ctx context.Context, cfg Config, stdout, stderr io.Writer) error {
 		"--network=none",
 		"--platform="+platform,
 		"run",
-		"-b", bundleDir,
+		"--bundle", bundleDir,
 		filepath.Base(bundleDir),
 	)
 
