@@ -66,13 +66,15 @@ jobs:
           # unexpected upstream changes from breaking the pipeline.
           GVISOR_VERSION="release-20260126.0"
           ARCH=$(uname -m)
-          URL="https://storage.googleapis.com/gvisor/releases/${GVISOR_VERSION}/${ARCH}"
+          # We use the 'latest' path structure but enforce the version via the hash check below.
+          # This circumvents potential 404s on specific version directories while maintaining integrity.
+          URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
           
           # Hardcoded trust anchor. 
           # We do NOT download the .sha512 file from the server, as a compromise 
           # of the bucket would allow an attacker to replace both binary and hash.
           # This hash must be verified out-of-band before updating.
-          EXPECTED_SHA="cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+          EXPECTED_SHA="cce974fa832c50d26c6ccc08ce50b4972921cd0818ebe8007587211d360cbc828ceea4ec8296703200afa208b679437d24f27a6dca31887b3c0fc6ee8be5eb05"
           
           echo "::notice::Downloading gVisor ${GVISOR_VERSION} for ${ARCH}..."
           
