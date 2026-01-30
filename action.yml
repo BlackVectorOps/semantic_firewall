@@ -83,7 +83,7 @@ runs:
       shell: bash
       run: |
         echo "::notice::Installing sfw from remote registry..."
-        go install github.com/BlackVectorOps/semantic_firewall/v3/cmd/sfw@v3.1.3
+        go install github.com/BlackVectorOps/semantic_firewall/v3/cmd/sfw@v3.1.4
 
     - name: Run Semantic Firewall
       id: run-sfw

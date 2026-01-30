@@ -64,11 +64,11 @@ jobs:
           
           # Pinning a specific version to ensure reproducible builds and prevent 
           # unexpected upstream changes from breaking the pipeline.
-          GVISOR_VERSION="release-20260126.0"
+          GVISOR_VERSION="20260126.0"
           ARCH=$(uname -m)
           # We use the 'latest' path structure but enforce the version via the hash check below.
           # This circumvents potential 404s on specific version directories while maintaining integrity.
-          URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
+          URL="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_VERSION}/${ARCH}"
           
           # Hardcoded trust anchor. 
           # We do NOT download the .sha512 file from the server, as a compromise 
