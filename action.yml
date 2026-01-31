@@ -84,7 +84,7 @@ runs:
       shell: bash
       run: |
         echo "::notice::Installing sfw from remote registry..."
-        go install github.com/BlackVectorOps/semantic_firewall/v3/cmd/sfw@v3.1.5
+        go install github.com/BlackVectorOps/semantic_firewall/v3/cmd/sfw@v3.1.6
 
     # Security & Infrastructure: Install gVisor (runsc)
     # Required runtime dependency for sandboxed execution.
