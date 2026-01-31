@@ -265,8 +265,11 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 	}
 
 	if len(dataAccumulator) > 0 {
-		t.EntropyScore = CalculateEntropy(dataAccumulator)
 		t.EntropyProfile = CalculateEntropyProfile(dataAccumulator, t.StringLiterals)
+		// Fix: Use max of overall and max string entropy to prevent dilution attacks.
+		// If a function contains a single high-entropy string (packed payload),
+		// the score should reflect that even if surrounded by low-entropy junk.
+		t.EntropyScore = math.Max(t.EntropyProfile.Overall, t.EntropyProfile.MaxStringEntropy)
 	} else {
 		t.EntropyScore = 0
 		t.EntropyProfile = EntropyProfile{Classification: EntropyLow}

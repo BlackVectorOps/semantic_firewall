@@ -48,6 +48,9 @@ type EntropyProfile struct {
 	// Entropy of string literals within the function
 	StringLiteralEntropy float64
 
+	// Maximum entropy of any single string literal
+	MaxStringEntropy float64
+
 	// Entropy classification
 	Classification EntropyClass
 }
@@ -97,10 +100,16 @@ func CalculateEntropyProfile(bodyBytes []byte, stringLiterals []string) EntropyP
 
 	// Calculate average entropy of string literals
 	var stringEntropy float64
+	var maxStringEntropy float64
+
 	if len(stringLiterals) > 0 {
 		var total float64
 		for _, s := range stringLiterals {
-			total += CalculateEntropy([]byte(s))
+			e := CalculateEntropy([]byte(s))
+			total += e
+			if e > maxStringEntropy {
+				maxStringEntropy = e
+			}
 		}
 		stringEntropy = total / float64(len(stringLiterals))
 	}
@@ -108,6 +117,7 @@ func CalculateEntropyProfile(bodyBytes []byte, stringLiterals []string) EntropyP
 	return EntropyProfile{
 		Overall:              overall,
 		StringLiteralEntropy: stringEntropy,
+		MaxStringEntropy:     maxStringEntropy,
 		Classification:       ClassifyEntropy(overall),
 	}
 }
