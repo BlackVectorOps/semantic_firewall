@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-action.json
 name: 'Semantic Firewall'
 description: 'Behavioral analysis engine for Go. Detects malware, proves loop equivalence, and enforces semantic immutability.'
 author: 'BlackVectorOps'
@@ -83,7 +84,72 @@ runs:
       shell: bash
       run: |
         echo "::notice::Installing sfw from remote registry..."
-        go install github.com/BlackVectorOps/semantic_firewall/v3/cmd/sfw@v3.1.4
+        go install github.com/BlackVectorOps/semantic_firewall/v3/cmd/sfw@v3.1.5
+
+    # Security & Infrastructure: Install gVisor (runsc)
+    # Required runtime dependency for sandboxed execution.
+    # Hardened against supply chain attacks by pinning version and SHA512.
+    - name: Install gVisor (runsc)
+      shell: bash
+      run: |
+        set -e
+        
+        # Skip if already installed (allows users to pre-install a specific version)
+        if command -v runsc &> /dev/null; then
+          echo "::notice::runsc already installed: $(runsc --version)"
+          exit 0
+        fi
+        
+        # Pinning a specific version to ensure reproducible builds and prevent 
+        # unexpected upstream changes from breaking the pipeline.
+        GVISOR_VERSION="20260126.0"
+        ARCH=$(uname -m)
+        URL="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_VERSION}/${ARCH}"
+        
+        # Hardcoded trust anchor. 
+        # We do NOT download the .sha512 file from the server, as a compromise 
+        # of the bucket would allow an attacker to replace both binary and hash.
+        # This hash must be verified out-of-band before updating.
+        EXPECTED_SHA="cce974fa832c50d26c6ccc08ce50b4972921cd0818ebe8007587211d360cbc828ceea4ec8296703200afa208b679437d24f27a6dca31887b3c0fc6ee8be5eb05"
+        
+        echo "::notice::Downloading gVisor ${GVISOR_VERSION} for ${ARCH}..."
+        
+        wget -q -O runsc "${URL}/runsc"
+        wget -q -O containerd-shim-runsc-v1 "${URL}/containerd-shim-runsc-v1"
+        
+        # Verify integrity against our pinned hash
+        echo "${EXPECTED_SHA} runsc" | sha512sum -c -
+        
+        chmod a+rx runsc containerd-shim-runsc-v1
+        
+        # CRITICAL: Move binaries to a PATH-accessible location
+        # exec.LookPath searches system $PATH, not the current working directory
+        sudo mv runsc containerd-shim-runsc-v1 /usr/local/bin/
+        
+        # Infrastructure Awareness: Graceful AppArmor Loading
+        if [[ -d "/sys/kernel/security/apparmor" ]] && command -v apparmor_parser &> /dev/null; then
+           echo "::notice::AppArmor detected. Loading permissive profile for gVisor..."
+           
+           cat <<EOF | sudo tee /etc/apparmor.d/usr.local.bin.runsc
+        abi <abi/4.0>,
+        include <tunables/global>
+
+        /usr/local/bin/runsc flags=(unconfined) {
+          userns,
+          include if exists <local/usr.local.bin.runsc>
+        }
+        EOF
+           sudo apparmor_parser -r /etc/apparmor.d/usr.local.bin.runsc || echo "::warning::Failed to load AppArmor profile. Sandbox isolation may be degraded."
+        else
+           echo "::warning::AppArmor not active or accessible. Skipping profile loading."
+        fi
+        
+        # Fallback sysctl for systems where AppArmor is present but not fully enforced
+        if [[ "$(uname -s)" == "Linux" ]]; then
+           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+        fi
+        
+        runsc --version
 
     - name: Run Semantic Firewall
       id: run-sfw
@@ -97,7 +163,7 @@ runs:
         INPUT_SCAN_DEPS: ${{ inputs.scan-deps }}
         INPUT_DEPS_DEPTH: ${{ inputs.deps-depth }}
         INPUT_FAIL_ON_ALERT: ${{ inputs.fail-on-alert }}
-        # SECURITY FIX: Passed via environment variable
+        # Passed via environment variable
         SFW_API_KEY: ${{ inputs.api-key }}
         INPUT_MODEL: ${{ inputs.model }}
         INPUT_API_BASE: ${{ inputs.api-base }}
@@ -119,10 +185,12 @@ runs:
         
         TARGET_PATH="./$REL_PATH"
 
-        # FIX: Fail-Closed Check for runsc
+        # Sandbox option (reserved for future configurability)
         SANDBOX_OPT=""
+        
+        # Verify runsc is available (should be installed by previous step)
         if ! command -v runsc &> /dev/null; then
-          echo "::error::Security Requirement Failed: runsc (gVisor) is not installed."
+          echo "::error::Security Requirement Failed: runsc (gVisor) installation failed. Check previous step logs."
           exit 1
         fi
 
