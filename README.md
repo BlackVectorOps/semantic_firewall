@@ -95,6 +95,33 @@ sfw scan ./cmd/myapp --deps
 sfw stats
 ```
 
+### Workflow: Lab → Hunt
+
+```mermaid
+flowchart LR
+    subgraph Lab
+        M1[Known Malware] --> I[sfw index]
+        I --> DB[(signatures.db)]
+    end
+    
+    subgraph Hunt
+        T[Target Code] --> S[sfw scan]
+        DB --> S
+        S --> A[Alerts]
+    end
+    
+    %% Nodes: Deep radioactive green with neon border
+    classDef default fill:#022c22,stroke:#00ff41,stroke-width:1px,color:#ffffff
+    
+    %% Subgraphs: Subdued slate blue containers
+    style Lab fill:#1e293b,stroke:#475569,stroke-width:2px,color:#94a3b8,stroke-dasharray:5 5
+    style Hunt fill:#1e293b,stroke:#475569,stroke-width:2px,color:#94a3b8
+    
+    %% Database: Distinct cylinder styling
+    style DB fill:#064e3b,stroke:#00ff41,stroke-width:2px,color:#ffffff
+    
+    linkStyle default stroke:#00ff41,stroke-width:1px
+```
 
 <details>
 <summary><strong>Show example outputs</strong></summary>
@@ -512,26 +539,6 @@ sfw scan . --deps --exact --db signatures.db
 | `--exact` | O(1) exact topology match only (fastest) |
 
 > **Note:** Dependency scanning requires modules to be downloaded (`go mod download`). Stdlib packages are automatically excluded.
-
-### Workflow: Lab → Hunt
-
-```mermaid
-flowchart LR
-    subgraph Lab
-        M1[Known Malware] --> I[sfw index]
-        I --> DB[(signatures.db)]
-    end
-    
-    subgraph Hunt
-        T[Target Code] --> S[sfw scan]
-        DB --> S
-        S --> A[Alerts]
-    end
-    
-    style Lab fill:#1e1b4b,stroke:#8b5cf6,stroke-width:2px
-    style Hunt fill:#064e3b,stroke:#10b981,stroke-width:2px
-    style DB fill:#7c2d12,stroke:#f97316,stroke-width:2px
-```
 
 ### Step 1: Index Known Malware (Lab Phase)
 
