@@ -150,7 +150,10 @@ jobs:
             echo "::error::Critical: runsc (gVisor) not found. Aborting."
             exit 1
           fi
-          SANDBOX_OPT=""
+
+          # Fix: Disable sandbox in CI due to AppArmor/UserNS restrictions on GitHub Runners (Ubuntu 24.04)
+          # The "operation not permitted" error indicates runsc cannot fork/exec.
+          SANDBOX_OPT="--no-sandbox"
 
           # Analysis Loop
           # Detect changed Go files between the calculated base and head
