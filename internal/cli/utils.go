@@ -112,7 +112,8 @@ func levenshtein(s1, s2 string) int {
 			if r1[i-1] != targetChar {
 				cost = 1
 			}
-			current[i] = min(min(current[i-1]+1, current[i]+1), previous+cost)
+			// Use built-in variadic min for cleaner comparison logic
+			current[i] = min(current[i-1]+1, current[i]+1, previous+cost)
 			previous = temp
 		}
 	}
@@ -137,13 +138,6 @@ func SuggestCommand(cmd string) string {
 	return ""
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func HumanizeBytes(bytes int64) string {
 	const unit = 1024
 	if bytes < unit {
@@ -161,7 +155,7 @@ func HumanizeBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), suffixes[exp])
 }
 
-// CollectFiles recursively finds Go files using the provided FileSystem.
+// Recursively finds Go files using the provided FileSystem.
 func CollectFiles(fsys FileSystem, target string) ([]string, error) {
 	// Clean the target path to ensure reliable string comparison
 	target = filepath.Clean(target)
@@ -205,7 +199,7 @@ func isTestFile(path string) bool {
 	return len(base) >= 8 && base[len(base)-8:] == "_test.go"
 }
 
-// GetPathSize calculates the size of a file or recursively sums the size of a directory.
+// Calculates the size of a file or recursively sums the size of a directory.
 func GetPathSize(fsys FileSystem, path string) (int64, error) {
 	info, err := fsys.Stat(path)
 	if err != nil {
@@ -231,7 +225,7 @@ func GetPathSize(fsys FileSystem, path string) (int64, error) {
 	return size, err
 }
 
-// LoadAndFingerprint reads a file and generates semantic fingerprints using the provided FS.
+// This reads a file and generates semantic fingerprints using the provided FS.
 func LoadAndFingerprint(fsys FileSystem, filename string) ([]diff.FingerprintResult, error) {
 	absPath, err := fsys.Abs(filename)
 	if err != nil {
@@ -246,7 +240,41 @@ func LoadAndFingerprint(fsys FileSystem, filename string) ([]diff.FingerprintRes
 }
 
 func ShortFunctionName(fullName string) string {
-	// Fix: Implement robust parsing for generics and methods.
+	// Robust parsing for methods with receivers (e.g. (*pkg.Type).Method)
+	// Will detect the receiver parens and recursively strip the package from the type inside.
+	if strings.HasPrefix(fullName, "(") {
+		depth := 0
+		closeIndex := -1
+		for i, c := range fullName {
+			if c == '(' {
+				depth++
+			} else if c == ')' {
+				depth--
+				if depth == 0 {
+					closeIndex = i
+					break
+				}
+			}
+		}
+
+		if closeIndex > 1 {
+			receiver := fullName[1:closeIndex] // e.g. "*pkg.Type"
+			rest := fullName[closeIndex+1:]    // e.g. ".Method"
+
+			// Preserve pointer indicator
+			prefix := ""
+			if strings.HasPrefix(receiver, "*") {
+				prefix = "*"
+				receiver = receiver[1:]
+			}
+
+			// Recursively clean the inner type (strips path and package)
+			cleanReceiver := ShortFunctionName(receiver)
+
+			return fmt.Sprintf("(%s%s)%s", prefix, cleanReceiver, rest)
+		}
+	}
+
 	// 1. Backward Scan: Strip package path
 	// e.g. "github.com/pkg.Func" -> "pkg.Func"
 	// Must respect brackets [] and parens () to avoid splitting inside generics

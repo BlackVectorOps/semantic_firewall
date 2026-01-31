@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -108,7 +109,7 @@ func Run(ctx context.Context, cfg Config, stdout, stderr io.Writer) error {
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
-	// FIX: Removed os.Exit.
+	// Removed os.Exit.
 	// Returning the error allows the caller (e.g., Audit) to handle failures gracefully
 	// rather than crashing the entire tool when one file fails.
 	if err := cmd.Run(); err != nil {
@@ -147,7 +148,7 @@ func prepareMountPoints(rootfs string, mounts []Mount) error {
 			if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 				return fmt.Errorf("failed to create parent dir for %s: %w", dest, err)
 			}
-			// FIX: Create mount point with 0755 to allow execution of bound binaries.
+			// Create mount point with 0755 to allow execution of bound binaries.
 			// Previous 0644 caused "permission denied" in strict OCI runtimes/AppArmor.
 			if err := os.WriteFile(dest, []byte{}, 0755); err != nil {
 				return fmt.Errorf("failed to create mount file %s: %w", dest, err)
@@ -188,12 +189,12 @@ func generateSpec(ctx context.Context, cfg Config, selfExe string) (*Spec, error
 	}
 
 	mounts := []Mount{
-		// FIX: Removed "noexec" from /proc options.
+		// Removed "noexec" from /proc options.
 		// "noexec" prevents the process from re-executing itself via /proc/self/exe,
 		// which is required for Go binaries and the gVisor rootless shim.
 		{Destination: "/proc", Type: "proc", Source: "proc", Options: []string{"nosuid", "nodev"}},
 		{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
-		// FIX: Removed "noexec" from /tmp to allow execution of build artifacts/scripts
+		// Removed "noexec" from /tmp to allow execution of build artifacts/scripts
 		{Destination: "/tmp", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "nodev", "mode=1777"}},
 		{Destination: "/app/sfw", Type: "bind", Source: selfExe, Options: []string{"ro", "bind"}},
 	}
@@ -217,11 +218,26 @@ func generateSpec(ctx context.Context, cfg Config, selfExe string) (*Spec, error
 		envCaches = append(envCaches, "GOCACHE=/tmp/gocache")
 	}
 
+	// Define Reserved Paths to prevent shadowing critical sandbox infrastructure via user input.
+	reservedPaths := map[string]bool{
+		"/app/sfw": true,
+		"/proc":    true,
+		"/sys":     true,
+		"/dev":     true,
+		"/tmp":     true,
+		"/gocache": true,
+	}
+
 	// Bind User Inputs
 	for _, m := range cfg.Mounts {
 		abs, err := filepath.Abs(m)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve mount path %s: %w", m, err)
+		}
+
+		// Check for Reserved Path Collision
+		if reservedPaths[abs] {
+			return nil, fmt.Errorf("security violation: mount path '%s' collides with reserved sandbox path", abs)
 		}
 
 		// Resolve Symlinks for the SOURCE (Data)
@@ -243,6 +259,13 @@ func generateSpec(ctx context.Context, cfg Config, selfExe string) (*Spec, error
 			Options:     []string{"ro", "rbind"},
 		})
 	}
+
+	// Sort mounts to prevent shadowing.
+	// Parents must be mounted before children (e.g., /app before /app/bin).
+	// Lexicographical sort of Destination satisfies this for standard paths.
+	sort.SliceStable(mounts, func(i, j int) bool {
+		return mounts[i].Destination < mounts[j].Destination
+	})
 
 	env := []string{
 		fmt.Sprintf("PATH=%s", sandboxPath),

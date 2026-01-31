@@ -1,3 +1,4 @@
+// -- internal/sandbox/manager_test.go --
 package sandbox
 
 import (
@@ -86,6 +87,61 @@ func TestGenerateSpec(t *testing.T) {
 	// This confirms resolveSystemGoroot successfully used our mock
 	if !foundGorootMount {
 		t.Errorf("System GOROOT mount %s not found (mock injection failed)", mockGoroot)
+	}
+}
+
+// TestGenerateSpec_MountSorting ensures that overlapping mounts are sorted correctly.
+// A parent directory must always be mounted BEFORE its subdirectory to avoid shadowing.
+func TestGenerateSpec_MountSorting(t *testing.T) {
+	// Create paths
+	rootDir := t.TempDir()
+	childDir := filepath.Join(rootDir, "child")
+	if err := os.Mkdir(childDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mount child FIRST, then root.
+	// If NOT sorted, child comes first. Root shadows child. Failure.
+	// If sorted, Root comes first. Child overlays Root. Success.
+	cfg := Config{
+		Args:    []string{"noop"},
+		Mounts:  []string{childDir, rootDir},
+		WorkDir: rootDir,
+	}
+
+	// Mock deps
+	restoreExec := replaceExecFunc(func(ctx context.Context, cmd string, args ...string) *exec.Cmd {
+		return mockHelperCommand(ctx, "echo", "")
+	})
+	defer restoreExec()
+	origLookPath := lookPathFunc
+	lookPathFunc = func(file string) (string, error) { return "/bin/true", nil }
+	defer func() { lookPathFunc = origLookPath }()
+
+	spec, err := generateSpec(context.Background(), cfg, "/bin/mock")
+	if err != nil {
+		t.Fatalf("generateSpec failed: %v", err)
+	}
+
+	// Find the indices of the mounts
+	rootIdx, childIdx := -1, -1
+	for i, m := range spec.Mounts {
+		if m.Destination == rootDir {
+			rootIdx = i
+		}
+		if m.Destination == childDir {
+			childIdx = i
+		}
+	}
+
+	if rootIdx == -1 || childIdx == -1 {
+		t.Fatal("Failed to find requested mounts in spec")
+	}
+
+	// Assert: Root must be mounted BEFORE Child
+	if rootIdx > childIdx {
+		t.Errorf("Mount Order Bug: Parent %s (idx %d) is mounted AFTER Child %s (idx %d). This causes shadowing.",
+			rootDir, rootIdx, childDir, childIdx)
 	}
 }
 

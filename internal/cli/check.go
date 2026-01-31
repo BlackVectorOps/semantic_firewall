@@ -28,6 +28,11 @@ func RunCheck(target string, strictMode bool, enableScan bool, dbPath string, no
 	sb := RealSandboxer{}
 	fsys := RealFileSystem{}
 
+	// Resolve database path BEFORE entering the sandbox.
+	if enableScan && dbPath == "" {
+		dbPath = ResolveDBPath("")
+	}
+
 	if !noSandbox && !sb.IsSandboxed() {
 		args := []string{"--target", cleanTarget}
 		if strictMode {
@@ -36,6 +41,7 @@ func RunCheck(target string, strictMode bool, enableScan bool, dbPath string, no
 		if enableScan {
 			args = append(args, "--scan")
 		}
+		// Always pass the resolved DB path explicitly
 		if dbPath != "" {
 			args = append(args, "--db", dbPath)
 		}

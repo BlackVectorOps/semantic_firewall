@@ -34,6 +34,13 @@ func RunScan(target string, opts models.ScanOptions, noSandbox bool) error {
 
 	cleanTarget := filepath.Clean(target)
 
+	// Resolve database path BEFORE entering the sandbox.
+	// The sandbox does not mount system directories like /usr/local/share by default,
+	// so attempting to resolve the default DB path inside the sandbox will fail.
+	if opts.DBPath == "" {
+		opts.DBPath = ResolveDBPath("")
+	}
+
 	if !noSandbox && !sb.IsSandboxed() {
 		args := []string{"--target", cleanTarget}
 		args = append(args, "--threshold", fmt.Sprintf("%f", opts.Threshold))
@@ -45,6 +52,7 @@ func RunScan(target string, opts models.ScanOptions, noSandbox bool) error {
 		if opts.ScanDeps {
 			args = append(args, "--deps")
 		}
+		// Always pass the resolved DB path explicitly
 		if opts.DBPath != "" {
 			args = append(args, "--db", opts.DBPath)
 		}
@@ -349,7 +357,7 @@ func loadPackagesWithDeps(pkgLoader PackageLoader, target string, transitive boo
 
 	var dir string
 	var pattern string
-	info, err := os.Stat(target) // We still use OS stat for the target path resolution initially
+	info, err := os.Stat(target) // still uses OS stat for the target path resolution initially
 	if err != nil {
 		return nil, err
 	}
@@ -381,9 +389,17 @@ func collectDependencies(pkg *packages.Package, deps map[string]*packages.Packag
 	}
 	visited[pkg.PkgPath] = true
 	for importPath, importPkg := range pkg.Imports {
-		if !strings.Contains(importPath, ".") && !strings.Contains(importPath, "/") {
+		// Improved standard library detection.
+		// Previous logic: !contains(., ".") && !contains(., "/") failed for "net/http".
+		// New logic: Check if the first path segment (domain) contains a dot.
+		// Standard lib packages (fmt, net/http) do not have dots in the first segment.
+		// 3rd party (github.com/...) do.
+		parts := strings.Split(importPath, "/")
+		if len(parts) > 0 && !strings.Contains(parts[0], ".") {
+			// Skip Standard Library and potential internal non-module packages that are not explicitly targeted.
 			continue
 		}
+
 		if _, ok := deps[importPath]; ok {
 			continue
 		}

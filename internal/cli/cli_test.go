@@ -13,6 +13,7 @@ import (
 
 	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/topology"
 	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/detection"
+	"golang.org/x/tools/go/packages"
 )
 
 // -- MOCKS --
@@ -98,7 +99,11 @@ func TestShortFunctionName(t *testing.T) {
 		{"pkg.Type.Method", "Type.Method"},   // First dot separation (keeps receiver)
 		{"(*Type).Method", "(*Type).Method"}, // Idempotency check
 
-		// Generics (The Critical Fix)
+		// Recursive Parsing Fixes
+		{"(*pkg.Type).Method", "(*Type).Method"},
+		{"(pkg.Type).Method", "(Type).Method"},
+
+		// Generics
 		{"pkg.Func[int]", "Func[int]"},
 		{"pkg.Func[a/b.T]", "Func[a/b.T]"}, // Slash inside generic should not split
 		{"github.com/pkg.Func[github.com/other.Type]", "Func[github.com/other.Type]"},
@@ -133,6 +138,42 @@ func FuzzShortFunctionName(f *testing.F) {
 		// Just ensure it doesn't panic
 		_ = ShortFunctionName(input)
 	})
+}
+
+// TestDependencyFilter verifies that standard library packages are skipped
+// while 3rd party packages are retained.
+func TestDependencyFilter(t *testing.T) {
+	tests := []struct {
+		path   string
+		expect bool // true = keep (scan), false = skip
+	}{
+		{"fmt", false},
+		{"net/http", false},           // The bug was here (has slash)
+		{"github.com/user/lib", true}, // Has dot in first segment
+		{"gopkg.in/yaml.v2", true},    // Has dot
+		{"myinternal/pkg", false},     // No dot, assumed internal/std
+		{"cloud.google.com/go", true}, // Has dot
+	}
+
+	for _, tc := range tests {
+		// We verify the logic used inside collectDependencies
+		// Mock package structure
+		deps := make(map[string]*packages.Package)
+		visited := make(map[string]bool)
+		pkg := &packages.Package{
+			PkgPath: "main",
+			Imports: map[string]*packages.Package{
+				tc.path: {PkgPath: tc.path},
+			},
+		}
+
+		collectDependencies(pkg, deps, false, visited)
+
+		_, kept := deps[tc.path]
+		if kept != tc.expect {
+			t.Errorf("Filter logic for %q = %v; want %v", tc.path, kept, tc.expect)
+		}
+	}
 }
 
 // TestScanDeterminism ensures that map iteration order does not affect result order.
