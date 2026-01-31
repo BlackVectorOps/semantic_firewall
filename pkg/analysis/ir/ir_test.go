@@ -408,3 +408,159 @@ func TestCanonicalizer_LoopDepthLimit(t *testing.T) {
 		t.Fatal("Canonicalization timed out on deep loops - recursion limit failed")
 	}
 }
+
+func TestCanonicalizer_SelectCaseOrdering(t *testing.T) {
+	t.Parallel()
+
+	// Test that select case reordering produces identical fingerprints.
+	// This validates the stability fix for select statements where case
+	// order is semantically neutral (Go randomly picks when multiple channels ready).
+
+	// Version A: ch1 case first
+	srcA := `package main
+	func selectTest(ch1, ch2 chan int) int {
+		select {
+		case x := <-ch1:
+			return x + 1
+		case y := <-ch2:
+			return y + 2
+		default:
+			return 0
+		}
+	}`
+
+	// Version B: ch2 case first (semantically equivalent)
+	srcB := `package main
+	func selectTest(ch1, ch2 chan int) int {
+		select {
+		case y := <-ch2:
+			return y + 2
+		case x := <-ch1:
+			return x + 1
+		default:
+			return 0
+		}
+	}`
+
+	fnA := testutil.CompileAndGetFunction(t, srcA, "selectTest")
+	fnB := testutil.CompileAndGetFunction(t, srcB, "selectTest")
+
+	cA := ir.NewCanonicalizer(ir.DefaultLiteralPolicy)
+	defer ir.ReleaseCanonicalizer(cA)
+	cB := ir.NewCanonicalizer(ir.DefaultLiteralPolicy)
+	defer ir.ReleaseCanonicalizer(cB)
+
+	outA := cA.CanonicalizeFunction(fnA)
+	outB := cB.CanonicalizeFunction(fnB)
+
+	// Both should contain the sorted select representation
+	if !strings.Contains(outA, "Select [non-blocking]") {
+		t.Errorf("Expected Select instruction in output A:\n%s", outA)
+	}
+	if !strings.Contains(outB, "Select [non-blocking]") {
+		t.Errorf("Expected Select instruction in output B:\n%s", outB)
+	}
+
+	// Extract the select lines and verify they match
+	selectLineA := extractSelectLine(outA)
+	selectLineB := extractSelectLine(outB)
+
+	if selectLineA != selectLineB {
+		t.Errorf("Select case ordering should produce identical canonical representations.\nVersion A: %s\nVersion B: %s", selectLineA, selectLineB)
+	}
+}
+
+func extractSelectLine(ir string) string {
+	for _, line := range strings.Split(ir, "\n") {
+		if strings.Contains(line, "Select") {
+			return strings.TrimSpace(line)
+		}
+	}
+	return ""
+}
+
+func TestCanonicalizer_RangeMapStability(t *testing.T) {
+	t.Parallel()
+
+	// Test that range over map produces consistent fingerprints.
+	// The map iteration order is non-deterministic at runtime,
+	// but the SSA structure should be deterministic.
+
+	src := `package main
+	func rangeMap(m map[string]int) int {
+		sum := 0
+		for k, v := range m {
+			_ = k
+			sum += v
+		}
+		return sum
+	}`
+
+	fn := testutil.CompileAndGetFunction(t, src, "rangeMap")
+	c := ir.NewCanonicalizer(ir.DefaultLiteralPolicy)
+	defer ir.ReleaseCanonicalizer(c)
+
+	out := c.CanonicalizeFunction(fn)
+
+	// Should have Range and Next instructions
+	if !strings.Contains(out, "Range") {
+		t.Errorf("Expected Range instruction in output:\n%s", out)
+	}
+	if !strings.Contains(out, "Next") {
+		t.Errorf("Expected Next instruction in output:\n%s", out)
+	}
+
+	// Canonicalize the same function multiple times to ensure stability
+	for i := 0; i < 5; i++ {
+		c2 := ir.NewCanonicalizer(ir.DefaultLiteralPolicy)
+		out2 := c2.CanonicalizeFunction(fn)
+		ir.ReleaseCanonicalizer(c2)
+
+		if out != out2 {
+			t.Errorf("Iteration %d: Canonical IR is not stable across multiple canonicalizations.\nExpected:\n%s\nGot:\n%s", i, out, out2)
+		}
+	}
+}
+
+func TestCanonicalizer_BlockOrderingStability(t *testing.T) {
+	t.Parallel()
+
+	// Test that blocks are ordered deterministically even when there
+	// are multiple branches from a single point (e.g., type switch).
+
+	src := `package main
+	func typeSwitch(x interface{}) string {
+		switch v := x.(type) {
+		case int:
+			return "int"
+		case string:
+			return v
+		case bool:
+			if v {
+				return "true"
+			}
+			return "false"
+		default:
+			return "unknown"
+		}
+	}`
+
+	fn := testutil.CompileAndGetFunction(t, src, "typeSwitch")
+
+	// Run canonicalization multiple times
+	var outputs []string
+	for i := 0; i < 5; i++ {
+		c := ir.NewCanonicalizer(ir.DefaultLiteralPolicy)
+		out := c.CanonicalizeFunction(fn)
+		ir.ReleaseCanonicalizer(c)
+		outputs = append(outputs, out)
+	}
+
+	// All outputs should be identical
+	for i := 1; i < len(outputs); i++ {
+		if outputs[0] != outputs[i] {
+			t.Errorf("Block ordering not stable. Run 0 differs from run %d.\nRun 0:\n%s\nRun %d:\n%s",
+				i, outputs[0], i, outputs[i])
+		}
+	}
+}

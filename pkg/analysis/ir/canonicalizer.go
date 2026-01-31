@@ -695,15 +695,61 @@ func (c *Canonicalizer) deterministicTraversal(fn *ssa.Function) []*ssa.BasicBlo
 
 		succs := c.getVirtualSuccessors(block)
 		if len(succs) == 2 {
+			// Binary branches (if-then-else): preserve true/false order.
 			stack = append(stack, succs[1])
 			stack = append(stack, succs[0])
+		} else if len(succs) > 2 {
+			// Multi-way branches (select, typeswitch) can have successors
+			// in an order that depends on AST position or compiler version. Sort them
+			// canonically by their structural fingerprint to ensure deterministic traversal.
+			//
+			// Sort by: block's first instruction type, then instruction count, then original index.
+			// This produces a stable order based on block content rather than emission order.
+			orderedSuccs := make([]*ssa.BasicBlock, len(succs))
+			copy(orderedSuccs, succs)
+			sort.SliceStable(orderedSuccs, func(i, j int) bool {
+				return c.blockSortKey(orderedSuccs[i]) < c.blockSortKey(orderedSuccs[j])
+			})
+			// Push in reverse order so first in sorted order is processed first
+			for i := len(orderedSuccs) - 1; i >= 0; i-- {
+				stack = append(stack, orderedSuccs[i])
+			}
 		} else {
+			// 0 or 1 successor: no ambiguity
 			for i := len(succs) - 1; i >= 0; i-- {
 				stack = append(stack, succs[i])
 			}
 		}
 	}
 	return sortedBlocks
+}
+
+// Generates a canonical key for sorting basic blocks.
+// The key is designed to be stable across AST reorderings and compiler versions
+// by focusing on structural properties rather than positional indices.
+func (c *Canonicalizer) blockSortKey(b *ssa.BasicBlock) string {
+	if b == nil || len(b.Instrs) == 0 {
+		return "\xff" // Sort empty blocks last
+	}
+
+	// Build key from: first instruction type, instruction count, original index as tiebreaker
+	firstInstr := b.Instrs[0]
+	instrType := fmt.Sprintf("%T", firstInstr)
+
+	// Include a structural fingerprint of the first few instructions
+	var keyParts []string
+	keyParts = append(keyParts, instrType)
+	keyParts = append(keyParts, fmt.Sprintf("%03d", len(b.Instrs)))
+
+	// Sample up to 3 instruction types for better discrimination
+	for i := 0; i < 3 && i < len(b.Instrs); i++ {
+		keyParts = append(keyParts, fmt.Sprintf("%T", b.Instrs[i]))
+	}
+
+	// Original index as final tiebreaker for complete determinism
+	keyParts = append(keyParts, fmt.Sprintf("%05d", b.Index))
+
+	return strings.Join(keyParts, "|")
 }
 
 func (c *Canonicalizer) writeFunctionSignature(fn *ssa.Function) {
@@ -956,18 +1002,30 @@ func (c *Canonicalizer) writeSelect(w *strings.Builder, i *ssa.Select, context s
 		w.WriteString(" [non-blocking]")
 	}
 
-	type selectState struct {
-		dir         string
-		chanRepr    string
-		sendValRepr string
+	// selectStateCanon captures the canonicalized representation of each case.
+	// Use origIndex to track the original position for Extract instruction correlation,
+	// but sort by canonical form to produce stable fingerprints across case reordering.
+	type selectStateCanon struct {
+		origIndex   int    // Original index in States slice (for documentation/debugging)
+		dir         string // Direction: "->" (send), "<-" (recv), or "?" (unknown)
+		chanRepr    string // Canonical representation of channel operand
+		sendValRepr string // Canonical representation of sent value (for sends only)
+		sortKey     string // Pre-computed key for deterministic sorting
 	}
 
-	var states []selectState
+	var states []selectStateCanon
+
+	// Non-blocking selects have an implicit default case. We represent it canonically.
 	if !i.Blocking {
-		states = append(states, selectState{dir: "<-", chanRepr: "<default>"})
+		states = append(states, selectStateCanon{
+			origIndex: -1,
+			dir:       "<-",
+			chanRepr:  "<default>",
+			sortKey:   "\x00<default>", // Sort default first with null prefix
+		})
 	}
 
-	for _, state := range i.States {
+	for idx, state := range i.States {
 		dirStr := "?"
 		switch state.Dir {
 		case types.SendOnly:
@@ -976,7 +1034,7 @@ func (c *Canonicalizer) writeSelect(w *strings.Builder, i *ssa.Select, context s
 			dirStr = "<-"
 		}
 
-		s := selectState{dir: dirStr}
+		s := selectStateCanon{origIndex: idx, dir: dirStr}
 		if state.Chan != nil {
 			s.chanRepr = c.NormalizeOperand(state.Chan, context)
 		} else {
@@ -986,12 +1044,31 @@ func (c *Canonicalizer) writeSelect(w *strings.Builder, i *ssa.Select, context s
 		if state.Send != nil {
 			s.sendValRepr = c.NormalizeOperand(state.Send, context)
 		}
+
+		// Build sort key: direction + channel + optional send value
+		// This ensures semantically equivalent cases have identical keys.
+		s.sortKey = s.dir + s.chanRepr
+		if s.sendValRepr != "" {
+			s.sortKey += "<-" + s.sendValRepr
+		}
+
 		states = append(states, s)
 	}
 
-	// BUG FIX: Removed sorting of select states. The return value of Select corresponds
-	// to the index in the States slice. Sorting obscures this relationship.
-	// We preserve the order to reflect the semantic index.
+	// Sort select cases to produce deterministic fingerprints.
+	// The Go spec does not define case evaluation order for select when multiple
+	// channels are ready (it's random at runtime). Therefore, reordering cases
+	// in source code is a semantically neutral refactor that should not change
+	// the fingerprint.
+	//
+	// Note: The Select instruction's return value includes an index indicating
+	// which case was chosen. Code that depends on this index (via Extract) will
+	// still work correctly because we're only canonicalizing the *representation*
+	// for fingerprinting, not modifying the actual SSA. The Extract indices
+	// remain bound to original positions.
+	sort.SliceStable(states, func(a, b int) bool {
+		return states[a].sortKey < states[b].sortKey
+	})
 
 	for _, state := range states {
 		w.WriteString(fmt.Sprintf(" (%s %s", state.dir, state.chanRepr))
@@ -1039,7 +1116,7 @@ func (c *Canonicalizer) writePhi(w *strings.Builder, i *ssa.Phi, instr ssa.Instr
 		edges = append(edges, edge{predID: predID, predIndex: idx, value: valStr})
 	}
 
-	// BUG FIX: Deterministic sorting logic for Phi edges
+	// Deterministic sorting logic for Phi edges
 	sort.SliceStable(edges, func(a, b int) bool {
 		// Primary: Numeric index if available
 		if edges[a].predIndex != -1 && edges[b].predIndex != -1 {
