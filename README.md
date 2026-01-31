@@ -868,17 +868,16 @@ flowchart LR
     D -.-> D1[Symbolic Evaluation]
     E -.-> E1[Virtual IR Normalization]
     
-    style A fill:#4c1d95,stroke:#8b5cf6,stroke-width:2px,color:#e9d5ff
-    style B fill:#1e3a8a,stroke:#3b82f6,stroke-width:2px,color:#dbeafe
-    style C fill:#064e3b,stroke:#10b981,stroke-width:2px,color:#d1fae5
-    style D fill:#7c2d12,stroke:#f97316,stroke-width:2px,color:#ffedd5
-    style E fill:#701a75,stroke:#d946ef,stroke-width:2px,color:#fae8ff
-    style F fill:#0f766e,stroke:#14b8a6,stroke-width:2px,color:#ccfbf1
+    %% Main pipeline nodes: Deep blue with cyan accents
+    classDef pipeline fill:#0c1929,stroke:#00d4ff,stroke-width:1px,color:#ffffff
+    class A,B,C,D,E,F pipeline
     
-    style B1 fill:transparent,stroke:#3b82f6,color:#93c5fd
-    style C1 fill:transparent,stroke:#10b981,color:#6ee7b7
-    style D1 fill:transparent,stroke:#f97316,color:#fdba74
-    style E1 fill:transparent,stroke:#d946ef,color:#f0abfc
+    %% Annotation nodes: Transparent with subtle blue glow
+    classDef annotation fill:#1e293b,stroke:#475569,stroke-width:1px,color:#94a3b8,stroke-dasharray:3 3
+    class B1,C1,D1,E1 annotation
+    
+    linkStyle default stroke:#00d4ff,stroke-width:1px
+    linkStyle 5,6,7,8 stroke:#475569,stroke-width:1px,stroke-dasharray:3 3
 ```
 
 1. **SSA Construction:** `golang.org/x/tools/go/ssa` converts source to Static Single Assignment form with explicit control flow graphs
