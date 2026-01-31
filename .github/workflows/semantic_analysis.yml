@@ -81,25 +81,28 @@ jobs:
 
       - name: Run Semantic Analysis (Sandboxed)
         uses: geomys/sandboxed-step@v1.2.0
-        # FIX: 'env' must be a sibling to 'with', not a child.
-        # This injects the vars into the process environment where the sandbox can see them.
-        env:
-          MODE: ${{ steps.mode.outputs.mode }}
-          WORKTREE_DIR: ${{ steps.prep.outputs.worktree_dir }}
-          HAS_GO: ${{ steps.prep.outputs.has_go_files }}
         with:
           disable-network: 'true'
-          # Assuming 'run' is a valid input parameter for geomys/sandboxed-step.
-          # If this action does not support a 'run' input, you must use 'entrypoint'.
+          # CONTEXT INJECTION:
+          # We inject vars via interpolation. We write to a local artifact
+          # instead of trying to hit the runner's step summary directly.
           run: |
+            export MODE="${{ steps.mode.outputs.mode }}"
+            export WORKTREE_DIR="${{ steps.prep.outputs.worktree_dir }}"
+            export HAS_GO="${{ steps.prep.outputs.has_go_files }}"
+            
+            # Strict mode enabled after exports
             set -euo pipefail
 
-            echo "## Semantic Analysis Report ($MODE)" >> $GITHUB_STEP_SUMMARY
-            echo "| File | Status | Match % |" >> $GITHUB_STEP_SUMMARY
-            echo "| :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
+            # Define local report artifact (Safe Write)
+            REPORT_FILE="scan_report.md"
+
+            echo "## Semantic Analysis Report ($MODE)" >> "$REPORT_FILE"
+            echo "| File | Status | Match % |" >> "$REPORT_FILE"
+            echo "| :--- | :--- | :--- |" >> "$REPORT_FILE"
 
             if [ "$HAS_GO" != "true" ]; then
-                echo "No Go files changed." >> $GITHUB_STEP_SUMMARY
+                echo "No Go files changed." >> "$REPORT_FILE"
                 exit 0
             fi
 
@@ -113,18 +116,15 @@ jobs:
             LOGIC_FAIL=0
 
             # Process the pre-calculated diff stream
-            # The structure matches 'git diff -z --name-status' output
             while IFS= read -r -d '' status; do
               case "$status" in
                 R*|C*)
-                   # Rename or Copy: consumes two paths (old, new)
                    IFS= read -r -d '' old_path
                    IFS= read -r -d '' new_path
                    OLD_FILE_REF="$old_path"
                    NEW_FILE_REF="$new_path"
                    ;;
                 *)
-                   # Modify/Add/Delete: consumes one path
                    IFS= read -r -d '' path
                    OLD_FILE_REF="$path"
                    NEW_FILE_REF="$path"
@@ -133,36 +133,30 @@ jobs:
 
               if [[ "$NEW_FILE_REF" != *.go ]] && [[ "$OLD_FILE_REF" != *.go ]]; then continue; fi
 
-              # Resolve New File (HEAD)
               if [ -f "$NEW_FILE_REF" ]; then
                   NEW_FILE="$NEW_FILE_REF"
               else
                   NEW_FILE=""
               fi
 
-              # Resolve Old File (Base Worktree)
               OLD_FILE="$WORKTREE_DIR/$OLD_FILE_REF"
               if [ ! -f "$OLD_FILE" ]; then
                   OLD_FILE=""
               fi
 
-              # Skip if both are missing
               if [[ -z "$NEW_FILE" ]] && [[ -z "$OLD_FILE" ]]; then continue; fi
 
-              # Handle Additions (New File)
               if [[ -z "$OLD_FILE" ]]; then
-                  echo "| \`$NEW_FILE_REF\` | New File | N/A |" >> $GITHUB_STEP_SUMMARY
+                  echo "| \`$NEW_FILE_REF\` | New File | N/A |" >> "$REPORT_FILE"
                   continue
               fi
 
-              # Handle Deletions
               if [[ -z "$NEW_FILE" ]]; then
-                  echo "| \`$OLD_FILE_REF\` | Deleted | N/A |" >> $GITHUB_STEP_SUMMARY
+                  echo "| \`$OLD_FILE_REF\` | Deleted | N/A |" >> "$REPORT_FILE"
                   continue
               fi
 
-              # Execute SFW using the local binary built in the previous step
-              # We use '|| true' to capture exit codes without crashing the script (due to set -e)
+              # Execute SFW
               if ! OUTPUT=$(./bin/sfw diff "$OLD_FILE" "$NEW_FILE"); then
                   echo "::error::sfw failed to process $NEW_FILE_REF"
                   ERROR_COUNT=$((ERROR_COUNT + 1))
@@ -176,16 +170,14 @@ jobs:
                   continue
               fi
 
-              # Parse Results using jq (replaces 'bc' dependency)
+              # Parse Results
               PCT=$(echo "$OUTPUT" | jq -r '.summary.semantic_match_pct // 0')
               MODIFIED=$(echo "$OUTPUT" | jq -r '.summary.modified // 0')
-
-              # Logic check using jq to avoid floating point issues in shell
               IS_BELOW_100=$(echo "$OUTPUT" | jq -r 'if (.summary.semantic_match_pct // 0) < 100 then "true" else "false" end')
 
               if [ "$IS_BELOW_100" = "true" ]; then
                   STATUS_ICON="Modified ($MODIFIED)"
-                  echo "| \`$NEW_FILE_REF\` | $STATUS_ICON | **$PCT%** |" >> $GITHUB_STEP_SUMMARY
+                  echo "| \`$NEW_FILE_REF\` | $STATUS_ICON | **$PCT%** |" >> "$REPORT_FILE"
 
                   if [ "$MODE" == "BLOCKER" ]; then
                       echo "::error file=$NEW_FILE_REF::Logic change detected in safe refactor! ($PCT%)"
@@ -193,22 +185,31 @@ jobs:
                   fi
               else
                   STATUS_ICON="Preserved"
-                  echo "| \`$NEW_FILE_REF\` | $STATUS_ICON | **$PCT%** |" >> $GITHUB_STEP_SUMMARY
+                  echo "| \`$NEW_FILE_REF\` | $STATUS_ICON | **$PCT%** |" >> "$REPORT_FILE"
               fi
 
             done < diff_stream.bin
 
             if [ $ERROR_COUNT -gt 0 ]; then
-                echo "" >> $GITHUB_STEP_SUMMARY
-                echo "**CI FAILED**: Tool execution failures detected." >> $GITHUB_STEP_SUMMARY
+                echo "" >> "$REPORT_FILE"
+                echo "**CI FAILED**: Tool execution failures detected." >> "$REPORT_FILE"
                 exit 1
             fi
 
             if [ $LOGIC_FAIL -eq 1 ]; then
-                echo "" >> $GITHUB_STEP_SUMMARY
-                echo "**CI FAILED**: Logic changed in 'semantic-safe' PR." >> $GITHUB_STEP_SUMMARY
+                echo "" >> "$REPORT_FILE"
+                echo "**CI FAILED**: Logic changed in 'semantic-safe' PR." >> "$REPORT_FILE"
                 exit 1
             fi
+
+      - name: Publish Analysis Report
+        if: always()
+        # This runs on the host, so it has access to GITHUB_STEP_SUMMARY.
+        # It reads the artifact produced by the sandbox.
+        run: |
+          if [ -f "scan_report.md" ]; then
+             cat scan_report.md >> $GITHUB_STEP_SUMMARY
+          fi
 
       - name: Cleanup Worktree
         if: always()
