@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -111,8 +112,10 @@ func SandboxExec(sb Sandboxer, stdout, stderr io.Writer, command string, args []
 	}
 
 	// 2. Prepare Configuration
+	// Use "internal-worker" prefix to route to the worker dispatch logic
+	// which handles flag parsing differently than the standard CLI.
 	cfg := sandbox.Config{
-		Args:    append([]string{command}, args...),
+		Args:    append([]string{"internal-worker", command}, args...),
 		Mounts:  mounts,
 		WorkDir: cwd,
 	}
@@ -128,6 +131,102 @@ func SandboxExec(sb Sandboxer, stdout, stderr io.Writer, command string, args []
 			return fmt.Errorf("operation cancelled")
 		}
 		return fmt.Errorf("sandboxed process failed: %w", err)
+	}
+
+	return nil
+}
+
+// PrepareSandboxDB ensures a database is usable inside the sandbox.
+// If running sandboxed (where mounts are typically ReadOnly), PebbleDB fails to lock.
+// This copies the DB to a secure, writable temp directory.
+// Returns: newPath, cleanupFunc, error
+func PrepareSandboxDB(originalPath string) (string, func(), error) {
+	if !sandbox.IsSandboxed() {
+		return originalPath, func() {}, nil
+	}
+
+	// Security: Use MkdirTemp to avoid collisions or symlink attacks in shared environments
+	tmpDir, err := os.MkdirTemp("", "sfw_sigdb_")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("failed to create temp dir: %w", err)
+	}
+
+	cleanup := func() { os.RemoveAll(tmpDir) }
+
+	// Copy content using shared robust logic
+	if err := copyDir(originalPath, tmpDir); err != nil {
+		cleanup() // Clean up partial copy
+		return "", func() {}, fmt.Errorf("failed to copy database: %w", err)
+	}
+
+	return tmpDir, cleanup, nil
+}
+
+// copyDir recursively copies a directory tree from src to dst.
+func copyDir(src, dst string) error {
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("stat source: %w", err)
+	}
+	if !srcInfo.IsDir() {
+		return fmt.Errorf("source is not a directory: %s", src)
+	}
+
+	if err := os.MkdirAll(dst, srcInfo.Mode()); err != nil {
+		return fmt.Errorf("create dest dir: %w", err)
+	}
+
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		dstPath := filepath.Join(dst, relPath)
+
+		if d.IsDir() {
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			return os.MkdirAll(dstPath, info.Mode())
+		}
+
+		// Security: Skip symlinks during DB copy to avoid escaping destination
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+
+		return copyFile(path, dstPath)
+	})
+}
+
+// copyFile copies a single file from src to dst using a buffer.
+func copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	srcInfo, err := srcFile.Stat()
+	if err != nil {
+		return err
+	}
+
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode())
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	// Use CopyBuffer with a 32KB buffer to minimize syscalls
+	buf := make([]byte, 32*1024)
+	if _, err := io.CopyBuffer(dstFile, srcFile, buf); err != nil {
+		return err
 	}
 
 	return nil

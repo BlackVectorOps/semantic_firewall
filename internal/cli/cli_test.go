@@ -167,7 +167,7 @@ func TestDependencyFilter(t *testing.T) {
 			},
 		}
 
-		collectDependencies(pkg, deps, false, visited)
+		collectDependencies(pkg, deps, false, visited, "")
 
 		_, kept := deps[tc.path]
 		if kept != tc.expect {

@@ -36,3 +36,4 @@ __debug_bin*
 # Local environment files
 .env
 .env.local
+signatures.db/

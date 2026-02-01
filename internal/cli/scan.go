@@ -35,10 +35,13 @@ func RunScan(target string, opts models.ScanOptions, noSandbox bool) error {
 	cleanTarget := filepath.Clean(target)
 
 	// Resolve database path BEFORE entering the sandbox.
-	// The sandbox does not mount system directories like /usr/local/share by default,
-	// so attempting to resolve the default DB path inside the sandbox will fail.
 	if opts.DBPath == "" {
 		opts.DBPath = ResolveDBPath("")
+	}
+	if opts.DBPath != "" {
+		if abs, err := filepath.Abs(opts.DBPath); err == nil {
+			opts.DBPath = abs
+		}
 	}
 
 	if !noSandbox && !sb.IsSandboxed() {
@@ -52,12 +55,16 @@ func RunScan(target string, opts models.ScanOptions, noSandbox bool) error {
 		if opts.ScanDeps {
 			args = append(args, "--deps")
 		}
-		// Always pass the resolved DB path explicitly
+
+		var inputs []string
+		inputs = append(inputs, cleanTarget)
+
 		if opts.DBPath != "" {
 			args = append(args, "--db", opts.DBPath)
+			inputs = append(inputs, opts.DBPath)
 		}
 
-		return SandboxExec(sb, os.Stdout, os.Stderr, "scan", args, cleanTarget, opts.DBPath)
+		return SandboxExec(sb, os.Stdout, os.Stderr, "scan", args, inputs...)
 	}
 
 	return RunScanLogic(fsys, pkgLoader, cleanTarget, opts)
@@ -87,11 +94,19 @@ func RunScanLogic(fsys FileSystem, pkgLoader PackageLoader, target string, opts 
 	// DB Initialization
 	if !IsJSON(opts.DBPath) {
 		backend = "pebbledb"
+
+		// Use shared helper logic to handle sandbox environments robustly
+		safeDBPath, cleanup, err := PrepareSandboxDB(opts.DBPath)
+		if err != nil {
+			return fmt.Errorf("failed to prepare pebbledb: %w", err)
+		}
+		defer cleanup()
+
 		scanOpts := pebbledb.DefaultPebbleScannerOptions()
 		scanOpts.MatchThreshold = opts.Threshold
 		scanOpts.ReadOnly = true
 
-		ps, err := pebbledb.NewPebbleScanner(opts.DBPath, scanOpts)
+		ps, err := pebbledb.NewPebbleScanner(safeDBPath, scanOpts)
 		if err != nil {
 			return fmt.Errorf("failed to open pebbledb: %w", err)
 		}
@@ -180,6 +195,13 @@ func RunScanParallel(fsys FileSystem, files []string, scanner SignatureScanner, 
 	for _, file := range files {
 		f := file
 		g.Go(func() error {
+			// Panic recovery for robust scanning
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "warning: panic recovered analyzing %s: %v\n", f, r)
+				}
+			}()
+
 			results, err := LoadAndFingerprint(fsys, f)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", f, err)
@@ -240,10 +262,16 @@ func RunScanDeps(pkgLoader PackageLoader, target string, opts models.ScanOptions
 		return nil, 0, nil, err
 	}
 
+	// Identify root module to filter internal packages from being flagged as deps
+	var rootModule string
+	if len(pkgs) > 0 && pkgs[0].Module != nil {
+		rootModule = pkgs[0].Module.Path
+	}
+
 	depPkgs := make(map[string]*packages.Package)
 	visited := make(map[string]bool)
 	for _, pkg := range pkgs {
-		collectDependencies(pkg, depPkgs, opts.DepsDepth == "transitive", visited)
+		collectDependencies(pkg, depPkgs, opts.DepsDepth == "transitive", visited, rootModule)
 	}
 
 	if len(depPkgs) == 0 {
@@ -276,12 +304,26 @@ func RunScanDeps(pkgLoader PackageLoader, target string, opts models.ScanOptions
 		}
 		batch := depSlice[batchStart:batchEnd]
 
-		prog, err := ssautil.AllPackages(batch, ssa.InstantiateGenerics)
-		if err != nil || prog == nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to build SSA for batch: %v\n", err)
+		// Guard SSA construction
+		var prog *ssa.Program
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "warning: panic during SSA build: %v\n", r)
+				}
+			}()
+			var ssaPkgs []*ssa.Package
+			prog, ssaPkgs = ssautil.AllPackages(batch, ssa.InstantiateGenerics)
+			if prog == nil || len(ssaPkgs) == 0 {
+				fmt.Fprintf(os.Stderr, "warning: failed to build SSA for batch\n")
+			} else {
+				prog.Build()
+			}
+		}()
+
+		if prog == nil {
 			continue
 		}
-		prog.Build()
 
 		for _, pkg := range batch {
 			pkgPath := pkg.PkgPath
@@ -302,8 +344,12 @@ func RunScanDeps(pkgLoader PackageLoader, target string, opts models.ScanOptions
 					}
 					funcName := ShortFunctionName(m.String())
 					alerts := scanFunction(m, funcName, scanner, opts.ExactOnly)
+					if len(alerts) > 0 {
+						mu.Lock()
+						allAlerts = append(allAlerts, alerts...)
+						mu.Unlock()
+					}
 					mu.Lock()
-					allAlerts = append(allAlerts, alerts...)
 					totalFunctions++
 					mu.Unlock()
 				case *ssa.Type:
@@ -316,8 +362,12 @@ func RunScanDeps(pkgLoader PackageLoader, target string, opts models.ScanOptions
 							}
 							funcName := ShortFunctionName(fn.String())
 							alerts := scanFunction(fn, funcName, scanner, opts.ExactOnly)
+							if len(alerts) > 0 {
+								mu.Lock()
+								allAlerts = append(allAlerts, alerts...)
+								mu.Unlock()
+							}
 							mu.Lock()
-							allAlerts = append(allAlerts, alerts...)
 							totalFunctions++
 							mu.Unlock()
 						}
@@ -350,14 +400,14 @@ func scanFunction(fn *ssa.Function, funcName string, scanner SignatureScanner, e
 }
 
 func loadPackagesWithDeps(pkgLoader PackageLoader, target string, transitive bool) ([]*packages.Package, error) {
-	mode := packages.NeedName | packages.NeedFiles | packages.NeedImports | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo
+	mode := packages.NeedName | packages.NeedFiles | packages.NeedImports | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedModule
 	if transitive {
 		mode |= packages.NeedDeps
 	}
 
 	var dir string
 	var pattern string
-	info, err := os.Stat(target) // still uses OS stat for the target path resolution initially
+	info, err := os.Stat(target)
 	if err != nil {
 		return nil, err
 	}
@@ -383,20 +433,23 @@ func loadPackagesWithDeps(pkgLoader PackageLoader, target string, transitive boo
 	return pkgLoader.Load(cfg, pattern)
 }
 
-func collectDependencies(pkg *packages.Package, deps map[string]*packages.Package, transitive bool, visited map[string]bool) {
+func collectDependencies(pkg *packages.Package, deps map[string]*packages.Package, transitive bool, visited map[string]bool, rootModule string) {
 	if pkg == nil || visited[pkg.PkgPath] {
 		return
 	}
 	visited[pkg.PkgPath] = true
 	for importPath, importPkg := range pkg.Imports {
-		// Improved standard library detection.
-		// Previous logic: !contains(., ".") && !contains(., "/") failed for "net/http".
-		// New logic: Check if the first path segment (domain) contains a dot.
-		// Standard lib packages (fmt, net/http) do not have dots in the first segment.
-		// 3rd party (github.com/...) do.
-		parts := strings.Split(importPath, "/")
-		if len(parts) > 0 && !strings.Contains(parts[0], ".") {
-			// Skip Standard Library and potential internal non-module packages that are not explicitly targeted.
+		// Filter: Standard Library
+		// If Module is nil, it's typically stdlib. Fallback to string check for safety.
+		if importPkg.Module == nil {
+			parts := strings.Split(importPath, "/")
+			if len(parts) > 0 && !strings.Contains(parts[0], ".") {
+				continue
+			}
+		}
+
+		// Filter: Internal packages of the target project
+		if rootModule != "" && strings.HasPrefix(importPath, rootModule) {
 			continue
 		}
 
@@ -405,7 +458,7 @@ func collectDependencies(pkg *packages.Package, deps map[string]*packages.Packag
 		}
 		deps[importPath] = importPkg
 		if transitive {
-			collectDependencies(importPkg, deps, transitive, visited)
+			collectDependencies(importPkg, deps, transitive, visited, rootModule)
 		}
 	}
 }

@@ -2,10 +2,13 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 
 	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/ir"
 	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/topology"
@@ -13,6 +16,7 @@ import (
 	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/models"
 	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/storage/jsondb"
 	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/storage/pebbledb"
+	"golang.org/x/sync/errgroup"
 )
 
 // -- Constants --
@@ -32,6 +36,12 @@ func RunCheck(target string, strictMode bool, enableScan bool, dbPath string, no
 	if enableScan && dbPath == "" {
 		dbPath = ResolveDBPath("")
 	}
+	// Ensure we are working with an absolute path for consistency
+	if dbPath != "" {
+		if abs, err := filepath.Abs(dbPath); err == nil {
+			dbPath = abs
+		}
+	}
 
 	if !noSandbox && !sb.IsSandboxed() {
 		args := []string{"--target", cleanTarget}
@@ -41,12 +51,17 @@ func RunCheck(target string, strictMode bool, enableScan bool, dbPath string, no
 		if enableScan {
 			args = append(args, "--scan")
 		}
-		// Always pass the resolved DB path explicitly
-		if dbPath != "" {
+
+		var inputs []string
+		inputs = append(inputs, cleanTarget)
+
+		// Only pass DB path if scan mode is enabled and path is non-empty
+		if enableScan && dbPath != "" {
 			args = append(args, "--db", dbPath)
+			inputs = append(inputs, dbPath)
 		}
 
-		return SandboxExec(sb, os.Stdout, os.Stderr, "check", args, cleanTarget, dbPath)
+		return SandboxExec(sb, os.Stdout, os.Stderr, "check", args, inputs...)
 	}
 
 	return RunCheckLogic(fsys, cleanTarget, strictMode, enableScan, dbPath)
@@ -70,32 +85,33 @@ func RunCheckLogic(fsys FileSystem, target string, strictMode bool, enableScan b
 		if IsJSON(dbPath) {
 			js := jsondb.NewScanner()
 			if err := js.LoadDatabase(dbPath); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not load json database: %v\n", err)
-			} else {
-				scanner = js
+				return fmt.Errorf("fatal: could not load json database: %w", err)
 			}
+			scanner = js
 		} else {
+			// Stability Fix: Use shared helper to ensure DB is writable in sandbox.
+			// PebbleDB requires a LOCK file even for read-only access.
+			safeDBPath, cleanup, err := PrepareSandboxDB(dbPath)
+			if err != nil {
+				return fmt.Errorf("fatal: failed to prepare database environment: %w", err)
+			}
+			defer cleanup()
+
 			opts := pebbledb.DefaultPebbleScannerOptions()
 			opts.ReadOnly = true
-			ps, err := pebbledb.NewPebbleScanner(dbPath, opts)
+			ps, err := pebbledb.NewPebbleScanner(safeDBPath, opts)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not open signature database: %v\n", err)
-			} else {
-				defer ps.Close()
-				scanner = ps
+				return fmt.Errorf("fatal: could not open signature database: %w", err)
 			}
+			defer ps.Close()
+			scanner = ps
 		}
 	}
 
-	var results []models.FileOutput
-	hasErrors := false
-
-	for _, file := range files {
-		output := ProcessFile(fsys, file, strictMode, scanner)
-		if output.ErrorMessage != "" {
-			hasErrors = true
-		}
-		results = append(results, output)
+	// Efficiency Upgrade: Execute analysis in parallel
+	results, hasErrors, err := ProcessFilesParallel(fsys, files, strictMode, scanner)
+	if err != nil {
+		return err
 	}
 
 	encoder := json.NewEncoder(os.Stdout)
@@ -112,6 +128,52 @@ func RunCheckLogic(fsys FileSystem, target string, strictMode bool, enableScan b
 }
 
 // -- Processing & Analysis --
+
+func ProcessFilesParallel(fsys FileSystem, files []string, strictMode bool, scanner SignatureScanner) ([]models.FileOutput, bool, error) {
+	var (
+		results   = make([]models.FileOutput, len(files))
+		hasErrors bool
+		mu        sync.Mutex
+	)
+
+	g, ctx := errgroup.WithContext(context.Background())
+	// Limit concurrency to avoid thrashing on smaller instances
+	g.SetLimit(runtime.GOMAXPROCS(0))
+
+	for i, file := range files {
+		idx := i
+		f := file
+		g.Go(func() error {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
+			// Robustness: Recover from panics in SSA generation to protect the run
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "warning: panic recovered analyzing %s: %v\n", f, r)
+				}
+			}()
+
+			output := ProcessFile(fsys, f, strictMode, scanner)
+
+			mu.Lock()
+			results[idx] = output
+			if output.ErrorMessage != "" {
+				hasErrors = true
+			}
+			mu.Unlock()
+
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return nil, false, err
+	}
+
+	return results, hasErrors, nil
+}
 
 func ProcessFile(fsys FileSystem, filename string, strictMode bool, scanner SignatureScanner) models.FileOutput {
 	absPath, err := fsys.Abs(filename)
@@ -130,7 +192,6 @@ func ProcessFile(fsys FileSystem, filename string, strictMode bool, scanner Sign
 		}
 	}
 
-	// Use helper to read with limit
 	src, err := fsys.ReadFile(absPath)
 	if err != nil {
 		return models.FileOutput{File: filename, ErrorMessage: err.Error()}

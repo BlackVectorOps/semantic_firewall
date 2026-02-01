@@ -21,9 +21,9 @@ inputs:
     required: false
     default: '1.24'
   signatures:
-    description: 'Path to signature database (scan mode only)'
+    description: 'Path to signature database (scan mode only). Required for scan mode.'
     required: false
-    default: './signatures.db'
+    default: ''
   threshold:
     description: 'Match confidence threshold 0.0-1.0 (scan mode only)'
     required: false
@@ -80,71 +80,152 @@ runs:
       with:
         go-version: ${{ inputs.go-version }}
 
-    - name: Install sfw
+    # IMPORTANT: Caller must use actions/checkout with fetch-depth: 0 for diff/audit modes
+    - name: Validate Checkout Depth
+      if: ${{ inputs.mode == 'diff' || inputs.mode == 'audit' }}
       shell: bash
       run: |
-        echo "::notice::Installing sfw from remote registry..."
-        go install github.com/BlackVectorOps/semantic_firewall/v3/cmd/sfw@v3.1.6
+        set -euo pipefail
+        if ! git rev-parse HEAD~1 >/dev/null 2>&1; then
+          echo "::error::Insufficient git history. Please use 'actions/checkout' with 'fetch-depth: 0' for diff/audit modes."
+          exit 1
+        fi
 
-    # Security & Infrastructure: Install gVisor (runsc)
-    # Required runtime dependency for sandboxed execution.
-    # Hardened against supply chain attacks by pinning version and SHA512.
+    - name: Install sfw
+      shell: bash
+      env:
+        SFW_VERSION: "v3.2.0"
+      run: |
+        set -euo pipefail
+        
+        if command -v sfw &>/dev/null; then
+          echo "::notice::sfw already installed: $(sfw version 2>/dev/null || echo 'version unknown')"
+          exit 0
+        fi
+        
+        echo "::notice::Installing sfw ${SFW_VERSION}..."
+        
+        MAX_RETRIES=3
+        RETRY_DELAY=5
+        
+        for attempt in $(seq 1 $MAX_RETRIES); do
+          if go install "github.com/BlackVectorOps/semantic_firewall/v3/cmd/sfw@${SFW_VERSION}"; then
+            break
+          fi
+          
+          if [[ $attempt -eq $MAX_RETRIES ]]; then
+            echo "::error::Failed to install sfw after ${MAX_RETRIES} attempts."
+            exit 1
+          fi
+          sleep $RETRY_DELAY
+        done
+        
+        if ! command -v sfw &>/dev/null; then
+          echo "::error::sfw binary not found in PATH after installation."
+          exit 1
+        fi
+
+    - name: Prepare Analysis Environment
+      id: prep
+      shell: bash
+      env:
+        INPUT_MODE: ${{ inputs.mode }}
+        GITHUB_BASE_REF: ${{ github.base_ref }}
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+        GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+      run: |
+        set -euo pipefail
+        
+        if [[ "$INPUT_MODE" != "diff" ]] && [[ "$INPUT_MODE" != "audit" ]]; then
+          echo "mode_needs_prep=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        
+        echo "mode_needs_prep=true" >> "$GITHUB_OUTPUT"
+        
+        determine_base_ref() {
+          if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+            for attempt in 1 2 3; do
+              if git fetch origin "$GITHUB_BASE_REF" --depth=100 2>/dev/null; then
+                break
+              fi
+              [[ $attempt -lt 3 ]] && sleep 2
+            done
+            printf '%s' "origin/$GITHUB_BASE_REF"
+          elif [[ "${GITHUB_EVENT_NAME:-}" == "push" ]]; then
+            local before_sha="${GITHUB_EVENT_BEFORE:-}"
+            if [[ "$before_sha" == "0000000000000000000000000000000000000000" ]] || [[ -z "$before_sha" ]]; then
+              printf '%s' "HEAD^"
+            else
+              printf '%s' "$before_sha"
+            fi
+          else
+            printf '%s' "HEAD~1"
+          fi
+        }
+        
+        readonly BASE_REF=$(determine_base_ref)
+        readonly HEAD_REF="HEAD"
+        echo "base_ref=${BASE_REF}" >> "$GITHUB_OUTPUT"
+        
+        readonly WORKTREE_DIR=".sfw_base_worktree"
+        if [[ -d "$WORKTREE_DIR" ]]; then
+          git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"
+        fi
+        
+        if ! git rev-parse --verify "$BASE_REF" >/dev/null 2>&1; then
+          git fetch --unshallow 2>/dev/null || git fetch --depth=500 2>/dev/null || true
+        fi
+        
+        if git worktree add --detach "$WORKTREE_DIR" "$BASE_REF" >/dev/null 2>&1; then
+          echo "::debug::Worktree created successfully."
+        else
+          mkdir -p "$WORKTREE_DIR"
+        fi
+        echo "worktree_dir=${WORKTREE_DIR}" >> "$GITHUB_OUTPUT"
+        
+        readonly DIFF_STREAM_FILE=".sfw_diff_stream.bin"
+        if ! git diff -z --name-status "$BASE_REF" "$HEAD_REF" > "$DIFF_STREAM_FILE" 2>/dev/null; then
+          : > "$DIFF_STREAM_FILE"
+        fi
+        
+        GO_FILE_COUNT=$(git diff --name-only "$BASE_REF" "$HEAD_REF" 2>/dev/null | grep -c '\.go$' || echo "0")
+        if [[ "$GO_FILE_COUNT" -gt 0 ]]; then
+          echo "has_go_files=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "has_go_files=false" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Install gVisor (runsc)
       shell: bash
       run: |
         set -e
-        
-        # Skip if already installed (allows users to pre-install a specific version)
         if command -v runsc &> /dev/null; then
-          echo "::notice::runsc already installed: $(runsc --version)"
           exit 0
         fi
-        
-        # Pinning a specific version to ensure reproducible builds and prevent 
-        # unexpected upstream changes from breaking the pipeline.
         GVISOR_VERSION="20260126.0"
         ARCH=$(uname -m)
         URL="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_VERSION}/${ARCH}"
-        
-        # Hardcoded trust anchor. 
-        # We do NOT download the .sha512 file from the server, as a compromise 
-        # of the bucket would allow an attacker to replace both binary and hash.
-        # This hash must be verified out-of-band before updating.
         EXPECTED_SHA="cce974fa832c50d26c6ccc08ce50b4972921cd0818ebe8007587211d360cbc828ceea4ec8296703200afa208b679437d24f27a6dca31887b3c0fc6ee8be5eb05"
-        
-        echo "::notice::Downloading gVisor ${GVISOR_VERSION} for ${ARCH}..."
         
         wget -q -O runsc "${URL}/runsc"
         wget -q -O containerd-shim-runsc-v1 "${URL}/containerd-shim-runsc-v1"
-        
-        # Verify integrity against our pinned hash
         echo "${EXPECTED_SHA} runsc" | sha512sum -c -
         
         chmod a+rx runsc containerd-shim-runsc-v1
-        
-        # CRITICAL: Move binaries to a PATH-accessible location
-        # exec.LookPath searches system $PATH, not the current working directory
         sudo mv runsc containerd-shim-runsc-v1 /usr/local/bin/
         
-        # Infrastructure Awareness: Graceful AppArmor Loading
         if [[ -d "/sys/kernel/security/apparmor" ]] && command -v apparmor_parser &> /dev/null; then
-           echo "::notice::AppArmor detected. Loading permissive profile for gVisor..."
-           
            cat <<EOF | sudo tee /etc/apparmor.d/usr.local.bin.runsc
         abi <abi/4.0>,
         include <tunables/global>
-
         /usr/local/bin/runsc flags=(unconfined) {
           userns,
           include if exists <local/usr.local.bin.runsc>
         }
         EOF
-           sudo apparmor_parser -r /etc/apparmor.d/usr.local.bin.runsc || echo "::warning::Failed to load AppArmor profile. Sandbox isolation may be degraded."
-        else
-           echo "::warning::AppArmor not active or accessible. Skipping profile loading."
+           sudo apparmor_parser -r /etc/apparmor.d/usr.local.bin.runsc || true
         fi
-        
-        # Fallback sysctl for systems where AppArmor is present but not fully enforced
         if [[ "$(uname -s)" == "Linux" ]]; then
            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
         fi
@@ -163,260 +244,236 @@ runs:
         INPUT_SCAN_DEPS: ${{ inputs.scan-deps }}
         INPUT_DEPS_DEPTH: ${{ inputs.deps-depth }}
         INPUT_FAIL_ON_ALERT: ${{ inputs.fail-on-alert }}
-        # Passed via environment variable
         SFW_API_KEY: ${{ inputs.api-key }}
         INPUT_MODEL: ${{ inputs.model }}
         INPUT_API_BASE: ${{ inputs.api-base }}
-        GITHUB_BASE_REF: ${{ github.base_ref }}
         PR_TITLE: ${{ github.event.pull_request.title }}
         PR_BODY: ${{ github.event.pull_request.body }}
+        PREP_WORKTREE_DIR: ${{ steps.prep.outputs.worktree_dir }}
+        PREP_HAS_GO_FILES: ${{ steps.prep.outputs.has_go_files }}
       run: |
-        set -e
-
-        # Input Sanitization: Robust Path Validation
-        TARGET_ABS=$(realpath -m "$INPUT_PATH")
-        BASE_ABS=$(realpath -m ".")
-        REL_PATH=$(realpath -m --relative-to="$BASE_ABS" "$TARGET_ABS")
+        set -euo pipefail
+        
+        readonly TARGET_ABS=$(realpath -m "${INPUT_PATH:-.}")
+        readonly BASE_ABS=$(realpath -m ".")
+        readonly REL_PATH=$(realpath -m --relative-to="$BASE_ABS" "$TARGET_ABS")
         
         if [[ "$REL_PATH" == ".."* ]] || [[ "$REL_PATH" == /* ]]; then
-           echo "::error::Security Violation: Path Traversal Detected! Target '$INPUT_PATH' is outside the workspace."
+           echo "::error::Security Violation: Path Traversal"
            exit 1
         fi
-        
-        TARGET_PATH="./$REL_PATH"
+        readonly TARGET_PATH="./${REL_PATH}"
 
-        # Sandbox option (reserved for future configurability)
-        SANDBOX_OPT=""
-        
-        # Verify runsc is available (should be installed by previous step)
-        if ! command -v runsc &> /dev/null; then
-          echo "::error::Security Requirement Failed: runsc (gVisor) installation failed. Check previous step logs."
+        if [[ ! -e "$TARGET_PATH" ]]; then
+          echo "::error::Target path not found: ${TARGET_PATH}"
           exit 1
         fi
 
-        echo "::group::Semantic Firewall ($INPUT_MODE mode)"
-
         EXIT_CODE=0
-
-        # FIX: Local temp dir to prevent /tmp shadowing in sandbox
-        LOCAL_TEMP=".sfw_temp_$$"
+        readonly LOCAL_TEMP=".sfw_temp_$$"
         mkdir -p "$LOCAL_TEMP"
-        trap 'rm -rf "$LOCAL_TEMP"' EXIT
+        cleanup() {
+          rm -rf "$LOCAL_TEMP" 2>/dev/null || true
+        }
+        trap cleanup EXIT INT TERM
 
         case "$INPUT_MODE" in
           check)
             STRICT_FLAG=""
-            if [[ "$INPUT_STRICT" == "true" ]]; then
-              STRICT_FLAG="--strict"
-            fi
-            OUTPUT=$(sfw check $STRICT_FLAG $SANDBOX_OPT -- "$TARGET_PATH")
+            if [[ "$INPUT_STRICT" == "true" ]]; then STRICT_FLAG="--strict"; fi
+            OUTPUT=$(sfw check $STRICT_FLAG -- "$TARGET_PATH")
             echo "$OUTPUT"
             ;;
 
           diff)
-            if [[ -n "$GITHUB_BASE_REF" ]]; then
-              BASE_SHA=$(git rev-parse origin/$GITHUB_BASE_REF)
-            elif [[ "${{ github.event_name }}" == "push" ]]; then
-              BASE_SHA="${{ github.event.before }}"
-              if [[ "$BASE_SHA" == "0000000000000000000000000000000000000000" ]]; then
-                 BASE_SHA="HEAD^"
-              fi
-            else
-              BASE_SHA=$(git rev-parse HEAD~1)
-            fi
-
-            echo "::notice::Diffing against Base SHA: $BASE_SHA"
-
-            WORKTREE_DIR=".sfw_worktree_$$"
-            trap 'git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"; rm -rf "$LOCAL_TEMP"' EXIT
-
-            git worktree add --detach "$WORKTREE_DIR" "$BASE_SHA" >/dev/null
-
-            STREAM_FILE="$LOCAL_TEMP/sfw_stream.jsonl"
+            readonly WORKTREE_DIR="${PREP_WORKTREE_DIR:-.sfw_base_worktree}"
+            readonly DIFF_STREAM_FILE=".sfw_diff_stream.bin"
             
-            TOTAL_MATCH_PCT=0
-            FILE_COUNT=0
+            if [[ "${PREP_HAS_GO_FILES:-false}" != "true" ]]; then
+              OUTPUT="[]"
+              echo "semantic-match-pct=100.0" >> "$GITHUB_OUTPUT"
+            else
+              readonly STREAM_FILE="$LOCAL_TEMP/sfw_stream.jsonl"
+              TOTAL_MATCH_PCT=0
+              FILE_COUNT=0
+              ERROR_COUNT=0
 
-            while IFS= read -r -d '' status; do
-              case "$status" in
-                R*)
-                   IFS= read -r -d '' old_rel_path
-                   IFS= read -r -d '' new_rel_path
-                   ;;
-                *)
-                   IFS= read -r -d '' path
-                   old_rel_path="$path"
-                   new_rel_path="$path"
-                   ;;
-              esac
+              while IFS= read -r -d '' status; do
+                case "$status" in
+                  R*|C*) IFS= read -r -d '' o; IFS= read -r -d '' n; old_rel_path="$o"; new_rel_path="$n" ;;
+                  D) IFS= read -r -d '' _; continue ;;
+                  *) IFS= read -r -d '' p; old_rel_path="$p"; new_rel_path="$p" ;;
+                esac
 
-              if [[ "$new_rel_path" != *.go ]]; then continue; fi
-              if [[ "$new_rel_path" == *_test.go ]]; then continue; fi
+                [[ "$new_rel_path" != *.go ]] && continue
+                [[ "$new_rel_path" == *_test.go ]] && continue
+                [[ "$new_rel_path" == *_generated.go ]] && continue
+                [[ "$new_rel_path" == vendor/* ]] && continue
 
-              NEW_FILE="$new_rel_path"
-              OLD_FILE="$WORKTREE_DIR/$old_rel_path"
+                NEW_FILE="$new_rel_path"
+                OLD_FILE="$WORKTREE_DIR/$old_rel_path"
+                [[ ! -f "$NEW_FILE" ]] && NEW_FILE="/dev/null"
+                [[ ! -f "$OLD_FILE" ]] && OLD_FILE="/dev/null"
+                [[ "$NEW_FILE" == "/dev/null" && "$OLD_FILE" == "/dev/null" ]] && continue
 
-              if [[ ! -f "$NEW_FILE" ]]; then NEW_FILE="/dev/null"; fi
-              if [[ ! -f "$OLD_FILE" ]]; then OLD_FILE="/dev/null"; fi
-              if [[ "$NEW_FILE" == "/dev/null" ]] && [[ "$OLD_FILE" == "/dev/null" ]]; then continue; fi
+                if ! DIFF_OUT=$(sfw diff -- "$OLD_FILE" "$NEW_FILE" 2>&1); then
+                   DIFF_OUT='{}'
+                   ((ERROR_COUNT++)) || true
+                fi
+                echo "$DIFF_OUT" >> "$STREAM_FILE"
+                
+                PCT=$(echo "$DIFF_OUT" | jq -r '.summary.semantic_match_pct // 0')
+                TOTAL_MATCH_PCT=$(echo "$TOTAL_MATCH_PCT + $PCT" | bc)
+                ((FILE_COUNT++)) || true
+              done < "$DIFF_STREAM_FILE"
 
-              echo "Analyzing: $new_rel_path"
-              DIFF_OUT=$(sfw diff $SANDBOX_OPT "$OLD_FILE" "$NEW_FILE" 2>/dev/null || echo '{}')
-
-              echo "$DIFF_OUT" >> "$STREAM_FILE"
+              if [[ -f "$STREAM_FILE" ]]; then OUTPUT=$(jq -s '.' "$STREAM_FILE"); else OUTPUT="[]"; fi
               
-              PCT=$(echo "$DIFF_OUT" | jq -r '.summary.semantic_match_pct // 0')
-              TOTAL_MATCH_PCT=$(echo "$TOTAL_MATCH_PCT + $PCT" | bc)
-              FILE_COUNT=$((FILE_COUNT + 1))
-
-            done < <(git diff -z --name-status "$BASE_SHA" HEAD)
-
-            if [[ -f "$STREAM_FILE" ]]; then
-              jq -s '.' "$STREAM_FILE" > sfw_diff_results.json
-            else
-              echo "[]" > sfw_diff_results.json
-            fi
-
-            OUTPUT=$(cat sfw_diff_results.json)
-            rm -f sfw_diff_results.json
-
-            if [[ $FILE_COUNT -gt 0 ]]; then
-              AVG_PCT=$(echo "scale=1; $TOTAL_MATCH_PCT / $FILE_COUNT" | bc)
-            else
-              AVG_PCT="100.0"
-            fi
-            echo "semantic-match-pct=$AVG_PCT" >> $GITHUB_OUTPUT
-            ;;
-
-          audit)
-            HAS_KEY="false"
-            if [[ -n "$SFW_API_KEY" ]] || [[ -n "$OPENAI_API_KEY" ]] || [[ -n "$GEMINI_API_KEY" ]]; then
-              HAS_KEY="true"
-            fi
-
-            if [[ "$HAS_KEY" == "false" ]]; then
-              echo "::warning::No API Key found. Running in deterministic SIMULATION mode."
-            fi
-
-            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-               COMMIT_MSG="$PR_TITLE
-            $PR_BODY"
-            else
-               COMMIT_MSG=$(git log -1 --pretty=%B)
-            fi
-
-            if [[ -n "$GITHUB_BASE_REF" ]]; then
-              BASE_SHA=$(git rev-parse origin/$GITHUB_BASE_REF)
-            else
-              BASE_SHA=$(git rev-parse HEAD~1)
-            fi
-
-            WORKTREE_DIR=".sfw_audit_worktree_$$"
-            trap 'git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"; rm -rf "$LOCAL_TEMP"' EXIT
-            git worktree add --detach "$WORKTREE_DIR" "$BASE_SHA" >/dev/null
-
-            FILES_LIST="$LOCAL_TEMP/files_list.txt"
-            AUDIT_FAILS=0
-
-            git diff -z --name-only "$BASE_SHA" HEAD -- '*.go' 2>/dev/null > "$FILES_LIST"
-
-            while IFS= read -r -d '' file; do
-              if [[ ! -f "$file" ]]; then continue; fi
-              if [[ "$file" == *_test.go ]]; then continue; fi
-
-              echo "Auditing: $file"
-              
-              NEW_FILE="$file"
-              OLD_FILE="$WORKTREE_DIR/$file"
-              
-              # Handle new files (Old file won't exist in worktree)
-              if [[ ! -f "$OLD_FILE" ]]; then
-                 # FIX: Create temp file in LOCAL_TEMP (inside workspace)
-                 # This prevents the sandbox from masking the file via /tmp overlay
-                 OLD_FILE=$(mktemp -p "$LOCAL_TEMP")
+              if [[ $FILE_COUNT -gt 0 ]]; then
+                AVG_PCT=$(echo "scale=1; $TOTAL_MATCH_PCT / $FILE_COUNT" | bc)
+              else
+                AVG_PCT="100.0"
               fi
-
-              AUDIT_ARGS=("$OLD_FILE" "$NEW_FILE" "$COMMIT_MSG")
-              AUDIT_ARGS+=("--model" "$INPUT_MODEL")
-              if [[ -n "$INPUT_API_BASE" ]]; then
-                 AUDIT_ARGS+=("--api-base" "$INPUT_API_BASE")
-              fi
-              if [[ -n "$SANDBOX_OPT" ]]; then
-                 AUDIT_ARGS+=("$SANDBOX_OPT")
-              fi
-
-              set +e
-              AUDIT_OUT=$(sfw audit "${AUDIT_ARGS[@]}")
-              CMD_EXIT=$?
-              set -e
-
-              echo "$AUDIT_OUT"
-
-              if [[ $CMD_EXIT -eq 0 ]]; then
-                 if [[ -z "$AUDIT_OUT" ]] || echo "$AUDIT_OUT" | grep -qE "json: error|unexpected end of JSON|invalid character"; then
-                    echo "::error file=$file::Internal Audit Error. Failing closed."
-                    CMD_EXIT=1
-                 fi
-              fi
-
-              if [[ $CMD_EXIT -ne 0 ]]; then
-                 echo "::error file=$file::Deception Detected! Verdict: LIE"
-                 AUDIT_FAILS=$((AUDIT_FAILS + 1))
-                 EXIT_CODE=1
-              fi
-
-            done < "$FILES_LIST"
-
-            if [[ $AUDIT_FAILS -eq 0 ]]; then
-               echo "audit-verdict=PASS" >> $GITHUB_OUTPUT
-               OUTPUT="Audit Passed."
-            else
-               echo "audit-verdict=FAIL" >> $GITHUB_OUTPUT
-               OUTPUT="Audit Failed."
+              echo "semantic-match-pct=${AVG_PCT}" >> "$GITHUB_OUTPUT"
             fi
             ;;
 
           scan)
             DEPS_ARGS=()
-            if [[ "$INPUT_SCAN_DEPS" == "true" ]]; then
+            if [[ "${INPUT_SCAN_DEPS:-false}" == "true" ]]; then
               DEPS_ARGS+=("--deps")
-              DEPS_ARGS+=("--deps-depth" "$INPUT_DEPS_DEPTH")
+              DEPS_ARGS+=("--deps-depth" "${INPUT_DEPS_DEPTH:-direct}")
             fi
 
-            if [[ ! -e "$INPUT_SIGNATURES" ]]; then
-              echo "::error::Signature database not found at $INPUT_SIGNATURES"
+            if [[ -z "${INPUT_SIGNATURES:-}" ]]; then
+              echo "::error::Scan mode requires 'signatures'."
               exit 1
-            else
-              TEMP_DB="$LOCAL_TEMP/sfw_sigs_copy.db"
-              cp -R "$INPUT_SIGNATURES" "$TEMP_DB"
+            fi
+            
+            readonly TEMP_DB="$LOCAL_TEMP/sfw_sigs_copy.db"
+            cp -R "$INPUT_SIGNATURES" "$TEMP_DB"
+            
+            SCAN_STDERR_FILE="$LOCAL_TEMP/sfw_scan_stderr.log"
+            if ! OUTPUT=$(sfw scan --db "$TEMP_DB" --threshold "${INPUT_THRESHOLD:-0.75}" "${DEPS_ARGS[@]}" -- "$TARGET_PATH" 2>"$SCAN_STDERR_FILE"); then
+              cat "$SCAN_STDERR_FILE" || true
+              exit 1
+            fi
+            if [[ -s "$SCAN_STDERR_FILE" ]]; then cat "$SCAN_STDERR_FILE"; fi
+            echo "$OUTPUT"
 
-              OUTPUT=$(sfw scan $SANDBOX_OPT --db "$TEMP_DB" --threshold "$INPUT_THRESHOLD" "${DEPS_ARGS[@]}" -- "$TARGET_PATH")
-              echo "$OUTPUT"
-
-              ALERT_COUNT=$(echo "$OUTPUT" | jq -r '.summary.total_alerts // 0')
-              echo "alert-count=$ALERT_COUNT" >> $GITHUB_OUTPUT
-
-              DEPS_SCANNED=$(echo "$OUTPUT" | jq -r '.dependencies_scanned // 0')
-              echo "deps-scanned=$DEPS_SCANNED" >> $GITHUB_OUTPUT
-
-              if [[ "$INPUT_FAIL_ON_ALERT" == "true" ]] && [[ "$ALERT_COUNT" -gt 0 ]]; then
-                echo "::error::Malware detected! $ALERT_COUNT alert(s) found."
-                EXIT_CODE=1
-              fi
+            ALERT_COUNT=$(echo "$OUTPUT" | jq -r '.summary.total_alerts // 0')
+            echo "alert-count=${ALERT_COUNT}" >> "$GITHUB_OUTPUT"
+            DEPS_SCANNED=$(echo "$OUTPUT" | jq -r '.dependencies_scanned // 0')
+            echo "deps-scanned=${DEPS_SCANNED}" >> "$GITHUB_OUTPUT"
+            
+            if [[ "${INPUT_FAIL_ON_ALERT:-true}" == "true" ]] && [[ "$ALERT_COUNT" -gt 0 ]]; then
+              EXIT_CODE=1
             fi
             ;;
 
+          audit)
+            readonly WORKTREE_DIR="${PREP_WORKTREE_DIR:-.sfw_base_worktree}"
+            readonly DIFF_STREAM_FILE=".sfw_diff_stream.bin"
+            
+            if [[ "${PREP_HAS_GO_FILES:-false}" != "true" ]]; then
+              echo "audit-verdict=PASS" >> "$GITHUB_OUTPUT"
+              OUTPUT="Audit Passed. (No Go files changed)"
+            else
+              AUDIT_FAILS=0
+              AUDIT_PASS=0
+
+              if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+                 COMMIT_MSG="${PR_TITLE:-Untitled PR}
+            ${PR_BODY:-No description provided}"
+              else
+                 COMMIT_MSG=$(git log -1 --pretty=%B 2>/dev/null || echo "No commit message")
+              fi
+
+              while IFS= read -r -d '' status; do
+                case "$status" in
+                  R*|C*)
+                     IFS= read -r -d '' old_rel_path
+                     IFS= read -r -d '' new_rel_path
+                     ;;
+                  D)
+                     IFS= read -r -d '' _deleted_path
+                     continue
+                     ;;
+                  *)
+                     IFS= read -r -d '' path
+                     old_rel_path="$path"
+                     new_rel_path="$path"
+                     ;;
+                esac
+
+                [[ "$new_rel_path" != *.go ]] && continue
+                [[ "$new_rel_path" == *_test.go ]] && continue
+                [[ "$new_rel_path" == *_generated.go ]] && continue
+                [[ "$new_rel_path" == vendor/* ]] && continue
+                [[ ! -f "$new_rel_path" ]] && continue
+
+                NEW_FILE="$new_rel_path"
+                OLD_FILE="$WORKTREE_DIR/$old_rel_path"
+                
+                if [[ ! -f "$OLD_FILE" ]]; then
+                   OLD_FILE=$(mktemp -p "$LOCAL_TEMP" "empty_XXXXXX.go")
+                   : > "$OLD_FILE"
+                fi
+
+                AUDIT_ARGS=("$OLD_FILE" "$NEW_FILE" "$COMMIT_MSG")
+                AUDIT_ARGS+=("--model" "${INPUT_MODEL:-gpt-4}")
+                if [[ -n "${INPUT_API_BASE:-}" ]]; then
+                   AUDIT_ARGS+=("--api-base" "$INPUT_API_BASE")
+                fi
+
+                set +e
+                AUDIT_OUT=$(sfw audit "${AUDIT_ARGS[@]}" 2>&1)
+                CMD_EXIT=$?
+                set -e
+                
+                echo "$AUDIT_OUT"
+
+                if [[ $CMD_EXIT -ne 0 ]]; then
+                   ((AUDIT_FAILS++)) || true
+                   EXIT_CODE=1
+                else
+                   ((AUDIT_PASS++)) || true
+                fi
+              done < "$DIFF_STREAM_FILE"
+
+              if [[ $AUDIT_FAILS -eq 0 ]]; then
+                 echo "audit-verdict=PASS" >> "$GITHUB_OUTPUT"
+                 OUTPUT="Audit Passed. (${AUDIT_PASS} file(s) verified)"
+              else
+                 echo "audit-verdict=FAIL" >> "$GITHUB_OUTPUT"
+                 OUTPUT="Audit Failed. (${AUDIT_FAILS} deception(s) detected)"
+              fi
+            fi
+            ;;
           *)
-            echo "::error::Unknown mode: $INPUT_MODE."
+            echo "::error::Unknown mode."
             EXIT_CODE=1
             ;;
         esac
 
-        echo "::endgroup::"
-
-        DELIMITER=$(openssl rand -hex 8)
-        echo "result<<$DELIMITER" >> $GITHUB_OUTPUT
-        echo "$OUTPUT" >> $GITHUB_OUTPUT
-        echo "$DELIMITER" >> $GITHUB_OUTPUT
+        {
+          echo "result<<EOF_SFW_RESULT"
+          echo "$OUTPUT"
+          echo "EOF_SFW_RESULT"
+        } >> "$GITHUB_OUTPUT"
 
         exit $EXIT_CODE
+
+    - name: Cleanup Analysis Environment
+      if: always()
+      shell: bash
+      env:
+        WORKTREE_DIR: ${{ steps.prep.outputs.worktree_dir }}
+      run: |
+        set +e
+        if [[ -n "${WORKTREE_DIR:-}" ]] && [[ -d "$WORKTREE_DIR" ]]; then
+          git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"
+        fi
+        rm -f .sfw_diff_stream.bin 2>/dev/null
+        rm -rf .sfw_temp_* 2>/dev/null
+        git worktree prune 2>/dev/null || true

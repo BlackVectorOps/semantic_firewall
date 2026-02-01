@@ -50,13 +50,22 @@ jobs:
         run: |
           # 1. Determine Refs
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            BASE_REF="origin/${{ github.event.pull_request.base.ref }}"
+            PR_BASE="${{ github.event.pull_request.base.ref }}"
+            if [[ -n "$PR_BASE" ]]; then
+              BASE_REF="origin/$PR_BASE"
+            else
+              # Fallback for local testing with act (PR context not fully populated)
+              echo "::warning::PR base ref not available. Falling back to HEAD~1."
+              BASE_REF="HEAD~1"
+            fi
             HEAD_REF="HEAD"
           else
-            git fetch origin main --depth=100
-            BASE_REF=$(git merge-base origin/main HEAD)
+            git fetch origin main --depth=100 2>/dev/null || true
+            BASE_REF=$(git merge-base origin/main HEAD 2>/dev/null || echo "HEAD~1")
             HEAD_REF="HEAD"
           fi
+          
+          echo "::notice::Base ref: $BASE_REF, Head ref: $HEAD_REF"
 
           # 2. Setup Base Worktree
           # We create the worktree in the workspace so it is mounted into the sandbox.
@@ -156,8 +165,8 @@ jobs:
                   continue
               fi
 
-              # Execute SFW
-              if ! OUTPUT=$(./bin/sfw diff "$OLD_FILE" "$NEW_FILE"); then
+              # Execute SFW with stderr capture
+              if ! OUTPUT=$(./bin/sfw diff "$OLD_FILE" "$NEW_FILE" 2>&1); then
                   echo "::error::sfw failed to process $NEW_FILE_REF"
                   ERROR_COUNT=$((ERROR_COUNT + 1))
                   continue
@@ -170,7 +179,6 @@ jobs:
                   continue
               fi
 
-              # Parse Results
               PCT=$(echo "$OUTPUT" | jq -r '.summary.semantic_match_pct // 0')
               MODIFIED=$(echo "$OUTPUT" | jq -r '.summary.modified // 0')
               IS_BELOW_100=$(echo "$OUTPUT" | jq -r 'if (.summary.semantic_match_pct // 0) < 100 then "true" else "false" end')
