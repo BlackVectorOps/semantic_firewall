@@ -2,6 +2,7 @@ package diff
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/topology"
 )
@@ -181,37 +182,67 @@ func MatchFunctionsByTopology(oldResults, newResults []FingerprintResult, thresh
 }
 
 func ShortFuncName(fullName string) string {
-	// FIX: Handle nested parenthesis and brackets (generics)
-	// Scan backwards to find the package separator '/' at depth 0.
-	depth := 0
-	start := 0
-	for i := len(fullName) - 1; i >= 0; i-- {
-		ch := fullName[i]
-		if ch == ')' || ch == ']' {
-			depth++
-		} else if ch == '(' || ch == '[' {
-			depth--
-		} else if ch == '/' && depth == 0 {
-			start = i + 1
-			break
+	var sb strings.Builder
+	// We want to process "words".
+	// A word is a sequence of non-separator characters.
+	// Separators: ( ) [ ] * , <space> { }
+	// Note: '.' and '/' are part of the word.
+
+	lastSep := -1
+	for i := 0; i < len(fullName); i++ {
+		c := fullName[i]
+		isSep := false
+		switch c {
+		case '(', ')', '[', ']', '*', ',', ' ', '{', '}':
+			isSep = true
 		}
-	}
 
-	name := fullName[start:]
-
-	// Scan forward to find the first dot at depth 0.
-	depth = 0
-	for i, ch := range name {
-		switch ch {
-		case '(', '[':
-			depth++
-		case ')', ']':
-			depth--
-		case '.':
-			if depth == 0 {
-				return name[i+1:]
+		if isSep {
+			// Process the previous word
+			if i > lastSep+1 {
+				word := fullName[lastSep+1 : i]
+				sb.WriteString(shortenWord(word))
 			}
+			sb.WriteByte(c)
+			lastSep = i
 		}
 	}
-	return name
+	// Process last word
+	if len(fullName) > lastSep+1 {
+		word := fullName[lastSep+1:]
+		sb.WriteString(shortenWord(word))
+	}
+
+	return sb.String()
+}
+
+func shortenWord(w string) string {
+	if strings.HasPrefix(w, "...") {
+		return "..." + shortenWord(w[3:])
+	}
+	if strings.HasPrefix(w, ".") {
+		// Preserve leading dot (e.g. .Method)
+		return "." + shortenWord(w[1:])
+	}
+
+	lastSlash := strings.LastIndexByte(w, '/')
+
+	// Search for last dot after lastSlash
+	lastDot := strings.LastIndexByte(w, '.')
+
+	if lastDot > lastSlash {
+		// Dot is in the name part
+		return w[lastDot+1:]
+	}
+
+	// No dot in the name part. Return the name part (after slash).
+	if lastSlash != -1 {
+		return w[lastSlash+1:]
+	}
+
+	// No slash, no dot (or dot was before slash - impossible if lastDot checked properly?
+	// Wait, LastIndexByte finds the very last one.
+	// If lastDot < lastSlash, it means there are dots in path, but none in name.
+
+	return w
 }
