@@ -277,7 +277,7 @@ func GenerateFuzzyHash(t *FunctionTopology) string {
 	}
 	brBucket := 0
 	if t.BranchCount > 0 {
-		// FIX: Differentiate between 0 branches (linear) and 1 branch (single if).
+		// Differentiate between 0 branches (linear) and 1 branch (single if).
 		// Log2(1) is 0, so we shift by 1 to make BR0 mean "no branches" and BR1 mean "1 branch".
 		brBucket = int(math.Log2(float64(t.BranchCount))) + 1
 	}

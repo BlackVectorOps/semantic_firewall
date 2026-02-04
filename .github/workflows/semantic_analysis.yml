@@ -167,7 +167,7 @@ jobs:
               fi
 
               # Execute SFW with stderr capture
-              if ! OUTPUT=$(./bin/sfw diff "$OLD_FILE" "$NEW_FILE" 2>&1); then
+              if ! OUTPUT=$(./bin/sfw diff --no-sandbox "$OLD_FILE" "$NEW_FILE" 2>&1); then
                   echo "::error::sfw failed to process $NEW_FILE_REF"
                   ERROR_COUNT=$((ERROR_COUNT + 1))
                   continue
