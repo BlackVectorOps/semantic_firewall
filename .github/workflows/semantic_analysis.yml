@@ -167,7 +167,9 @@ jobs:
               fi
 
               # Execute SFW with stderr capture
-              if ! OUTPUT=$(./bin/sfw diff "$OLD_FILE" "$NEW_FILE" 2>&1); then
+              # Note: We must use --no-sandbox because we are already inside a gVisor sandbox.
+              # Nested isolation is not supported and fails on GitHub Runners (Ubuntu 24.04).
+              if ! OUTPUT=$(./bin/sfw diff --no-sandbox "$OLD_FILE" "$NEW_FILE" 2>&1); then
                   echo "::error::sfw failed to process $NEW_FILE_REF"
                   ERROR_COUNT=$((ERROR_COUNT + 1))
                   continue
