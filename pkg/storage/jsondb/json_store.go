@@ -33,6 +33,7 @@ const (
 // otherwise we let the readers swarm.
 type Scanner struct {
 	db               *detection.SignatureDatabase
+	sigMap           map[string]int
 	matchThreshold   float64
 	entropyTolerance float64
 	mu               sync.RWMutex
@@ -44,6 +45,7 @@ type Scanner struct {
 func NewScanner() *Scanner {
 	return &Scanner{
 		db:               &detection.SignatureDatabase{},
+		sigMap:           make(map[string]int),
 		matchThreshold:   0.75, // 75% minimum confidence keeps the false positives manageable
 		entropyTolerance: 0.5,
 	}
@@ -94,6 +96,13 @@ func (s *Scanner) LoadDatabase(path string) error {
 	}
 
 	s.db = &db
+
+	// Rebuild the map index.
+	s.sigMap = make(map[string]int, len(s.db.Signatures))
+	for i, sig := range s.db.Signatures {
+		s.sigMap[sig.ID] = i
+	}
+
 	return nil
 }
 
@@ -206,6 +215,13 @@ func (s *Scanner) AddSignature(sig *detection.Signature) error {
 
 	// Append copies the struct value.
 	s.db.Signatures = append(s.db.Signatures, *sig)
+
+	// Update the map index.
+	if s.sigMap == nil {
+		s.sigMap = make(map[string]int)
+	}
+	s.sigMap[sig.ID] = len(s.db.Signatures) - 1
+
 	return nil
 }
 
@@ -219,11 +235,14 @@ func (s *Scanner) GetSignature(id string) (*detection.Signature, error) {
 	if s.db == nil {
 		return nil, fmt.Errorf("database not loaded")
 	}
-	for i := range s.db.Signatures {
-		if s.db.Signatures[i].ID == id {
-			return s.deepCopySignature(&s.db.Signatures[i]), nil
+
+	if idx, ok := s.sigMap[id]; ok {
+		// Bounds check just in case of state drift, though locks should prevent it.
+		if idx >= 0 && idx < len(s.db.Signatures) {
+			return s.deepCopySignature(&s.db.Signatures[idx]), nil
 		}
 	}
+
 	return nil, fmt.Errorf("signature %q not found", id)
 }
 
