@@ -203,15 +203,16 @@ func GenerateTopologyHash(topo *topology.FunctionTopology) string {
 	builder.WriteString("BR")
 	builder.WriteString(strconv.Itoa(topo.BranchCount))
 
-	var calls []string
+	calls := make([]string, 0, len(topo.CallSignatures))
+	buf := make([]byte, 0, 128)
 	for call, count := range topo.CallSignatures {
-		var cb strings.Builder
-		cb.WriteString(strconv.Itoa(len(call)))
-		cb.WriteString(":")
-		cb.WriteString(call)
-		cb.WriteString(":")
-		cb.WriteString(strconv.Itoa(count))
-		calls = append(calls, cb.String())
+		buf = buf[:0]
+		buf = strconv.AppendInt(buf, int64(len(call)), 10)
+		buf = append(buf, ':')
+		buf = append(buf, call...)
+		buf = append(buf, ':')
+		buf = strconv.AppendInt(buf, int64(count), 10)
+		calls = append(calls, string(buf))
 	}
 	sort.Strings(calls)
 	builder.WriteString(strings.Join(calls, ";"))
