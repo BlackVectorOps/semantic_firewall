@@ -253,16 +253,7 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 		return t.StringLiterals[i] < t.StringLiterals[j]
 	})
 
-	totalSize := 0
-	for _, s := range t.StringLiterals {
-		// With StringVal, we no longer need to strip quotes manually, but we keep logic simple
-		totalSize += len(s)
-	}
-
-	dataAccumulator := make([]byte, 0, totalSize)
-	for _, s := range t.StringLiterals {
-		dataAccumulator = append(dataAccumulator, []byte(s)...)
-	}
+	dataAccumulator := flattenStringLiterals(t.StringLiterals)
 
 	if len(dataAccumulator) > 0 {
 		t.EntropyScore = CalculateEntropy(dataAccumulator)
@@ -570,4 +561,18 @@ func TopologyFingerprint(t *FunctionTopology) string {
 	}
 
 	return fmt.Sprintf("L%dB%dI%d[%s]", t.LoopCount, t.BranchCount, t.InstrCount, callStr)
+}
+
+func flattenStringLiterals(literals []string) []byte {
+	totalSize := 0
+	for _, s := range literals {
+		// With StringVal, we no longer need to strip quotes manually, but we keep logic simple
+		totalSize += len(s)
+	}
+
+	dataAccumulator := make([]byte, 0, totalSize)
+	for _, s := range literals {
+		dataAccumulator = append(dataAccumulator, s...)
+	}
+	return dataAccumulator
 }

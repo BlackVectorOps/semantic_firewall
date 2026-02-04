@@ -99,6 +99,7 @@ jobs:
             export MODE="${{ steps.mode.outputs.mode }}"
             export WORKTREE_DIR="${{ steps.prep.outputs.worktree_dir }}"
             export HAS_GO="${{ steps.prep.outputs.has_go_files }}"
+            export SFW_SANDBOX_ID="1"
             
             # Strict mode enabled after exports
             set -euo pipefail
