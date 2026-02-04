@@ -188,11 +188,38 @@ func TestFuzzyHashDistinction(t *testing.T) {
 		}
 	}`
 
+	srcBranched2 := `package main
+	func branched2(b bool, c bool) {
+		if b {
+			println("branch 1")
+		}
+		if c {
+			println("branch 2")
+		}
+	}`
+
 	fnLinear := testutil.CompileAndGetFunction(t, srcLinear, "linear")
 	fnBranched := testutil.CompileAndGetFunction(t, srcBranched, "branched")
+	fnBranched2 := testutil.CompileAndGetFunction(t, srcBranched2, "branched2")
 
 	topoLinear := topology.ExtractTopology(fnLinear)
 	topoBranched := topology.ExtractTopology(fnBranched)
+	topoBranched2 := topology.ExtractTopology(fnBranched2)
+
+	// Linear: 0 branches -> BR0
+	if !strings.Contains(topoLinear.FuzzyHash, "BR0") {
+		t.Errorf("Linear code hash should contain BR0, got %q", topoLinear.FuzzyHash)
+	}
+
+	// Single If: 1 branch -> BR1
+	if !strings.Contains(topoBranched.FuzzyHash, "BR1") {
+		t.Errorf("Branched code (1 if) hash should contain BR1, got %q", topoBranched.FuzzyHash)
+	}
+
+	// Two Ifs: 2 branches -> BR2
+	if !strings.Contains(topoBranched2.FuzzyHash, "BR2") {
+		t.Errorf("Branched code (2 ifs) hash should contain BR2, got %q", topoBranched2.FuzzyHash)
+	}
 
 	if topoLinear.FuzzyHash == topoBranched.FuzzyHash {
 		t.Errorf("Fuzzy Hash Collision: Linear and Branched code produced same hash %q", topoLinear.FuzzyHash)
