@@ -205,20 +205,7 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 							val = val[:maxStrLen]
 						}
 
-						// Security Fix: Prevent DoS via O(N^2) ValidString checks on binary data.
-						// Perform a linear scan O(N) to find the longest valid UTF-8 prefix.
-						if !utf8.ValidString(val) {
-							validLen := 0
-							for i := 0; i < len(val); {
-								r, size := utf8.DecodeRuneInString(val[i:])
-								if r == utf8.RuneError && size == 1 {
-									break // Stop at first invalid byte
-								}
-								validLen += size
-								i += size
-							}
-							val = val[:validLen]
-						}
+						val = truncateToValidUTF8(val)
 
 						if currentStringBytes+len(val) <= maxTotalBytes {
 							t.StringLiterals = append(t.StringLiterals, val)
@@ -575,4 +562,24 @@ func flattenStringLiterals(literals []string) []byte {
 		dataAccumulator = append(dataAccumulator, s...)
 	}
 	return dataAccumulator
+}
+
+// truncateToValidUTF8 returns the longest valid UTF-8 prefix of s.
+// It avoids O(N^2) behavior by performing a single linear scan if the string is invalid.
+func truncateToValidUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+
+	// Perform a linear scan O(N) to find the longest valid UTF-8 prefix.
+	validLen := 0
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			break // Stop at first invalid byte
+		}
+		validLen += size
+		i += size
+	}
+	return s[:validLen]
 }
