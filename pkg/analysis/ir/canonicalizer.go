@@ -70,6 +70,7 @@ type Canonicalizer struct {
 	blockMap             map[*ssa.BasicBlock]string
 	regCounter           int
 	output               strings.Builder
+	scratch              strings.Builder
 	virtualInstrs        map[ssa.Instruction]*virtualInstr
 	virtualBlocks        map[*ssa.BasicBlock]*virtualBlock
 	virtualBinOps        map[*ssa.BinOp]token.Token
@@ -814,32 +815,42 @@ func isCommutative(instr *ssa.BinOp) bool {
 }
 
 func (c *Canonicalizer) processInstruction(instr ssa.Instruction) {
-	var rhs strings.Builder
+	c.scratch.Reset()
 	val, isValue := instr.(ssa.Value)
 	isControlFlow := false
 
 	switch i := instr.(type) {
 	case *ssa.Call:
-		rhs.WriteString("Call ")
-		c.writeCallCommon(&rhs, &i.Call, instr)
+		c.scratch.WriteString("Call ")
+		c.writeCallCommon(&c.scratch, &i.Call, instr)
 	case *ssa.BinOp:
 		normX := c.NormalizeOperand(i.X, instr)
 		normY := c.NormalizeOperand(i.Y, instr)
 		op := c.getVirtualBinOpToken(i)
+		c.scratch.WriteString("BinOp ")
+		c.scratch.WriteString(op.String())
+		c.scratch.WriteString(", ")
 		if isCommutative(i) && normX > normY {
-			rhs.WriteString(fmt.Sprintf("BinOp %s, %s, %s", op.String(), normY, normX))
+			c.scratch.WriteString(normY)
+			c.scratch.WriteString(", ")
+			c.scratch.WriteString(normX)
 		} else {
-			rhs.WriteString(fmt.Sprintf("BinOp %s, %s, %s", op.String(), normX, normY))
+			c.scratch.WriteString(normX)
+			c.scratch.WriteString(", ")
+			c.scratch.WriteString(normY)
 		}
 	case *ssa.UnOp:
-		rhs.WriteString(fmt.Sprintf("UnOp %s, %s", i.Op.String(), c.NormalizeOperand(i.X, instr)))
+		c.scratch.WriteString("UnOp ")
+		c.scratch.WriteString(i.Op.String())
+		c.scratch.WriteString(", ")
+		c.scratch.WriteString(c.NormalizeOperand(i.X, instr))
 		if i.CommaOk {
-			rhs.WriteString(", CommaOk")
+			c.scratch.WriteString(", CommaOk")
 		}
 	case *ssa.Phi:
-		c.writePhi(&rhs, i, instr)
+		c.writePhi(&c.scratch, i, instr)
 	case *ssa.Alloc:
-		rhs.WriteString("Alloca ")
+		c.scratch.WriteString("Alloca ")
 		handled := false
 		if ptrType, ok := i.Type().Underlying().(*types.Pointer); ok {
 			elemType := ptrType.Elem()
@@ -852,122 +863,132 @@ func (c *Canonicalizer) processInstruction(instr ssa.Instruction) {
 						typeRep = fmt.Sprintf("[<len_literal>]%s", sanitizeType(arrType.Elem()))
 					}
 				}
-				rhs.WriteString(typeRep)
+				c.scratch.WriteString(typeRep)
 				handled = true
 			} else {
-				rhs.WriteString(sanitizeType(elemType))
+				c.scratch.WriteString(sanitizeType(elemType))
 				handled = true
 			}
 		}
 		if !handled {
-			rhs.WriteString(sanitizeType(i.Type().Underlying()))
+			c.scratch.WriteString(sanitizeType(i.Type().Underlying()))
 		}
 	case *ssa.Store:
-		rhs.WriteString(fmt.Sprintf("Store %s, %s", c.NormalizeOperand(i.Addr, instr), c.NormalizeOperand(i.Val, instr)))
+		c.scratch.WriteString("Store ")
+		c.scratch.WriteString(c.NormalizeOperand(i.Addr, instr))
+		c.scratch.WriteString(", ")
+		c.scratch.WriteString(c.NormalizeOperand(i.Val, instr))
 	case *ssa.If:
 		isControlFlow = true
 		succs := c.getVirtualSuccessors(i.Block())
-		rhs.WriteString(fmt.Sprintf("If %s, %s, %s", c.NormalizeOperand(i.Cond, instr), c.blockMap[succs[0]], c.blockMap[succs[1]]))
+		c.scratch.WriteString("If ")
+		c.scratch.WriteString(c.NormalizeOperand(i.Cond, instr))
+		c.scratch.WriteString(", ")
+		c.scratch.WriteString(c.blockMap[succs[0]])
+		c.scratch.WriteString(", ")
+		c.scratch.WriteString(c.blockMap[succs[1]])
 	case *ssa.Jump:
 		isControlFlow = true
 		if len(i.Block().Succs) > 0 {
-			rhs.WriteString(fmt.Sprintf("Jump %s", c.blockMap[i.Block().Succs[0]]))
+			c.scratch.WriteString("Jump ")
+			c.scratch.WriteString(c.blockMap[i.Block().Succs[0]])
 		} else {
-			rhs.WriteString("Jump <invalid>")
+			c.scratch.WriteString("Jump <invalid>")
 		}
 	case *ssa.Return:
 		isControlFlow = true
-		rhs.WriteString("Return")
+		c.scratch.WriteString("Return")
 		for j, res := range i.Results {
 			if j > 0 {
-				rhs.WriteString(",")
+				c.scratch.WriteString(",")
 			}
-			rhs.WriteString(" " + c.NormalizeOperand(res, instr))
+			c.scratch.WriteString(" ")
+			c.scratch.WriteString(c.NormalizeOperand(res, instr))
 		}
 	case *ssa.IndexAddr:
-		rhs.WriteString(fmt.Sprintf("IndexAddr %s, %s", c.NormalizeOperand(i.X, instr), c.NormalizeOperand(i.Index, instr)))
+		c.scratch.WriteString(fmt.Sprintf("IndexAddr %s, %s", c.NormalizeOperand(i.X, instr), c.NormalizeOperand(i.Index, instr)))
 	case *ssa.Index:
-		rhs.WriteString(fmt.Sprintf("Index %s, %s", c.NormalizeOperand(i.X, instr), c.NormalizeOperand(i.Index, instr)))
+		c.scratch.WriteString(fmt.Sprintf("Index %s, %s", c.NormalizeOperand(i.X, instr), c.NormalizeOperand(i.Index, instr)))
 	case *ssa.Select:
-		c.writeSelect(&rhs, i, instr)
+		c.writeSelect(&c.scratch, i, instr)
 	case *ssa.Range:
-		rhs.WriteString(fmt.Sprintf("Range %s", c.NormalizeOperand(i.X, instr)))
+		c.scratch.WriteString(fmt.Sprintf("Range %s", c.NormalizeOperand(i.X, instr)))
 	case *ssa.Next:
-		rhs.WriteString(fmt.Sprintf("Next %s", c.NormalizeOperand(i.Iter, instr)))
+		c.scratch.WriteString(fmt.Sprintf("Next %s", c.NormalizeOperand(i.Iter, instr)))
 	case *ssa.Extract:
-		rhs.WriteString(fmt.Sprintf("Extract %s, %d", c.NormalizeOperand(i.Tuple, instr), i.Index))
+		c.scratch.WriteString(fmt.Sprintf("Extract %s, %d", c.NormalizeOperand(i.Tuple, instr), i.Index))
 	case *ssa.Slice:
-		rhs.WriteString(fmt.Sprintf("Slice %s", c.NormalizeOperand(i.X, instr)))
+		c.scratch.WriteString(fmt.Sprintf("Slice %s", c.NormalizeOperand(i.X, instr)))
 		if i.Low != nil {
-			rhs.WriteString(fmt.Sprintf(", Low:%s", c.NormalizeOperand(i.Low, instr)))
+			c.scratch.WriteString(fmt.Sprintf(", Low:%s", c.NormalizeOperand(i.Low, instr)))
 		}
 		if i.High != nil {
-			rhs.WriteString(fmt.Sprintf(", High:%s", c.NormalizeOperand(i.High, instr)))
+			c.scratch.WriteString(fmt.Sprintf(", High:%s", c.NormalizeOperand(i.High, instr)))
 		}
 		if i.Max != nil {
-			rhs.WriteString(fmt.Sprintf(", Max:%s", c.NormalizeOperand(i.Max, instr)))
+			c.scratch.WriteString(fmt.Sprintf(", Max:%s", c.NormalizeOperand(i.Max, instr)))
 		}
 	case *ssa.MakeSlice:
-		rhs.WriteString(fmt.Sprintf("MakeSlice %s, Len:%s, Cap:%s", sanitizeType(i.Type()), c.NormalizeOperand(i.Len, instr), c.NormalizeOperand(i.Cap, instr)))
+		c.scratch.WriteString(fmt.Sprintf("MakeSlice %s, Len:%s, Cap:%s", sanitizeType(i.Type()), c.NormalizeOperand(i.Len, instr), c.NormalizeOperand(i.Cap, instr)))
 	case *ssa.MakeMap:
-		rhs.WriteString(fmt.Sprintf("MakeMap %s", sanitizeType(i.Type())))
+		c.scratch.WriteString(fmt.Sprintf("MakeMap %s", sanitizeType(i.Type())))
 		if i.Reserve != nil {
-			rhs.WriteString(fmt.Sprintf(", Reserve:%s", c.NormalizeOperand(i.Reserve, instr)))
+			c.scratch.WriteString(fmt.Sprintf(", Reserve:%s", c.NormalizeOperand(i.Reserve, instr)))
 		}
 	case *ssa.MapUpdate:
-		rhs.WriteString(fmt.Sprintf("MapUpdate %s, Key:%s, Val:%s", c.NormalizeOperand(i.Map, instr), c.NormalizeOperand(i.Key, instr), c.NormalizeOperand(i.Value, instr)))
+		c.scratch.WriteString(fmt.Sprintf("MapUpdate %s, Key:%s, Val:%s", c.NormalizeOperand(i.Map, instr), c.NormalizeOperand(i.Key, instr), c.NormalizeOperand(i.Value, instr)))
 	case *ssa.Lookup:
-		rhs.WriteString(fmt.Sprintf("Lookup %s, Key:%s", c.NormalizeOperand(i.X, instr), c.NormalizeOperand(i.Index, instr)))
+		c.scratch.WriteString(fmt.Sprintf("Lookup %s, Key:%s", c.NormalizeOperand(i.X, instr), c.NormalizeOperand(i.Index, instr)))
 		if i.CommaOk {
-			rhs.WriteString(", CommaOk")
+			c.scratch.WriteString(", CommaOk")
 		}
 	case *ssa.TypeAssert:
-		rhs.WriteString(fmt.Sprintf("TypeAssert %s, AssertedType:%s", c.NormalizeOperand(i.X, instr), sanitizeType(i.AssertedType)))
+		c.scratch.WriteString(fmt.Sprintf("TypeAssert %s, AssertedType:%s", c.NormalizeOperand(i.X, instr), sanitizeType(i.AssertedType)))
 		if i.CommaOk {
-			rhs.WriteString(", CommaOk")
+			c.scratch.WriteString(", CommaOk")
 		}
 	case *ssa.MakeInterface:
-		rhs.WriteString(fmt.Sprintf("MakeInterface %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		c.scratch.WriteString(fmt.Sprintf("MakeInterface %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
 	case *ssa.ChangeType:
-		rhs.WriteString(fmt.Sprintf("ChangeType %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		c.scratch.WriteString(fmt.Sprintf("ChangeType %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
 	case *ssa.Convert:
-		rhs.WriteString(fmt.Sprintf("Convert %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		c.scratch.WriteString(fmt.Sprintf("Convert %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
 	case *ssa.Go:
-		rhs.WriteString("Go ")
-		c.writeCallCommon(&rhs, &i.Call, instr)
+		c.scratch.WriteString("Go ")
+		c.writeCallCommon(&c.scratch, &i.Call, instr)
 	case *ssa.Defer:
-		rhs.WriteString("Defer ")
-		c.writeCallCommon(&rhs, &i.Call, instr)
+		c.scratch.WriteString("Defer ")
+		c.writeCallCommon(&c.scratch, &i.Call, instr)
 	case *ssa.RunDefers:
-		rhs.WriteString("RunDefers")
+		c.scratch.WriteString("RunDefers")
 	case *ssa.Panic:
-		rhs.WriteString(fmt.Sprintf("Panic %s", c.NormalizeOperand(i.X, instr)))
+		c.scratch.WriteString(fmt.Sprintf("Panic %s", c.NormalizeOperand(i.X, instr)))
 	case *ssa.MakeClosure:
-		rhs.WriteString(fmt.Sprintf("MakeClosure %s", c.NormalizeOperand(i.Fn, instr)))
+		c.scratch.WriteString(fmt.Sprintf("MakeClosure %s", c.NormalizeOperand(i.Fn, instr)))
 		if len(i.Bindings) > 0 {
-			rhs.WriteString(" [")
+			c.scratch.WriteString(" [")
 			for j, binding := range i.Bindings {
 				if j > 0 {
-					rhs.WriteString(", ")
+					c.scratch.WriteString(", ")
 				}
-				rhs.WriteString(c.NormalizeOperand(binding, instr))
+				c.scratch.WriteString(c.NormalizeOperand(binding, instr))
 			}
-			rhs.WriteString("]")
+			c.scratch.WriteString("]")
 		}
 	case *ssa.FieldAddr:
-		rhs.WriteString(fmt.Sprintf("FieldAddr %s, field(%d)", c.NormalizeOperand(i.X, instr), i.Field))
+		c.scratch.WriteString(fmt.Sprintf("FieldAddr %s, field(%d)", c.NormalizeOperand(i.X, instr), i.Field))
 	case *ssa.Field:
-		rhs.WriteString(fmt.Sprintf("Field %s, field(%d)", c.NormalizeOperand(i.X, instr), i.Field))
+		c.scratch.WriteString(fmt.Sprintf("Field %s, field(%d)", c.NormalizeOperand(i.X, instr), i.Field))
 	case *ssa.Send:
-		rhs.WriteString(fmt.Sprintf("Send %s, %s", c.NormalizeOperand(i.Chan, instr), c.NormalizeOperand(i.X, instr)))
+		c.scratch.WriteString(fmt.Sprintf("Send %s, %s", c.NormalizeOperand(i.Chan, instr), c.NormalizeOperand(i.X, instr)))
 	case *ssa.MakeChan:
-		rhs.WriteString(fmt.Sprintf("MakeChan %s, Size:%s", sanitizeType(i.Type()), c.NormalizeOperand(i.Size, instr)))
+		c.scratch.WriteString(fmt.Sprintf("MakeChan %s, Size:%s", sanitizeType(i.Type()), c.NormalizeOperand(i.Size, instr)))
 	case *ssa.ChangeInterface:
-		rhs.WriteString(fmt.Sprintf("ChangeInterface %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		c.scratch.WriteString(fmt.Sprintf("ChangeInterface %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
 	case *ssa.SliceToArrayPointer:
-		rhs.WriteString(fmt.Sprintf("SliceToArrayPointer %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		c.scratch.WriteString(fmt.Sprintf("SliceToArrayPointer %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
 	case *ssa.MultiConvert:
-		rhs.WriteString(fmt.Sprintf("MultiConvert %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		c.scratch.WriteString(fmt.Sprintf("MultiConvert %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
 	case *ssa.DebugRef:
 		return
 
@@ -975,7 +996,7 @@ func (c *Canonicalizer) processInstruction(instr ssa.Instruction) {
 		if c.StrictMode {
 			panic(fmt.Sprintf("STRICT MODE: Unhandled SSA instruction %T", instr))
 		}
-		rhs.WriteString(fmt.Sprintf("UnhandledInstr<%T>", instr))
+		c.scratch.WriteString(fmt.Sprintf("UnhandledInstr<%T>", instr))
 	}
 
 	c.output.WriteString("  ")
@@ -991,7 +1012,7 @@ func (c *Canonicalizer) processInstruction(instr ssa.Instruction) {
 			c.output.WriteString(fmt.Sprintf("%s = ", name))
 		}
 	}
-	c.output.WriteString(rhs.String() + "\n")
+	c.output.WriteString(c.scratch.String() + "\n")
 }
 
 func (c *Canonicalizer) writeSelect(w *strings.Builder, i *ssa.Select, context ssa.Instruction) {
