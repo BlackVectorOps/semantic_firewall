@@ -36,6 +36,11 @@ jobs:
           # Verify binary works
           ./bin/sfw --version || ./bin/sfw help || true
 
+      - name: Vendor Dependencies
+        # Vendor modules into workspace so they're available inside the sandbox.
+        # The sandbox only mounts the workspace, not GOMODCACHE (/home/runner/go/pkg/mod).
+        run: go mod vendor
+
       - name: Determine Mode
         id: mode
         run: |
@@ -88,128 +93,122 @@ jobs:
              echo "has_go_files=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Run Semantic Analysis (Sandboxed)
-        uses: geomys/sandboxed-step@v1.2.0
-        with:
-          disable-network: 'true'
-          # CONTEXT INJECTION:
-          # We inject vars via interpolation. We write to a local artifact
-          # instead of trying to hit the runner's step summary directly.
-          run: |
-            export MODE="${{ steps.mode.outputs.mode }}"
-            export WORKTREE_DIR="${{ steps.prep.outputs.worktree_dir }}"
-            export HAS_GO="${{ steps.prep.outputs.has_go_files }}"
-            export SFW_SANDBOX_ID="1"
-            
-            # Strict mode enabled after exports
-            set -euo pipefail
+      # Install dependencies for sfw's internal sandbox (AppArmor bypass via aa-exec)
+      - name: Install Sandbox Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apparmor-utils
 
-            # Define local report artifact (Safe Write)
-            REPORT_FILE="scan_report.md"
+      - name: Run Semantic Analysis
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+          WORKTREE_DIR: ${{ steps.prep.outputs.worktree_dir }}
+          HAS_GO: ${{ steps.prep.outputs.has_go_files }}
+          # Use vendored dependencies - sandbox can't access GOMODCACHE
+          GOFLAGS: "-mod=vendor"
+          GOPROXY: "off"
+        run: |
+          set -euo pipefail
 
-            echo "## Semantic Analysis Report ($MODE)" >> "$REPORT_FILE"
-            echo "| File | Status | Match % |" >> "$REPORT_FILE"
-            echo "| :--- | :--- | :--- |" >> "$REPORT_FILE"
+          REPORT_FILE="scan_report.md"
 
-            if [ "$HAS_GO" != "true" ]; then
-                echo "No Go files changed." >> "$REPORT_FILE"
-                exit 0
+          echo "## Semantic Analysis Report ($MODE)" >> "$REPORT_FILE"
+          echo "| File | Status | Match % |" >> "$REPORT_FILE"
+          echo "| :--- | :--- | :--- |" >> "$REPORT_FILE"
+
+          if [ "$HAS_GO" != "true" ]; then
+              echo "No Go files changed." >> "$REPORT_FILE"
+              exit 0
+          fi
+
+          ERROR_COUNT=0
+          LOGIC_FAIL=0
+
+          # Process the pre-calculated diff stream
+          while IFS= read -r -d '' status; do
+            case "$status" in
+              R*|C*)
+                 IFS= read -r -d '' old_path
+                 IFS= read -r -d '' new_path
+                 OLD_FILE_REF="$old_path"
+                 NEW_FILE_REF="$new_path"
+                 ;;
+              *)
+                 IFS= read -r -d '' path
+                 OLD_FILE_REF="$path"
+                 NEW_FILE_REF="$path"
+                 ;;
+            esac
+
+            if [[ "$NEW_FILE_REF" != *.go ]] && [[ "$OLD_FILE_REF" != *.go ]]; then continue; fi
+
+            if [ -f "$NEW_FILE_REF" ]; then
+                NEW_FILE="$NEW_FILE_REF"
+            else
+                NEW_FILE=""
             fi
 
-            # Check for required tools inside sandbox
-            if ! command -v jq >/dev/null; then
-                echo "::error::'jq' is missing from the sandbox environment."
-                exit 1
+            OLD_FILE="$WORKTREE_DIR/$OLD_FILE_REF"
+            if [ ! -f "$OLD_FILE" ]; then
+                OLD_FILE=""
             fi
 
-            ERROR_COUNT=0
-            LOGIC_FAIL=0
+            if [[ -z "$NEW_FILE" ]] && [[ -z "$OLD_FILE" ]]; then continue; fi
 
-            # Process the pre-calculated diff stream
-            while IFS= read -r -d '' status; do
-              case "$status" in
-                R*|C*)
-                   IFS= read -r -d '' old_path
-                   IFS= read -r -d '' new_path
-                   OLD_FILE_REF="$old_path"
-                   NEW_FILE_REF="$new_path"
-                   ;;
-                *)
-                   IFS= read -r -d '' path
-                   OLD_FILE_REF="$path"
-                   NEW_FILE_REF="$path"
-                   ;;
-              esac
-
-              if [[ "$NEW_FILE_REF" != *.go ]] && [[ "$OLD_FILE_REF" != *.go ]]; then continue; fi
-
-              if [ -f "$NEW_FILE_REF" ]; then
-                  NEW_FILE="$NEW_FILE_REF"
-              else
-                  NEW_FILE=""
-              fi
-
-              OLD_FILE="$WORKTREE_DIR/$OLD_FILE_REF"
-              if [ ! -f "$OLD_FILE" ]; then
-                  OLD_FILE=""
-              fi
-
-              if [[ -z "$NEW_FILE" ]] && [[ -z "$OLD_FILE" ]]; then continue; fi
-
-              if [[ -z "$OLD_FILE" ]]; then
-                  echo "| \`$NEW_FILE_REF\` | New File | N/A |" >> "$REPORT_FILE"
-                  continue
-              fi
-
-              if [[ -z "$NEW_FILE" ]]; then
-                  echo "| \`$OLD_FILE_REF\` | Deleted | N/A |" >> "$REPORT_FILE"
-                  continue
-              fi
-
-              # Execute SFW with stderr capture
-              if ! OUTPUT=$(./bin/sfw diff "$OLD_FILE" "$NEW_FILE" 2>&1); then
-                  echo "::error::sfw failed to process $NEW_FILE_REF"
-                  ERROR_COUNT=$((ERROR_COUNT + 1))
-                  continue
-              fi
-
-              # Validate JSON
-              if ! echo "$OUTPUT" | jq -e . >/dev/null 2>&1; then
-                  echo "::error::Invalid JSON output for $NEW_FILE_REF"
-                  ERROR_COUNT=$((ERROR_COUNT + 1))
-                  continue
-              fi
-
-              PCT=$(echo "$OUTPUT" | jq -r '.summary.semantic_match_pct // 0')
-              MODIFIED=$(echo "$OUTPUT" | jq -r '.summary.modified // 0')
-              IS_BELOW_100=$(echo "$OUTPUT" | jq -r 'if (.summary.semantic_match_pct // 0) < 100 then "true" else "false" end')
-
-              if [ "$IS_BELOW_100" = "true" ]; then
-                  STATUS_ICON="Modified ($MODIFIED)"
-                  echo "| \`$NEW_FILE_REF\` | $STATUS_ICON | **$PCT%** |" >> "$REPORT_FILE"
-
-                  if [ "$MODE" == "BLOCKER" ]; then
-                      echo "::error file=$NEW_FILE_REF::Logic change detected in safe refactor! ($PCT%)"
-                      LOGIC_FAIL=1
-                  fi
-              else
-                  STATUS_ICON="Preserved"
-                  echo "| \`$NEW_FILE_REF\` | $STATUS_ICON | **$PCT%** |" >> "$REPORT_FILE"
-              fi
-
-            done < diff_stream.bin
-
-            if [ $ERROR_COUNT -gt 0 ]; then
-                echo "" >> "$REPORT_FILE"
-                echo "**CI FAILED**: Tool execution failures detected." >> "$REPORT_FILE"
-                exit 1
+            if [[ -z "$OLD_FILE" ]]; then
+                echo "| \`$NEW_FILE_REF\` | New File | N/A |" >> "$REPORT_FILE"
+                continue
             fi
 
-            if [ $LOGIC_FAIL -eq 1 ]; then
-                echo "" >> "$REPORT_FILE"
-                echo "**CI FAILED**: Logic changed in 'semantic-safe' PR." >> "$REPORT_FILE"
-                exit 1
+            if [[ -z "$NEW_FILE" ]]; then
+                echo "| \`$OLD_FILE_REF\` | Deleted | N/A |" >> "$REPORT_FILE"
+                continue
             fi
+
+            # Execute SFW diff (sfw handles its own sandboxing internally)
+            if ! OUTPUT=$(./bin/sfw diff "$OLD_FILE" "$NEW_FILE" 2>&1); then
+                echo "::error::sfw failed to process $NEW_FILE_REF"
+                ERROR_COUNT=$((ERROR_COUNT + 1))
+                continue
+            fi
+
+            # Validate JSON
+            if ! echo "$OUTPUT" | jq -e . >/dev/null 2>&1; then
+                echo "::error::Invalid JSON output for $NEW_FILE_REF"
+                ERROR_COUNT=$((ERROR_COUNT + 1))
+                continue
+            fi
+
+            PCT=$(echo "$OUTPUT" | jq -r '.summary.semantic_match_pct // 0')
+            MODIFIED=$(echo "$OUTPUT" | jq -r '.summary.modified // 0')
+            IS_BELOW_100=$(echo "$OUTPUT" | jq -r 'if (.summary.semantic_match_pct // 0) < 100 then "true" else "false" end')
+
+            if [ "$IS_BELOW_100" = "true" ]; then
+                STATUS_ICON="Modified ($MODIFIED)"
+                echo "| \`$NEW_FILE_REF\` | $STATUS_ICON | **$PCT%** |" >> "$REPORT_FILE"
+
+                if [ "$MODE" == "BLOCKER" ]; then
+                    echo "::error file=$NEW_FILE_REF::Logic change detected in safe refactor! ($PCT%)"
+                    LOGIC_FAIL=1
+                fi
+            else
+                STATUS_ICON="Preserved"
+                echo "| \`$NEW_FILE_REF\` | $STATUS_ICON | **$PCT%** |" >> "$REPORT_FILE"
+            fi
+
+          done < diff_stream.bin
+
+          if [ $ERROR_COUNT -gt 0 ]; then
+              echo "" >> "$REPORT_FILE"
+              echo "**CI FAILED**: Tool execution failures detected." >> "$REPORT_FILE"
+              exit 1
+          fi
+
+          if [ $LOGIC_FAIL -eq 1 ]; then
+              echo "" >> "$REPORT_FILE"
+              echo "**CI FAILED**: Logic changed in 'semantic-safe' PR." >> "$REPORT_FILE"
+              exit 1
+          fi
 
       - name: Publish Analysis Report
         if: always()
