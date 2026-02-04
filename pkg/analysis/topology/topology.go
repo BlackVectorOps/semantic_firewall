@@ -198,7 +198,6 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 				}
 				if c, ok := (*op).(*ssa.Const); ok && c.Value != nil {
 					if c.Value.Kind() == constant.String {
-						// FIX: Use StringVal to get raw string content instead of ExactString which includes quotes
 						val := constant.StringVal(c.Value)
 
 						if len(val) > maxStrLen {
