@@ -462,7 +462,7 @@ func (c *Canonicalizer) isPureBuiltin(call *ssa.Call) bool {
 		return false
 	}
 
-	// Security Fix: len() and cap() are impure for Maps and Channels
+	// Note: len() and cap() are impure for Maps and Channels
 	// because their length is volatile in concurrent/mutable contexts.
 	if name == "len" || name == "cap" {
 		if len(call.Call.Args) > 0 {
