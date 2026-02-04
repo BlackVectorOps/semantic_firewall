@@ -311,9 +311,8 @@ func extractCallSignature(call *ssa.Call) string {
 	case *ssa.Builtin:
 		return fmt.Sprintf("builtin:%s", v.Name())
 	case *ssa.MakeClosure:
-		// FIX: Use Safe Type Assertion to avoid panic
-		if fn, ok := v.Fn.(*ssa.Function); ok && fn != nil {
-			return fmt.Sprintf("closure:%s", fn.Signature.String())
+		if sig := extractClosureSignature(v); sig != "" {
+			return sig
 		}
 	}
 
@@ -339,9 +338,8 @@ func extractGoSignature(g *ssa.Go) string {
 	case *ssa.Function:
 		return extractFunctionSig(v)
 	case *ssa.MakeClosure:
-		// FIX: Use Safe Type Assertion
-		if fn, ok := v.Fn.(*ssa.Function); ok && fn != nil {
-			return fmt.Sprintf("closure:%s", fn.Signature.String())
+		if sig := extractClosureSignature(v); sig != "" {
+			return sig
 		}
 	}
 	// Fallback for dynamic function pointers
@@ -362,15 +360,21 @@ func extractDeferSignature(d *ssa.Defer) string {
 	case *ssa.Function:
 		return extractFunctionSig(v)
 	case *ssa.MakeClosure:
-		// FIX: Use Safe Type Assertion
-		if fn, ok := v.Fn.(*ssa.Function); ok && fn != nil {
-			return fmt.Sprintf("closure:%s", fn.Signature.String())
+		if sig := extractClosureSignature(v); sig != "" {
+			return sig
 		}
 	}
 	if d.Call.Value != nil {
 		return fmt.Sprintf("dynamic:%s", normalizeTypeName(d.Call.Value.Type()))
 	}
 	return "unknown"
+}
+
+func extractClosureSignature(v *ssa.MakeClosure) string {
+	if fn, ok := v.Fn.(*ssa.Function); ok && fn != nil {
+		return fmt.Sprintf("closure:%s", fn.Signature.String())
+	}
+	return ""
 }
 
 func extractFunctionSig(fn *ssa.Function) string {
