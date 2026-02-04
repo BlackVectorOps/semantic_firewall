@@ -564,3 +564,64 @@ func TestCanonicalizer_BlockOrderingStability(t *testing.T) {
 		}
 	}
 }
+
+func TestCanonicalizer_HoistSafety_Chan(t *testing.T) {
+	t.Parallel()
+
+	// Test len(chan) and cap(chan) are not hoisted.
+	src := `package main
+		func foo(c chan int) int {
+			sum := 0
+			for i := 0; i < 10; i++ {
+				c <- i
+				sum += len(c) // This must NOT be hoisted
+				sum += cap(c) // This must NOT be hoisted
+			}
+			return sum
+		}`
+
+	fn := testutil.CompileAndGetFunction(t, src, "foo")
+
+	c := ir.NewCanonicalizer(ir.DefaultLiteralPolicy)
+	defer ir.ReleaseCanonicalizer(c)
+
+	out := c.CanonicalizeFunction(fn)
+
+	lines := strings.Split(out, "\n")
+	var loopHeaderIdx int
+	var lenCallIdx int = -1
+	var capCallIdx int = -1
+	loopFound := false
+
+	for i, line := range lines {
+		if strings.Contains(line, "; LoopHeader") {
+			loopHeaderIdx = i
+			loopFound = true
+		}
+		if strings.Contains(line, "Call <builtin:len>") {
+			lenCallIdx = i
+		}
+		if strings.Contains(line, "Call <builtin:cap>") {
+			capCallIdx = i
+		}
+	}
+
+	if !loopFound {
+		t.Fatal("Failed to detect LoopHeader in canonical output")
+	}
+
+	if lenCallIdx == -1 {
+		t.Fatal("Failed to find len() call in canonical output")
+	}
+	if capCallIdx == -1 {
+		t.Fatal("Failed to find cap() call in canonical output")
+	}
+
+	// If len() or cap() was hoisted, it would appear in the pre-header (before loop header).
+	if lenCallIdx < loopHeaderIdx {
+		t.Errorf("Security Flaw: len(chan) was incorrectly hoisted out of the loop.")
+	}
+	if capCallIdx < loopHeaderIdx {
+		t.Errorf("Security Flaw: cap(chan) was incorrectly hoisted out of the loop.")
+	}
+}
