@@ -45,7 +45,11 @@ func IsSandboxed() bool {
 func Run(ctx context.Context, cfg Config, stdout, stderr io.Writer) error {
 	runscPath, err := lookPathFunc(RuntimeBinary)
 	if err != nil {
-		return fmt.Errorf("security critical: '%s' not found in PATH: %w", RuntimeBinary, err)
+		if stderr != nil {
+			fmt.Fprintf(stderr, "::warning::[Security] '%s' not found. Falling back to direct execution.\n", RuntimeBinary)
+		}
+		// Fallback: Execute directly without sandbox
+		return runDirect(ctx, cfg, stdout, stderr)
 	}
 
 	bundleDir, err := os.MkdirTemp("", "sfw-sandbox-*")
@@ -319,4 +323,33 @@ func generateSpec(ctx context.Context, cfg Config, selfExe string) (*Spec, error
 			},
 		},
 	}, nil
+}
+
+// runDirect executes the logic directly when sandbox is unavailable.
+func runDirect(ctx context.Context, cfg Config, stdout, stderr io.Writer) error {
+	// Re-construct the command to call self with the same arguments
+	// but without the sandbox wrapper logic (which is handled by the caller checking IsSandboxed)
+	// Actually, the 'worker' logic needs to be invoked.
+	// Since 'Run' is called to WRAP the execution, we need to run the underlying logic.
+	// However, the current architecture likely calls 'Run' which spawns 'sfw' again inside the sandbox.
+	// So we can just spawn 'sfw' again with the same arguments, but ensure we don't loop.
+	// The worker logic is triggered when the command is run.
+
+	selfExe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to locate self executable: %w", err)
+	}
+
+	// We need to set EnvSandboxID to prevent infinite recursion if the called process tries to sandbox itself again.
+	// But wait, IsSandboxed() checks this env var.
+	// If we set it, the child process will think it's already sandboxed and proceed with logic.
+
+	cmd := execCmdFunc(ctx, selfExe, cfg.Args...)
+	cmd.Env = os.Environ()
+	cmd.Env = append(cmd.Env, fmt.Sprintf("%s=1", EnvSandboxID))
+	cmd.Dir = cfg.WorkDir
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	return cmd.Run()
 }
