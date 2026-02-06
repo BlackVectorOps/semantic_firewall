@@ -198,27 +198,13 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 				}
 				if c, ok := (*op).(*ssa.Const); ok && c.Value != nil {
 					if c.Value.Kind() == constant.String {
-						// FIX: Use StringVal to get raw string content instead of ExactString which includes quotes
 						val := constant.StringVal(c.Value)
 
 						if len(val) > maxStrLen {
 							val = val[:maxStrLen]
 						}
 
-						// Security Fix: Prevent DoS via O(N^2) ValidString checks on binary data.
-						// Perform a linear scan O(N) to find the longest valid UTF-8 prefix.
-						if !utf8.ValidString(val) {
-							validLen := 0
-							for i := 0; i < len(val); {
-								r, size := utf8.DecodeRuneInString(val[i:])
-								if r == utf8.RuneError && size == 1 {
-									break // Stop at first invalid byte
-								}
-								validLen += size
-								i += size
-							}
-							val = val[:validLen]
-						}
+						val = truncateToValidUTF8(val)
 
 						if currentStringBytes+len(val) <= maxTotalBytes {
 							t.StringLiterals = append(t.StringLiterals, val)
@@ -277,7 +263,7 @@ func GenerateFuzzyHash(t *FunctionTopology) string {
 	}
 	brBucket := 0
 	if t.BranchCount > 0 {
-		// FIX: Differentiate between 0 branches (linear) and 1 branch (single if).
+		// Differentiate between 0 branches (linear) and 1 branch (single if).
 		// Log2(1) is 0, so we shift by 1 to make BR0 mean "no branches" and BR1 mean "1 branch".
 		brBucket = int(math.Log2(float64(t.BranchCount))) + 1
 	}
@@ -311,9 +297,8 @@ func extractCallSignature(call *ssa.Call) string {
 	case *ssa.Builtin:
 		return fmt.Sprintf("builtin:%s", v.Name())
 	case *ssa.MakeClosure:
-		// FIX: Use Safe Type Assertion to avoid panic
-		if fn, ok := v.Fn.(*ssa.Function); ok && fn != nil {
-			return fmt.Sprintf("closure:%s", fn.Signature.String())
+		if sig := extractClosureSignature(v); sig != "" {
+			return sig
 		}
 	}
 
@@ -339,9 +324,8 @@ func extractGoSignature(g *ssa.Go) string {
 	case *ssa.Function:
 		return extractFunctionSig(v)
 	case *ssa.MakeClosure:
-		// FIX: Use Safe Type Assertion
-		if fn, ok := v.Fn.(*ssa.Function); ok && fn != nil {
-			return fmt.Sprintf("closure:%s", fn.Signature.String())
+		if sig := extractClosureSignature(v); sig != "" {
+			return sig
 		}
 	}
 	// Fallback for dynamic function pointers
@@ -362,15 +346,21 @@ func extractDeferSignature(d *ssa.Defer) string {
 	case *ssa.Function:
 		return extractFunctionSig(v)
 	case *ssa.MakeClosure:
-		// FIX: Use Safe Type Assertion
-		if fn, ok := v.Fn.(*ssa.Function); ok && fn != nil {
-			return fmt.Sprintf("closure:%s", fn.Signature.String())
+		if sig := extractClosureSignature(v); sig != "" {
+			return sig
 		}
 	}
 	if d.Call.Value != nil {
 		return fmt.Sprintf("dynamic:%s", normalizeTypeName(d.Call.Value.Type()))
 	}
 	return "unknown"
+}
+
+func extractClosureSignature(v *ssa.MakeClosure) string {
+	if fn, ok := v.Fn.(*ssa.Function); ok && fn != nil {
+		return fmt.Sprintf("closure:%s", fn.Signature.String())
+	}
+	return ""
 }
 
 func extractFunctionSig(fn *ssa.Function) string {
@@ -575,4 +565,24 @@ func flattenStringLiterals(literals []string) []byte {
 		dataAccumulator = append(dataAccumulator, s...)
 	}
 	return dataAccumulator
+}
+
+// truncateToValidUTF8 returns the longest valid UTF-8 prefix of s.
+// It avoids O(N^2) behavior by performing a single linear scan if the string is invalid.
+func truncateToValidUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+
+	// Perform a linear scan O(N) to find the longest valid UTF-8 prefix.
+	validLen := 0
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			break // Stop at first invalid byte
+		}
+		validLen += size
+		i += size
+	}
+	return s[:validLen]
 }

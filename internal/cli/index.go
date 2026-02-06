@@ -166,8 +166,11 @@ func RunIndexJSON(target string, results []diff.FingerprintResult, name, severit
 			Created: time.Now().Format("2006-01-02"),
 		}
 
-		scanner.AddSignature(&sig)
 		indexed = append(indexed, sig)
+	}
+
+	if err := scanner.AddSignatures(indexed); err != nil {
+		return nil, 0, err
 	}
 
 	if err := scanner.SaveDatabase(dbPath); err != nil {

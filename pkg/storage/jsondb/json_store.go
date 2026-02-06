@@ -186,6 +186,18 @@ func (s *Scanner) SaveDatabase(path string) error {
 	return nil
 }
 
+// Generates a secure random ID if the signature doesn't have one.
+func (s *Scanner) ensureID(sig *detection.Signature) error {
+	if sig.ID == "" {
+		b := make([]byte, 8)
+		if _, err := rand.Read(b); err != nil {
+			return fmt.Errorf("failed to generate secure random ID: %w", err)
+		}
+		sig.ID = fmt.Sprintf("SFW-AUTO-%s", hex.EncodeToString(b))
+	}
+	return nil
+}
+
 // Adds a new signature to the database.
 // We use crypto/rand for ID generation because math/rand is deterministic
 // and we don't want ID collisions if the seed isn't set properly.
@@ -204,13 +216,8 @@ func (s *Scanner) AddSignature(sig *detection.Signature) error {
 		}
 	}
 
-	// Generate ID if not provided using secure entropy.
-	if sig.ID == "" {
-		b := make([]byte, 8)
-		if _, err := rand.Read(b); err != nil {
-			return fmt.Errorf("failed to generate secure random ID: %w", err)
-		}
-		sig.ID = fmt.Sprintf("SFW-AUTO-%s", hex.EncodeToString(b))
+	if err := s.ensureID(sig); err != nil {
+		return err
 	}
 
 	// Append copies the struct value.
@@ -222,6 +229,35 @@ func (s *Scanner) AddSignature(sig *detection.Signature) error {
 	}
 	s.sigMap[sig.ID] = len(s.db.Signatures) - 1
 
+	return nil
+}
+
+// Adds multiple signatures to the database in a batch.
+// This reduces locking overhead when indexing many files.
+func (s *Scanner) AddSignatures(sigs []detection.Signature) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(sigs) == 0 {
+		return nil
+	}
+
+	if s.db == nil {
+		s.db = &detection.SignatureDatabase{
+			Version:     "1.0",
+			Description: "Semantic Firewall Malware Signature Database",
+		}
+	}
+
+	for i := range sigs {
+		sig := &sigs[i]
+
+		if err := s.ensureID(sig); err != nil {
+			return err
+		}
+
+		s.db.Signatures = append(s.db.Signatures, *sig)
+	}
 	return nil
 }
 
