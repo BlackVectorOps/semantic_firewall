@@ -95,8 +95,11 @@ func RunAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 		return 1, fmt.Errorf("json encode failed: %w", err)
 	}
 
-	// FAIL-CLOSED: Strict Verdict Enforcement
-	switch output.Output.Verdict {
+	// FAIL-CLOSED: Strict Verdict Enforcement.
+	// Normalize case to stay consistent with llm.validateOutput, which accepts
+	// verdicts case-insensitively; otherwise a valid lowercase "match" would
+	// fall through to the default branch and be reported as an error.
+	switch strings.ToUpper(output.Output.Verdict) {
 	case models.VerdictMatch:
 		return 0, nil
 	case models.VerdictLie, models.VerdictSuspicious, models.VerdictError:
