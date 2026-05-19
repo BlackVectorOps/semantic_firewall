@@ -303,9 +303,14 @@ func (s *Scanner) ScanCandidates(topo *topology.FunctionTopology) ([]*detection.
 		match := sig.TopologyHash == topoHash || (sig.FuzzyHash != "" && sig.FuzzyHash == fuzzyHash)
 
 		if match {
-			// Respect the signature's tolerance.
-			// If it demands 0.0 variance, we give it 0.0 variance.
+			// Respect the signature's tolerance, falling back to the scanner
+			// default when the signature leaves it unset (0). A zero value means
+			// "unspecified", not "demand an exact entropy match" -- this matches
+			// the behaviour of MatchSignature and the PebbleDB scanner.
 			effectiveTol := sig.EntropyTolerance
+			if effectiveTol == 0 {
+				effectiveTol = s.entropyTolerance
+			}
 
 			if math.Abs(sig.EntropyScore-topo.EntropyScore) <= effectiveTol {
 				// Deep copy allows the caller to mutate their candidate list safely.
