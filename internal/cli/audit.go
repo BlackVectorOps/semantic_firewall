@@ -97,7 +97,7 @@ func RunAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 
 	// FAIL-CLOSED: Strict Verdict Enforcement
 	switch output.Output.Verdict {
-	case models.VerdictMatch, models.StatusPreserved:
+	case models.VerdictMatch:
 		return 0, nil
 	case models.VerdictLie, models.VerdictSuspicious, models.VerdictError:
 		return 1, nil
