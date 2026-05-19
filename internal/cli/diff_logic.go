@@ -49,8 +49,14 @@ func ComputeDiff(fsys FileSystem, oldFile, newFile string) (*models.DiffOutput, 
 			return []diff.FingerprintResult{}, nil
 		}
 		info, statErr := fsys.Stat(path)
-		if os.IsNotExist(statErr) {
-			return []diff.FingerprintResult{}, nil
+		if statErr != nil {
+			// A missing file is a valid "no functions" case (e.g. added/removed file).
+			if os.IsNotExist(statErr) {
+				return []diff.FingerprintResult{}, nil
+			}
+			// Any other stat error (permission denied, etc.) must surface as an
+			// error rather than dereferencing the nil FileInfo below.
+			return nil, fmt.Errorf("failed to stat %s: %w", path, statErr)
 		}
 		if info.Size() > MaxSourceFileSize {
 			return nil, fmt.Errorf("file %s exceeds maximum analysis size of %d bytes", path, MaxSourceFileSize)
