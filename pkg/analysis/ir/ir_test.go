@@ -376,6 +376,48 @@ func TestCanonicalizer_KitchenSink(t *testing.T) {
 	}
 }
 
+func TestCanonicalizer_DerivedInductionVariable(t *testing.T) {
+	t.Parallel()
+
+	// A value derived affinely from the loop counter (here i*2) must be
+	// recognised as a scalar-evolution recurrence and virtualised, instead of
+	// surviving as an opaque BinOp MUL. This is what lets loops that compute a
+	// strided value two different ways canonicalize to the same fingerprint.
+	src := `package main
+	func derived(n int) int {
+		total := 0
+		for i := 0; i < n; i++ {
+			total += i * 2
+		}
+		return total
+	}`
+
+	fn := testutil.CompileAndGetFunction(t, src, "derived")
+	c := ir.NewCanonicalizer(ir.DefaultLiteralPolicy)
+	defer ir.ReleaseCanonicalizer(c)
+
+	out := c.CanonicalizeFunction(fn)
+
+	// {start, +, step} notation is only produced by an SCEVAddRec.
+	if !strings.Contains(out, ", +, ") {
+		t.Errorf("expected an affine recurrence {start, +, step} in canonical IR:\n%s", out)
+	}
+	// The derived multiplication must not survive as an opaque operation.
+	if strings.Contains(out, "BinOp *") {
+		t.Errorf("derived induction variable left as opaque BinOp MUL:\n%s", out)
+	}
+
+	// Canonicalization must remain deterministic with the new virtualization.
+	for i := 0; i < 5; i++ {
+		c2 := ir.NewCanonicalizer(ir.DefaultLiteralPolicy)
+		out2 := c2.CanonicalizeFunction(fn)
+		ir.ReleaseCanonicalizer(c2)
+		if out != out2 {
+			t.Fatalf("derived-IV canonical IR is not stable across runs:\n%s\n--- vs ---\n%s", out, out2)
+		}
+	}
+}
+
 func TestCanonicalizer_LoopDepthLimit(t *testing.T) {
 	t.Parallel()
 

@@ -676,6 +676,139 @@ func SCEVFromConst(c *ssa.Const) SCEV {
 	return &SCEVUnknown{Value: c, IsInvariant: true}
 }
 
+// foldSCEV combines two scalar-evolution expressions under an arithmetic
+// operator, simplifying the result into a canonical SCEVAddRec whenever the
+// combination remains affine in the loop counter. This is what lets a derived
+// induction variable (e.g. j := i*2 + 3) be recognised as the recurrence
+// {3, +, 2} rather than an opaque expression, so that semantically equivalent
+// loops canonicalize to the same fingerprint.
+//
+// The affine identities applied (each verified at iteration k, where the
+// recurrence {a, +, b} denotes a + b*k):
+//
+//	{a,+,b} ± X        = {a±X, +, b}          (X invariant in the recurrence's loop)
+//	X - {a,+,b}        = {X-a, +, -b}
+//	{a,+,b} ± {c,+,d}  = {a±c, +, b±d}        (same loop)
+//	{a,+,b} * X        = {a*X, +, b*X}        (X invariant)
+//
+// A recurrence multiplied by another recurrence is quadratic, not affine, so it
+// is intentionally left as an opaque SCEVGenericExpr. Anything that does not
+// match a rule also falls through to SCEVGenericExpr, preserving the previous
+// behaviour. Recursion terminates because every recursive call operates on a
+// strictly smaller sub-expression of the input trees.
 func foldSCEV(op token.Token, left, right SCEV, loop *Loop) SCEV {
+	// Constant op Constant collapses immediately.
+	if lc, ok := left.(*SCEVConstant); ok {
+		if rc, ok := right.(*SCEVConstant); ok {
+			if folded := foldConstants(op, lc.Value, rc.Value); folded != nil {
+				return folded
+			}
+		}
+	}
+
+	lRec, lIsRec := left.(*SCEVAddRec)
+	rRec, rIsRec := right.(*SCEVAddRec)
+
+	switch op {
+	case token.ADD:
+		if lIsRec && rIsRec && lRec.Loop == rRec.Loop {
+			return &SCEVAddRec{
+				Start: foldSCEV(token.ADD, lRec.Start, rRec.Start, loop),
+				Step:  foldSCEV(token.ADD, lRec.Step, rRec.Step, loop),
+				Loop:  lRec.Loop,
+			}
+		}
+		if lIsRec && right.IsLoopInvariant(lRec.Loop) {
+			return &SCEVAddRec{
+				Start: foldSCEV(token.ADD, lRec.Start, right, loop),
+				Step:  lRec.Step,
+				Loop:  lRec.Loop,
+			}
+		}
+		if rIsRec && left.IsLoopInvariant(rRec.Loop) {
+			return &SCEVAddRec{
+				Start: foldSCEV(token.ADD, left, rRec.Start, loop),
+				Step:  rRec.Step,
+				Loop:  rRec.Loop,
+			}
+		}
+
+	case token.SUB:
+		if lIsRec && rIsRec && lRec.Loop == rRec.Loop {
+			return &SCEVAddRec{
+				Start: foldSCEV(token.SUB, lRec.Start, rRec.Start, loop),
+				Step:  foldSCEV(token.SUB, lRec.Step, rRec.Step, loop),
+				Loop:  lRec.Loop,
+			}
+		}
+		if lIsRec && right.IsLoopInvariant(lRec.Loop) {
+			return &SCEVAddRec{
+				Start: foldSCEV(token.SUB, lRec.Start, right, loop),
+				Step:  lRec.Step,
+				Loop:  lRec.Loop,
+			}
+		}
+		if rIsRec && left.IsLoopInvariant(rRec.Loop) {
+			return &SCEVAddRec{
+				Start: foldSCEV(token.SUB, left, rRec.Start, loop),
+				Step:  negateSCEV(rRec.Step),
+				Loop:  rRec.Loop,
+			}
+		}
+
+	case token.MUL:
+		// Scaling a recurrence by a loop-invariant factor stays affine; scaling
+		// one recurrence by another does not.
+		if lIsRec && !rIsRec && right.IsLoopInvariant(lRec.Loop) {
+			return &SCEVAddRec{
+				Start: foldSCEV(token.MUL, lRec.Start, right, loop),
+				Step:  foldSCEV(token.MUL, lRec.Step, right, loop),
+				Loop:  lRec.Loop,
+			}
+		}
+		if rIsRec && !lIsRec && left.IsLoopInvariant(rRec.Loop) {
+			return &SCEVAddRec{
+				Start: foldSCEV(token.MUL, left, rRec.Start, loop),
+				Step:  foldSCEV(token.MUL, left, rRec.Step, loop),
+				Loop:  rRec.Loop,
+			}
+		}
+	}
+
 	return &SCEVGenericExpr{Op: op, X: left, Y: right}
+}
+
+// foldConstants evaluates an arithmetic operator over two integer constants.
+// It returns nil for operators it does not fold (e.g. QUO, which would hide
+// truncation behaviour) so the caller can keep an opaque expression.
+func foldConstants(op token.Token, x, y *big.Int) *SCEVConstant {
+	if x == nil || y == nil {
+		return nil
+	}
+	res := new(big.Int)
+	switch op {
+	case token.ADD:
+		res.Add(x, y)
+	case token.SUB:
+		res.Sub(x, y)
+	case token.MUL:
+		res.Mul(x, y)
+	default:
+		return nil
+	}
+	return &SCEVConstant{Value: res}
+}
+
+// negateSCEV returns the arithmetic negation of a scalar-evolution expression,
+// pushing the negation into constants and recurrences so the result stays in
+// canonical form rather than wrapping everything in a multiply-by-minus-one.
+func negateSCEV(s SCEV) SCEV {
+	switch v := s.(type) {
+	case *SCEVConstant:
+		return &SCEVConstant{Value: new(big.Int).Neg(v.Value)}
+	case *SCEVAddRec:
+		return &SCEVAddRec{Start: negateSCEV(v.Start), Step: negateSCEV(v.Step), Loop: v.Loop}
+	default:
+		return &SCEVGenericExpr{Op: token.MUL, X: s, Y: &SCEVConstant{Value: big.NewInt(-1)}}
+	}
 }
