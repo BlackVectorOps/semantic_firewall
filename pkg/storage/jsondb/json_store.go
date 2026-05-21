@@ -253,6 +253,9 @@ func (s *Scanner) AddSignatures(sigs []detection.Signature) error {
 			Description: "Semantic Firewall Malware Signature Database",
 		}
 	}
+	if s.sigMap == nil {
+		s.sigMap = make(map[string]int, len(sigs))
+	}
 
 	for i := range sigs {
 		sig := &sigs[i]
@@ -262,6 +265,11 @@ func (s *Scanner) AddSignatures(sigs []detection.Signature) error {
 		}
 
 		s.db.Signatures = append(s.db.Signatures, *sig)
+		// Keep the ID index in sync. Without this, GetSignature returns
+		// "not found" for every signature added via a batch until the
+		// database is reloaded -- the bulk-import path of MigrateFromJSON
+		// is the realistic trigger.
+		s.sigMap[sig.ID] = len(s.db.Signatures) - 1
 	}
 	return nil
 }

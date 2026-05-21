@@ -59,6 +59,30 @@ func TestAddSignatures(t *testing.T) {
     }
 }
 
+func TestAddSignatures_UpdatesSigMap(t *testing.T) {
+	s := NewScanner()
+	sigs := []detection.Signature{
+		{ID: "SFW-BATCH-1", Name: "Sig1"},
+		{ID: "SFW-BATCH-2", Name: "Sig2"},
+	}
+	if err := s.AddSignatures(sigs); err != nil {
+		t.Fatalf("AddSignatures failed: %v", err)
+	}
+
+	// GetSignature relies on sigMap; if the batch path skipped indexing it
+	// returns "not found" even though the signature is present in the slice.
+	for _, want := range sigs {
+		got, err := s.GetSignature(want.ID)
+		if err != nil {
+			t.Errorf("GetSignature(%q) after batch insert: %v", want.ID, err)
+			continue
+		}
+		if got.Name != want.Name {
+			t.Errorf("GetSignature(%q).Name = %q, want %q", want.ID, got.Name, want.Name)
+		}
+	}
+}
+
 const count = 10000
 
 func BenchmarkAddSignatureLoop(b *testing.B) {
