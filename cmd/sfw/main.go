@@ -271,19 +271,11 @@ func runWorker(args []string) error {
 		return cli.RunCheckLogic(fsys, *target, *strict, *scan, resolvedDB)
 
 	case "diff":
-		// FIXED: Support both standard 3-arg usage [diff, old, new] and legacy 5-arg usage
-		// 3-arg usage: sfw internal-worker diff <old> <new>
-		if len(args) == 3 {
-			return cli.RunDiffLogic(fsys, os.Stdout, args[1], args[2])
+		// sfw internal-worker diff <old> <new>
+		if len(args) != 3 {
+			return fmt.Errorf("diff worker requires arguments (old <path> new <path>); got %d", len(args)-1)
 		}
-		// 5-arg usage (hypothetical/legacy): sfw internal-worker diff -old <old> -new <new>
-		if len(args) >= 5 {
-			// Assuming indices 2 and 4 based on previous code
-			oldFile := args[2]
-			newFile := args[4]
-			return cli.RunDiffLogic(fsys, os.Stdout, oldFile, newFile)
-		}
-		return fmt.Errorf("diff worker requires arguments (old <path> new <path>)")
+		return cli.RunDiffLogic(fsys, os.Stdout, args[1], args[2])
 
 	case "scan":
 		fs := flag.NewFlagSet("scan", flag.ExitOnError)
