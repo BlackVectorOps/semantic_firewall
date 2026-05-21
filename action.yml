@@ -94,7 +94,7 @@ runs:
     - name: Install sfw
       shell: bash
       env:
-        SFW_VERSION: "v3.2.0"
+        SFW_VERSION: "v4.0.0"
       run: |
         set -euo pipefail
         
@@ -109,7 +109,7 @@ runs:
         RETRY_DELAY=5
         
         for attempt in $(seq 1 $MAX_RETRIES); do
-          if go install "github.com/BlackVectorOps/semantic_firewall/v3/cmd/sfw@${SFW_VERSION}"; then
+          if go install "github.com/BlackVectorOps/semantic_firewall/v4/cmd/sfw@${SFW_VERSION}"; then
             break
           fi
           
