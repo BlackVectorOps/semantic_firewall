@@ -4,6 +4,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,18 +28,18 @@ func RunDiff(oldFile, newFile string, noSandbox bool) error {
 		return SandboxExec(sb, os.Stdout, os.Stderr, "diff", args, cleanOld, cleanNew)
 	}
 
-	return RunDiffLogic(fsys, cleanOld, cleanNew)
+	return RunDiffLogic(fsys, os.Stdout, cleanOld, cleanNew)
 }
 
 // -- Core Logic --
 
-func RunDiffLogic(fsys FileSystem, oldFile, newFile string) error {
+func RunDiffLogic(fsys FileSystem, w io.Writer, oldFile, newFile string) error {
 	diffOutput, err := ComputeDiff(fsys, oldFile, newFile)
 	if err != nil {
 		return err
 	}
 
-	encoder := json.NewEncoder(os.Stdout)
+	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(diffOutput)
 }

@@ -16,18 +16,30 @@ import (
 
 // -- AUDIT COMMAND --
 
-func RunAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase string) (int, error) {
+func RunAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase string, noSandbox bool) (int, error) {
 	cleanOld := filepath.Clean(oldFile)
 	cleanNew := filepath.Clean(newFile)
-	args := []string{cleanOld, cleanNew}
 	sb := RealSandboxer{}
 
 	var outputBuf bytes.Buffer
-	// FIX: Pass os.Stderr instead of nil to capture sandbox runtime errors.
-	err := SandboxExec(sb, &outputBuf, os.Stderr, "diff", args, cleanOld, cleanNew)
-	if err != nil {
-		// FAIL-CLOSED: Infrastructure error must not allow bypass.
-		return 1, fmt.Errorf("audit failed during sandboxed diff: %w", err)
+
+	// When the caller opted out of sandboxing -- or when we're already running
+	// inside one (nested CI containers, runsc-in-runsc) -- skip SandboxExec and
+	// invoke the diff logic directly. The previous unconditional SandboxExec
+	// failed closed with "process is already sandboxed; nested sandboxing is
+	// not supported" and left audit unusable in any pre-sandboxed environment.
+	if noSandbox || sb.IsSandboxed() {
+		if err := RunDiffLogic(RealFileSystem{}, &outputBuf, cleanOld, cleanNew); err != nil {
+			return 1, fmt.Errorf("audit failed during diff: %w", err)
+		}
+	} else {
+		args := []string{cleanOld, cleanNew}
+		// FIX: Pass os.Stderr instead of nil to capture sandbox runtime errors.
+		err := SandboxExec(sb, &outputBuf, os.Stderr, "diff", args, cleanOld, cleanNew)
+		if err != nil {
+			// FAIL-CLOSED: Infrastructure error must not allow bypass.
+			return 1, fmt.Errorf("audit failed during sandboxed diff: %w", err)
+		}
 	}
 
 	var diffOutput models.DiffOutput
