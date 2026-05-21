@@ -64,8 +64,13 @@ func (s *Scanner) LoadDatabase(path string) error {
 	// Verify file existence explicitly.
 	// While Open handles this, a Stat check lets us give a more useful error message.
 	info, err := os.Stat(cleanPath)
-	if os.IsNotExist(err) {
-		return fmt.Errorf("signature database file does not exist at %s", cleanPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("signature database file does not exist at %s", cleanPath)
+		}
+		// Any other stat error (permission denied, EIO, etc.) must surface as an
+		// error rather than dereferencing the nil FileInfo below.
+		return fmt.Errorf("failed to stat %s: %w", cleanPath, err)
 	}
 
 	// Refuse to read named pipes or devices.

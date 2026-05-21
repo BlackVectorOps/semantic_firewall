@@ -2,10 +2,40 @@ package jsondb
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/detection"
 )
+
+func TestLoadDatabase_PermissionDeniedDoesNotPanic(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses unix permission checks")
+	}
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "sigs.json")
+	if err := os.WriteFile(dbPath, []byte(`{"signatures":[]}`), 0o600); err != nil {
+		t.Fatalf("write db: %v", err)
+	}
+	// Strip read+execute from the containing directory so stat fails with EACCES
+	// rather than ENOENT. This is the case the old code crashed on.
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatalf("chmod dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	s := NewScanner()
+	err := s.LoadDatabase(dbPath)
+	if err == nil {
+		t.Fatal("expected LoadDatabase to error on permission denied, got nil")
+	}
+	if strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("permission error misreported as missing file: %v", err)
+	}
+}
 
 func TestAddSignatures(t *testing.T) {
 	s := NewScanner()
