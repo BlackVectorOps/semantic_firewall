@@ -3,7 +3,7 @@ package models
 import (
 	"encoding/json"
 
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/detection"
 )
 
 // -- Diff & Fingerprinting --

@@ -1,8 +1,8 @@
 package storage
 
 import (
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/detection"
 )
 
 // SignatureProvider defines the contract for signature persistence and retrieval.

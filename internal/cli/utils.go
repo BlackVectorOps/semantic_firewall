@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/ir"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/diff"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/models"
 	"golang.org/x/tools/go/packages"
 )
 

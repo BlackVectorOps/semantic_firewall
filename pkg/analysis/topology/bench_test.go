@@ -3,7 +3,7 @@ package topology_test
 import (
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
 )
 
 func BenchmarkEntropyCalculation(b *testing.B) {

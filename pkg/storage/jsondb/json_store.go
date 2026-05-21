@@ -12,8 +12,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/detection"
 )
 
 const (

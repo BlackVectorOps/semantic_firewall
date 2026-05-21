@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"os"
 
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/storage/jsondb"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/storage/pebbledb"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/storage/jsondb"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/storage/pebbledb"
 )
 
 func RunStats(dbPath string) error {

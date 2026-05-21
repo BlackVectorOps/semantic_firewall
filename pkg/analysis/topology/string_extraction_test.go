@@ -3,8 +3,8 @@ package topology_test
 import (
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/testutil"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/testutil"
 )
 
 // TestStringExtraction verifies that string literals are extracted without quotes.

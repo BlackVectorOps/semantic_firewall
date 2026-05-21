@@ -6,9 +6,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/BlackVectorOps/semantic_firewall/v3/internal/cli"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/models"
-	version "github.com/BlackVectorOps/semantic_firewall/v3/pkg/version"
+	"github.com/BlackVectorOps/semantic_firewall/v4/internal/cli"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/models"
+	version "github.com/BlackVectorOps/semantic_firewall/v4/pkg/version"
 )
 
 // Package main provides the sfw CLI tool for semantic fingerprinting and malware scanning of Go source files.

@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/ir"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/loop"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/testutil"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/loop"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/testutil"
 	"golang.org/x/tools/go/ssa"
 )
 

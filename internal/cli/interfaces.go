@@ -7,9 +7,9 @@ import (
 	"io/fs"
 	"os"
 
-	"github.com/BlackVectorOps/semantic_firewall/v3/internal/sandbox"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v4/internal/sandbox"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/detection"
 	"golang.org/x/tools/go/packages"
 )
 
