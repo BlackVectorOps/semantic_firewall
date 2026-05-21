@@ -9,8 +9,8 @@ import (
 
 	"go/token"
 
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/loop"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/testutil"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/loop"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/testutil"
 )
 
 func TestSCEVPatterns(t *testing.T) {

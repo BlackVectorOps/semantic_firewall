@@ -2,12 +2,34 @@ package pebbledb_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/detection"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/storage/pebbledb"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/storage/pebbledb"
 )
+
+func TestPebbleScanner_RejectsOlderSchema(t *testing.T) {
+	dbPath := t.TempDir()
+
+	s, err := pebbledb.NewPebbleScanner(dbPath, pebbledb.DefaultPebbleScannerOptions())
+	if err != nil {
+		t.Fatalf("NewPebbleScanner failed: %v", err)
+	}
+	// Simulate a database written by an older sfw whose fingerprint algorithm
+	// predates the current canonicalizer.
+	if err := s.SetMetadata("schema_version", fmt.Sprintf("%d", pebbledb.CurrentSchemaVersion-1)); err != nil {
+		t.Fatalf("SetMetadata failed: %v", err)
+	}
+	s.Close()
+
+	if _, err := pebbledb.NewPebbleScanner(dbPath, pebbledb.DefaultPebbleScannerOptions()); err == nil {
+		t.Fatal("expected NewPebbleScanner to reject a database with an older schema version")
+	} else if !strings.Contains(err.Error(), "older") {
+		t.Errorf("expected an 'older schema' error, got: %v", err)
+	}
+}
 
 func TestPebbleScanner_CRUD(t *testing.T) {
 	dbPath := t.TempDir()

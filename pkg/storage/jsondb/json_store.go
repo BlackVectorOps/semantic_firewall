@@ -12,8 +12,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/detection"
 )
 
 const (
@@ -64,8 +64,13 @@ func (s *Scanner) LoadDatabase(path string) error {
 	// Verify file existence explicitly.
 	// While Open handles this, a Stat check lets us give a more useful error message.
 	info, err := os.Stat(cleanPath)
-	if os.IsNotExist(err) {
-		return fmt.Errorf("signature database file does not exist at %s", cleanPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("signature database file does not exist at %s", cleanPath)
+		}
+		// Any other stat error (permission denied, EIO, etc.) must surface as an
+		// error rather than dereferencing the nil FileInfo below.
+		return fmt.Errorf("failed to stat %s: %w", cleanPath, err)
 	}
 
 	// Refuse to read named pipes or devices.
@@ -248,6 +253,9 @@ func (s *Scanner) AddSignatures(sigs []detection.Signature) error {
 			Description: "Semantic Firewall Malware Signature Database",
 		}
 	}
+	if s.sigMap == nil {
+		s.sigMap = make(map[string]int, len(sigs))
+	}
 
 	for i := range sigs {
 		sig := &sigs[i]
@@ -257,6 +265,11 @@ func (s *Scanner) AddSignatures(sigs []detection.Signature) error {
 		}
 
 		s.db.Signatures = append(s.db.Signatures, *sig)
+		// Keep the ID index in sync. Without this, GetSignature returns
+		// "not found" for every signature added via a batch until the
+		// database is reloaded -- the bulk-import path of MigrateFromJSON
+		// is the realistic trigger.
+		s.sigMap[sig.ID] = len(s.db.Signatures) - 1
 	}
 	return nil
 }
@@ -303,9 +316,14 @@ func (s *Scanner) ScanCandidates(topo *topology.FunctionTopology) ([]*detection.
 		match := sig.TopologyHash == topoHash || (sig.FuzzyHash != "" && sig.FuzzyHash == fuzzyHash)
 
 		if match {
-			// Respect the signature's tolerance.
-			// If it demands 0.0 variance, we give it 0.0 variance.
+			// Respect the signature's tolerance, falling back to the scanner
+			// default when the signature leaves it unset (0). A zero value means
+			// "unspecified", not "demand an exact entropy match" -- this matches
+			// the behaviour of MatchSignature and the PebbleDB scanner.
 			effectiveTol := sig.EntropyTolerance
+			if effectiveTol == 0 {
+				effectiveTol = s.entropyTolerance
+			}
 
 			if math.Abs(sig.EntropyScore-topo.EntropyScore) <= effectiveTol {
 				// Deep copy allows the caller to mutate their candidate list safely.

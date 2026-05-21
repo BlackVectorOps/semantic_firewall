@@ -372,6 +372,17 @@ runs:
             ;;
 
           audit)
+            # sfw resolves the audit API key from OPENAI_API_KEY or
+            # GEMINI_API_KEY (selected by the model name) -- it never reads
+            # SFW_API_KEY. Re-export the supplied key under the name the CLI
+            # actually consumes, otherwise audit always fails "API Key required".
+            if [[ -n "${SFW_API_KEY:-}" ]]; then
+              if [[ "${INPUT_MODEL,,}" == gemini* ]]; then
+                export GEMINI_API_KEY="$SFW_API_KEY"
+              else
+                export OPENAI_API_KEY="$SFW_API_KEY"
+              fi
+            fi
             readonly WORKTREE_DIR="${PREP_WORKTREE_DIR:-.sfw_base_worktree}"
             readonly DIFF_STREAM_FILE=".sfw_diff_stream.bin"
             

@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/detection"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/diff"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/storage/pebbledb"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/storage/pebbledb"
 )
 
 // FindResult searches for a FingerprintResult by function name.

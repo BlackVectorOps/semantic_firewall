@@ -1,7 +1,7 @@
 //go.mod
 go 1.24.0
 
-module github.com/BlackVectorOps/semantic_firewall/v3
+module github.com/BlackVectorOps/semantic_firewall/v4
 
 require (
 	github.com/cockroachdb/pebble v1.1.5

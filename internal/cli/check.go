@@ -10,12 +10,12 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/ir"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/diff"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/models"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/storage/jsondb"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/storage/pebbledb"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/storage/jsondb"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/storage/pebbledb"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -148,10 +148,21 @@ func ProcessFilesParallel(fsys FileSystem, files []string, strictMode bool, scan
 				return ctx.Err()
 			}
 
-			// Robustness: Recover from panics in SSA generation to protect the run
+			// Robustness: Recover from panics in SSA generation to protect the run.
+			// Record the panic as a per-file error so it shows up in the JSON output
+			// and -- critically -- so strict mode still fails closed. Previously a
+			// panic produced a zero-value FileOutput, left hasErrors false, and let
+			// --strict silently succeed on a run that crashed mid-analysis.
 			defer func() {
 				if r := recover(); r != nil {
 					fmt.Fprintf(os.Stderr, "warning: panic recovered analyzing %s: %v\n", f, r)
+					mu.Lock()
+					results[idx] = models.FileOutput{
+						File:         f,
+						ErrorMessage: fmt.Sprintf("panic during analysis: %v", r),
+					}
+					hasErrors = true
+					mu.Unlock()
 				}
 			}()
 

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/detection"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -240,6 +240,56 @@ func TestRunCheckLogic_Isolation(t *testing.T) {
 	err := RunCheckLogic(mockFS, "/app/main.go", false, false, "")
 	if err != nil {
 		t.Fatalf("RunCheckLogic failed with mock FS: %v", err)
+	}
+}
+
+// panickingFileSystem wraps MockFileSystem but panics on Stat for a specific
+// path. Used to exercise the panic-recovery path in ProcessFilesParallel
+// without needing to corrupt SSA generation.
+type panickingFileSystem struct {
+	*MockFileSystem
+	panicOn string
+}
+
+func (p *panickingFileSystem) Stat(name string) (os.FileInfo, error) {
+	if name == p.panicOn {
+		panic("synthetic panic for test")
+	}
+	return p.MockFileSystem.Stat(name)
+}
+
+// TestProcessFilesParallel_PanicSurfacedAsError ensures a panic during
+// per-file analysis is recorded as an ErrorMessage on the FileOutput and
+// flips the hasErrors flag, so --strict fails closed instead of silently
+// passing a crashed run.
+func TestProcessFilesParallel_PanicSurfacedAsError(t *testing.T) {
+	mockFS := &panickingFileSystem{
+		MockFileSystem: &MockFileSystem{
+			Files: map[string][]byte{
+				"/app/boom.go": []byte("package main"),
+			},
+		},
+		panicOn: "/app/boom.go",
+	}
+
+	results, hasErrors, err := ProcessFilesParallel(mockFS, []string{"/app/boom.go"}, true, nil)
+	if err != nil {
+		t.Fatalf("ProcessFilesParallel returned err: %v", err)
+	}
+	if !hasErrors {
+		t.Fatal("expected hasErrors=true after a recovered panic; got false")
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].ErrorMessage == "" {
+		t.Error("expected ErrorMessage to be populated for the panicking file")
+	}
+	if !strings.Contains(results[0].ErrorMessage, "panic") {
+		t.Errorf("ErrorMessage should mention panic, got: %q", results[0].ErrorMessage)
+	}
+	if results[0].File != "/app/boom.go" {
+		t.Errorf("File field lost; got %q", results[0].File)
 	}
 }
 

@@ -6,9 +6,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/BlackVectorOps/semantic_firewall/v3/internal/cli"
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/models"
-	version "github.com/BlackVectorOps/semantic_firewall/v3/pkg/version"
+	"github.com/BlackVectorOps/semantic_firewall/v4/internal/cli"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/models"
+	version "github.com/BlackVectorOps/semantic_firewall/v4/pkg/version"
 )
 
 // Package main provides the sfw CLI tool for semantic fingerprinting and malware scanning of Go source files.
@@ -53,6 +53,7 @@ Commands:
             --api-key     API Key (OpenAI or Gemini). REQUIRED.
             --model       LLM Model (default: gpt-4o, supports gemini-1.5-pro)
             --api-base    Custom API Base URL (for testing/proxying)
+            --no-sandbox  Disable gVisor/Namespace isolation
 
   index   Index a reference malware sample (Lab Phase)
   scan    Scan target code for malware signatures (Hunter Phase)
@@ -92,6 +93,7 @@ Examples:
 	// Default updated to gpt-4o per 2026 standards (Reasoning Optimized)
 	auditModel := auditCmd.String("model", "gpt-4o", "LLM Model to use")
 	auditApiBase := auditCmd.String("api-base", "", "Custom API Base URL")
+	auditNoSandbox := auditCmd.Bool("no-sandbox", false, "Disable gVisor/Namespace isolation")
 
 	indexCmd := flag.NewFlagSet("index", flag.ExitOnError)
 	indexName := indexCmd.String("name", "", "Signature name (required)")
@@ -166,7 +168,7 @@ Examples:
 			os.Exit(1)
 		}
 
-		exitCode, err := cli.RunAudit(os.Stdout, auditCmd.Arg(0), auditCmd.Arg(1), auditCmd.Arg(2), apiKey, *auditModel, *auditApiBase)
+		exitCode, err := cli.RunAudit(os.Stdout, auditCmd.Arg(0), auditCmd.Arg(1), auditCmd.Arg(2), apiKey, *auditModel, *auditApiBase, *auditNoSandbox)
 		if err != nil {
 			cli.ExitError(err)
 		}
@@ -269,19 +271,11 @@ func runWorker(args []string) error {
 		return cli.RunCheckLogic(fsys, *target, *strict, *scan, resolvedDB)
 
 	case "diff":
-		// FIXED: Support both standard 3-arg usage [diff, old, new] and legacy 5-arg usage
-		// 3-arg usage: sfw internal-worker diff <old> <new>
-		if len(args) == 3 {
-			return cli.RunDiffLogic(fsys, args[1], args[2])
+		// sfw internal-worker diff <old> <new>
+		if len(args) != 3 {
+			return fmt.Errorf("diff worker requires arguments (old <path> new <path>); got %d", len(args)-1)
 		}
-		// 5-arg usage (hypothetical/legacy): sfw internal-worker diff -old <old> -new <new>
-		if len(args) >= 5 {
-			// Assuming indices 2 and 4 based on previous code
-			oldFile := args[2]
-			newFile := args[4]
-			return cli.RunDiffLogic(fsys, oldFile, newFile)
-		}
-		return fmt.Errorf("diff worker requires arguments (old <path> new <path>)")
+		return cli.RunDiffLogic(fsys, os.Stdout, args[1], args[2])
 
 	case "scan":
 		fs := flag.NewFlagSet("scan", flag.ExitOnError)

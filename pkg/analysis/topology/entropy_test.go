@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v3/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
 )
 
 func TestCalculateEntropy(t *testing.T) {
