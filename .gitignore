@@ -6,6 +6,10 @@
 *.dylib
 sfw
 cmd/sfw/sfw
+# Root-anchored: `go build` at repo root produces a binary named after
+# the module's last path segment (semantic_firewall). Anchor with /
+# so we don't accidentally ignore any nested path of the same name.
+/semantic_firewall
 
 # Test binary, built with `go test -c`
 *.test
