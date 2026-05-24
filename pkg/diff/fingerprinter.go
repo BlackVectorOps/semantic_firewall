@@ -320,6 +320,30 @@ type LoadMeta struct {
 //
 // GOPROXY=off is preserved via GetHardenedEnv(); files that import external
 // modules without resolvable deps will still parse-fail by design.
+//
+// KNOWN LIMITATION — same-module sub-package imports in real multi-package
+// trees: when no real go.mod is found, the synthetic go.mod declares module
+// "synthetic.local/anonymous" (see syntheticModulePath). For self-contained
+// single-package trees (the synthetic-corpus shape this code was first
+// validated against) this is fine — no imports need to resolve through the
+// module path. For real multi-package modules whose internal files import
+// other sub-packages of the same module (e.g., github.com/google/go-cmp's
+// cmp/compare.go importing github.com/google/go-cmp/cmp/internal/diff),
+// the synthetic module identity does NOT match the import paths declared in
+// source, so the sub-package lookup fails with
+// "cannot find module providing package <real-module-path>/<subpath>" even
+// though the sub-package's source is present on disk in the tree.
+//
+// Verified by real-corpus triage of the 3 genuine same-package-sibling
+// commits in the pilot (go-cmp 8ebdfab3, x/text c8872a1a, x/text db455d00):
+// in each case the failing sub-package directory EXISTS at the worktree-
+// root-relative path that the real import declares, so a synthesized go.mod
+// declaring the REAL module name placed at the worktree root would resolve
+// the imports correctly. The fix shape — adding a moduleNameHint parameter
+// and loading the target package(s) by module-relative path from the tree
+// root — is mechanism-verified but implementation-deferred. Affected
+// corpus: pre-modules-era multi-package trees (modern commits carry their
+// own go.mod and don't go through this synthesis path).
 func FingerprintTree(rootDir string, fileFilter func(string) bool, policy ir.LiteralPolicy) ([]FingerprintResult, LoadMeta, error) {
 	return FingerprintTreeAdvanced(rootDir, fileFilter, policy, false)
 }
@@ -449,6 +473,13 @@ func parseModuleLine(data []byte) string {
 // sides, deflating types.Type.String()-based similarity. A constant
 // prevents that — both halves of any pairwise comparison see identical
 // qualifiers for identical types.
+//
+// See FingerprintTree's KNOWN LIMITATION note: this constant works for
+// self-contained single-package trees but does not resolve same-module
+// sub-package imports in real multi-package trees, where source imports
+// the real module path and the synthetic "synthetic.local/anonymous"
+// identity cannot satisfy those lookups. The verified-deferred fix is a
+// moduleNameHint parameter on FingerprintTreeAdvanced.
 func syntheticModulePath() string {
 	return "synthetic.local/anonymous"
 }
