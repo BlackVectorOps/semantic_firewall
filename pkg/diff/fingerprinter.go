@@ -187,6 +187,28 @@ func GetHardenedEnv() []string {
 	return env
 }
 
+// hardenedEnvWithProxy is GetHardenedEnv with the GOPROXY value overridden.
+// All other hardening (CGO_ENABLED=0, GOFLAGS=-mod=readonly, etc.) is preserved.
+func hardenedEnvWithProxy(proxy string) []string {
+	env := make([]string, 0, len(os.Environ())+7)
+	for _, e := range os.Environ() {
+		upperE := strings.ToUpper(e)
+		switch {
+		case strings.HasPrefix(upperE, "CGO_ENABLED="),
+			strings.HasPrefix(upperE, "GOPROXY="),
+			strings.HasPrefix(upperE, "GOFLAGS="),
+			strings.HasPrefix(upperE, "GONOSUMDB="),
+			strings.HasPrefix(upperE, "GOWORK="),
+			strings.HasPrefix(upperE, "GO111MODULE="),
+			strings.HasPrefix(upperE, "GOTOOLCHAIN="):
+			continue
+		}
+		env = append(env, e)
+	}
+	env = append(env, "CGO_ENABLED=0", "GOPROXY="+proxy, "GOFLAGS=-mod=readonly", "GONOSUMDB=*", "GOWORK=off", "GO111MODULE=on", "GOTOOLCHAIN=local")
+	return env
+}
+
 func loadPackagesFromSource(filename string, src string) ([]*packages.Package, error) {
 	if len(src) == 0 {
 		return nil, fmt.Errorf("input source code is empty")
@@ -307,6 +329,27 @@ type LoadMeta struct {
 	LoadErrors       []string // per-package errors encountered during Load
 }
 
+// TreeLoadOptions customises the tree-mode loader. The zero value is safe and
+// matches the behaviour of FingerprintTree/FingerprintTreeAdvanced (secure
+// hardened defaults: GOPROXY=off, synthetic module path for no-go.mod trees).
+type TreeLoadOptions struct {
+	// Proxy overrides the GOPROXY setting passed to the Go toolchain during
+	// tree loading. If empty, the hardened default ("off") is used, which
+	// prevents any external network access. Set to a proxy URL (e.g.
+	// "https://proxy.golang.org,direct") when analysing source trees whose
+	// declared dependencies are not yet cached in GOMODCACHE. All other
+	// hardening applied by GetHardenedEnv (CGO_ENABLED=0, GOWORK=off, etc.)
+	// remains in effect regardless of this field.
+	Proxy string
+
+	// ModuleNameHint is used as the module path in the synthesised go.mod
+	// when a source tree has no real go.mod. If empty, the stable default
+	// "synthetic.local/anonymous" is used. Setting this to the tree's actual
+	// module path (e.g. "github.com/spf13/cobra") resolves same-module
+	// sub-package imports correctly in pre-modules-era multi-package trees.
+	ModuleNameHint string
+}
+
 // FingerprintTree fingerprints Go source under rootDir using a tree-mode load.
 // If a real go.mod is found at or above rootDir, it's used directly. Otherwise
 // a synthetic go.mod is supplied via packages.Config.Overlay (no disk write)
@@ -345,17 +388,29 @@ type LoadMeta struct {
 // corpus: pre-modules-era multi-package trees (modern commits carry their
 // own go.mod and don't go through this synthesis path).
 func FingerprintTree(rootDir string, fileFilter func(string) bool, policy ir.LiteralPolicy) ([]FingerprintResult, LoadMeta, error) {
-	return FingerprintTreeAdvanced(rootDir, fileFilter, policy, false)
+	return fingerprintTreeInternal(rootDir, fileFilter, policy, false, TreeLoadOptions{})
 }
 
 // FingerprintTreeAdvanced is the strict-mode variant of FingerprintTree.
 func FingerprintTreeAdvanced(rootDir string, fileFilter func(string) bool, policy ir.LiteralPolicy, strictMode bool) ([]FingerprintResult, LoadMeta, error) {
+	return fingerprintTreeInternal(rootDir, fileFilter, policy, strictMode, TreeLoadOptions{})
+}
+
+// FingerprintTreeWithOptions is the options-driven variant of FingerprintTree.
+// Use this to configure GOPROXY (e.g. to allow downloading missing dependencies)
+// or to supply a module name hint for pre-modules-era source trees that have no
+// go.mod. The zero TreeLoadOptions value is identical to calling FingerprintTree.
+func FingerprintTreeWithOptions(rootDir string, fileFilter func(string) bool, policy ir.LiteralPolicy, opts TreeLoadOptions) ([]FingerprintResult, LoadMeta, error) {
+	return fingerprintTreeInternal(rootDir, fileFilter, policy, false, opts)
+}
+
+func fingerprintTreeInternal(rootDir string, fileFilter func(string) bool, policy ir.LiteralPolicy, strictMode bool, opts TreeLoadOptions) ([]FingerprintResult, LoadMeta, error) {
 	absRoot, err := filepath.Abs(rootDir)
 	if err != nil {
 		return nil, LoadMeta{}, fmt.Errorf("resolve absolute path for %s: %w", rootDir, err)
 	}
 
-	pkgs, meta, err := loadPackagesFromTree(absRoot)
+	pkgs, meta, err := loadPackagesFromTree(absRoot, opts)
 	if err != nil {
 		return nil, meta, err
 	}
@@ -381,12 +436,17 @@ func FingerprintTreeAdvanced(rootDir string, fileFilter func(string) bool, polic
 	return results, meta, nil
 }
 
-func loadPackagesFromTree(rootDir string) ([]*packages.Package, LoadMeta, error) {
+func loadPackagesFromTree(rootDir string, opts TreeLoadOptions) ([]*packages.Package, LoadMeta, error) {
 	var meta LoadMeta
+
+	proxy := opts.Proxy
+	if proxy == "" {
+		proxy = "off"
+	}
 
 	cfg := &packages.Config{
 		Mode: packages.LoadAllSyntax,
-		Env:  GetHardenedEnv(),
+		Env:  hardenedEnvWithProxy(proxy),
 	}
 
 	modDir, modPath := findGoMod(rootDir)
@@ -400,10 +460,14 @@ func loadPackagesFromTree(rootDir string) ([]*packages.Package, LoadMeta, error)
 		// would otherwise synthesize a path from the temp directory.
 		meta.HadGoMod = false
 		meta.SynthesizedGoMod = true
-		meta.ModulePath = syntheticModulePath()
+		modName := opts.ModuleNameHint
+		if modName == "" {
+			modName = syntheticModulePath()
+		}
+		meta.ModulePath = modName
 		cfg.Dir = rootDir
 		cfg.Overlay = map[string][]byte{
-			filepath.Join(rootDir, "go.mod"): []byte(fmt.Sprintf("module %s\n\ngo 1.21\n", meta.ModulePath)),
+			filepath.Join(rootDir, "go.mod"): []byte(fmt.Sprintf("module %s\n\ngo 1.21\n", modName)),
 		}
 	}
 
