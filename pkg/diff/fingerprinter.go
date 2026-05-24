@@ -296,3 +296,190 @@ func processFunctionAndAnons(fn *ssa.Function, policy ir.LiteralPolicy, strictMo
 		processFunctionAndAnons(anon, policy, strictMode, results, visited)
 	}
 }
+
+// LoadMeta records what the tree loader did for a particular FingerprintTree
+// invocation. Carried alongside results so callers can tag analysis output
+// with whether a real go.mod was found or whether one was synthesized.
+type LoadMeta struct {
+	HadGoMod         bool     // real go.mod found at or above rootDir
+	SynthesizedGoMod bool     // loader supplied a synthetic go.mod via overlay
+	ModulePath       string   // module path used for resolution (real or synthetic)
+	LoadErrors       []string // per-package errors encountered during Load
+}
+
+// FingerprintTree fingerprints Go source under rootDir using a tree-mode load.
+// If a real go.mod is found at or above rootDir, it's used directly. Otherwise
+// a synthetic go.mod is supplied via packages.Config.Overlay (no disk write)
+// so the loader has a canonical module path to resolve through — this fixes
+// the qualifier-corruption case where types.Type.String() would otherwise
+// carry a temp-dir-synthesized path.
+//
+// fileFilter, if non-nil, keeps only function fingerprints whose source file
+// satisfies the predicate. Use it to avoid fingerprinting the whole tree when
+// the caller only cares about a subset (e.g., changed files in a diff).
+//
+// GOPROXY=off is preserved via GetHardenedEnv(); files that import external
+// modules without resolvable deps will still parse-fail by design.
+//
+// KNOWN LIMITATION — same-module sub-package imports in real multi-package
+// trees: when no real go.mod is found, the synthetic go.mod declares module
+// "synthetic.local/anonymous" (see syntheticModulePath). For self-contained
+// single-package trees (the synthetic-corpus shape this code was first
+// validated against) this is fine — no imports need to resolve through the
+// module path. For real multi-package modules whose internal files import
+// other sub-packages of the same module (e.g., github.com/google/go-cmp's
+// cmp/compare.go importing github.com/google/go-cmp/cmp/internal/diff),
+// the synthetic module identity does NOT match the import paths declared in
+// source, so the sub-package lookup fails with
+// "cannot find module providing package <real-module-path>/<subpath>" even
+// though the sub-package's source is present on disk in the tree.
+//
+// Verified by real-corpus triage of the 3 genuine same-package-sibling
+// commits in the pilot (go-cmp 8ebdfab3, x/text c8872a1a, x/text db455d00):
+// in each case the failing sub-package directory EXISTS at the worktree-
+// root-relative path that the real import declares, so a synthesized go.mod
+// declaring the REAL module name placed at the worktree root would resolve
+// the imports correctly. The fix shape — adding a moduleNameHint parameter
+// and loading the target package(s) by module-relative path from the tree
+// root — is mechanism-verified but implementation-deferred. Affected
+// corpus: pre-modules-era multi-package trees (modern commits carry their
+// own go.mod and don't go through this synthesis path).
+func FingerprintTree(rootDir string, fileFilter func(string) bool, policy ir.LiteralPolicy) ([]FingerprintResult, LoadMeta, error) {
+	return FingerprintTreeAdvanced(rootDir, fileFilter, policy, false)
+}
+
+// FingerprintTreeAdvanced is the strict-mode variant of FingerprintTree.
+func FingerprintTreeAdvanced(rootDir string, fileFilter func(string) bool, policy ir.LiteralPolicy, strictMode bool) ([]FingerprintResult, LoadMeta, error) {
+	absRoot, err := filepath.Abs(rootDir)
+	if err != nil {
+		return nil, LoadMeta{}, fmt.Errorf("resolve absolute path for %s: %w", rootDir, err)
+	}
+
+	pkgs, meta, err := loadPackagesFromTree(absRoot)
+	if err != nil {
+		return nil, meta, err
+	}
+	if len(pkgs) == 0 {
+		return nil, meta, fmt.Errorf("no packages loaded under %s", absRoot)
+	}
+
+	results, err := FingerprintPackages(pkgs, policy, strictMode)
+	if err != nil {
+		return nil, meta, err
+	}
+
+	if fileFilter != nil {
+		filtered := results[:0]
+		for _, r := range results {
+			if fileFilter(r.Filename) {
+				filtered = append(filtered, r)
+			}
+		}
+		results = filtered
+	}
+
+	return results, meta, nil
+}
+
+func loadPackagesFromTree(rootDir string) ([]*packages.Package, LoadMeta, error) {
+	var meta LoadMeta
+
+	cfg := &packages.Config{
+		Mode: packages.LoadAllSyntax,
+		Env:  GetHardenedEnv(),
+	}
+
+	modDir, modPath := findGoMod(rootDir)
+	if modDir != "" {
+		meta.HadGoMod = true
+		meta.ModulePath = modPath
+		cfg.Dir = modDir
+	} else {
+		// Synthesize a go.mod via overlay so the loader has a canonical
+		// module path. Fixes the qualifier-corruption case where the loader
+		// would otherwise synthesize a path from the temp directory.
+		meta.HadGoMod = false
+		meta.SynthesizedGoMod = true
+		meta.ModulePath = syntheticModulePath()
+		cfg.Dir = rootDir
+		cfg.Overlay = map[string][]byte{
+			filepath.Join(rootDir, "go.mod"): []byte(fmt.Sprintf("module %s\n\ngo 1.21\n", meta.ModulePath)),
+		}
+	}
+
+	// Load the tree. "./..." pulls all Go files in the tree as packages,
+	// which addresses the sibling-symbol-missing class of failures from the
+	// pilot — multi-file packages now resolve cleanly.
+	pkgs, err := packages.Load(cfg, "./...")
+	if err != nil {
+		return nil, meta, fmt.Errorf("failed to execute loader: %w", err)
+	}
+
+	packages.Visit(pkgs, nil, func(pkg *packages.Package) {
+		for _, e := range pkg.Errors {
+			meta.LoadErrors = append(meta.LoadErrors, e.Error())
+		}
+	})
+
+	return pkgs, meta, nil
+}
+
+// findGoMod walks up from dir looking for a go.mod file. Returns the directory
+// containing it and the module path, or ("", "") if none found.
+func findGoMod(dir string) (modDir, modPath string) {
+	for {
+		modFile := filepath.Join(dir, "go.mod")
+		if data, err := os.ReadFile(modFile); err == nil {
+			if mp := parseModuleLine(data); mp != "" {
+				return dir, mp
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", ""
+		}
+		dir = parent
+	}
+}
+
+// parseModuleLine extracts the module path from go.mod's `module <path>` line.
+// Lightweight string scan — sufficient for the path-only field.
+func parseModuleLine(data []byte) string {
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "module") {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "module"))
+		// Strip surrounding quotes if present (rare but valid).
+		rest = strings.Trim(rest, "\"`")
+		// Strip an inline comment.
+		if i := strings.Index(rest, "//"); i >= 0 {
+			rest = strings.TrimSpace(rest[:i])
+		}
+		if rest != "" {
+			return rest
+		}
+	}
+	return ""
+}
+
+// syntheticModulePath returns the stable module path used by the
+// overlay-synthesized go.mod when a tree has no real go.mod. The path
+// MUST be stable across loads — pairwise diff comparisons load each
+// side from its own temp directory, and per-load variation in the
+// module path makes type qualifiers (e.g. on user-defined types like
+// "synthetic.local/A.Foo" vs "synthetic.local/B.Foo") asymmetric across
+// sides, deflating types.Type.String()-based similarity. A constant
+// prevents that — both halves of any pairwise comparison see identical
+// qualifiers for identical types.
+//
+// See FingerprintTree's KNOWN LIMITATION note: this constant works for
+// self-contained single-package trees but does not resolve same-module
+// sub-package imports in real multi-package trees, where source imports
+// the real module path and the synthetic "synthetic.local/anonymous"
+// identity cannot satisfy those lookups. The verified-deferred fix is a
+// moduleNameHint parameter on FingerprintTreeAdvanced.
+func syntheticModulePath() string {
+	return "synthetic.local/anonymous"
+}
