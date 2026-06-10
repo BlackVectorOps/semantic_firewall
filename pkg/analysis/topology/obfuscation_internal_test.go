@@ -3,6 +3,8 @@ package topology
 import (
 	"math"
 	"testing"
+
+	"golang.org/x/tools/go/ssa"
 )
 
 func TestNormCut(t *testing.T) {
@@ -163,7 +165,7 @@ func TestMaxWindowEntropy(t *testing.T) {
 	// The headline behavior: a high-entropy blob buried in low-entropy filler
 	// must surface as the sliding-window MAX, even though the GLOBAL mean is low.
 	// Filler length is a stride multiple so the blob aligns to one window.
-	const filler = 1920 // 15 * entropyWindowStride
+	const filler = 15 * entropyWindowStride // align the blob to exactly one window
 	data := make([]byte, 0, filler+256+filler)
 	data = append(data, make([]byte, filler)...)
 	for i := 0; i < 256; i++ {
@@ -182,6 +184,74 @@ func TestMaxWindowEntropy(t *testing.T) {
 	if win-global < 5 {
 		t.Errorf("sliding-max (%v) should dwarf global mean (%v)", win, global)
 	}
+}
+
+// TestStructuralConstOperands pins the pointer-identity assumption behind the
+// ByteRun 513->256 fix: the operand slots returned by structuralConstOperands
+// must be the SAME *ssa.Value pointers that instr.Operands() returns, so the
+// skip-set membership test works. If a future x/tools bump changes Operands()
+// to return copies (or reorders fields), this fails at the helper rather than
+// surfacing later as a mysterious entropy drift on every []byte literal.
+func TestStructuralConstOperands(t *testing.T) {
+	t.Parallel()
+	dummy := &ssa.Const{} // any non-nil ssa.Value; we only test slot identity
+
+	t.Run("IndexAddr skips index, keeps base", func(t *testing.T) {
+		ia := &ssa.IndexAddr{X: dummy, Index: dummy}
+		skip := structuralConstOperands(ia)
+		ops := ia.Operands(nil) // order: &X, &Index
+		if len(ops) != 2 {
+			t.Fatalf("IndexAddr.Operands len=%d want 2", len(ops))
+		}
+		if skip[ops[0]] {
+			t.Error("array-base slot wrongly skipped")
+		}
+		if !skip[ops[1]] {
+			t.Error("index slot not skipped — pointer identity with Operands() is broken")
+		}
+		if ops[1] != &ia.Index {
+			t.Error("Operands() no longer returns &Index — x/tools API changed")
+		}
+	})
+
+	t.Run("Index skips index", func(t *testing.T) {
+		i := &ssa.Index{X: dummy, Index: dummy}
+		skip := structuralConstOperands(i)
+		if !skip[&i.Index] {
+			t.Error("Index subscript slot not skipped")
+		}
+		if skip[&i.X] {
+			t.Error("Index base X wrongly skipped")
+		}
+	})
+
+	t.Run("Lookup skips index", func(t *testing.T) {
+		l := &ssa.Lookup{X: dummy, Index: dummy}
+		skip := structuralConstOperands(l)
+		if !skip[&l.Index] {
+			t.Error("Lookup index slot not skipped")
+		}
+		if skip[&l.X] {
+			t.Error("Lookup base X wrongly skipped")
+		}
+	})
+
+	t.Run("Slice skips bounds, keeps base", func(t *testing.T) {
+		s := &ssa.Slice{X: dummy, Low: dummy, High: dummy, Max: dummy}
+		skip := structuralConstOperands(s)
+		if !skip[&s.Low] || !skip[&s.High] || !skip[&s.Max] {
+			t.Error("slice bound slot(s) not skipped")
+		}
+		if skip[&s.X] {
+			t.Error("slice base X wrongly skipped")
+		}
+	})
+
+	t.Run("non-structural returns nil", func(t *testing.T) {
+		if structuralConstOperands(&ssa.Jump{}) != nil {
+			t.Error("Jump has no structural operands; want nil skip-set")
+		}
+	})
 }
 
 // FuzzMaxWindowEntropy: result is always a valid Shannon entropy in [0,8], never

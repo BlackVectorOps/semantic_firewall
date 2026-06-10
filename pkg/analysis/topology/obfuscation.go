@@ -393,6 +393,11 @@ func structuralConstOperands(instr ssa.Instruction) map[*ssa.Value]bool {
 // isIndirectCallSig reports whether a call signature represents dynamic,
 // reflective, or interface-dispatched calls — the shapes that defeat
 // name-based required-call matching.
+//
+// Known gap: go:/defer: wrappers around an interface invoke (e.g.
+// "go:invoke:T.M", "defer:invoke:T.M") are NOT matched — only the bare
+// "invoke:" prefix and "go:dynamic:"/"defer:dynamic:" are. Pinned by
+// TestIsIndirectCallSig; closing the gap should update that test deliberately.
 func isIndirectCallSig(sig string) bool {
 	return hasPrefix(sig, "dynamic:") ||
 		hasPrefix(sig, "reflect:") ||
