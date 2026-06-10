@@ -61,6 +61,11 @@ type FunctionTopology struct {
 	EntropyScore   float64
 	EntropyProfile EntropyProfile
 
+	// Multi-signal obfuscation analysis: sliding-window and const-pool entropy,
+	// indirect/reflective dispatch ratio, control-flow flattening, and in-loop
+	// decoder fingerprints. Captures payloads the string-only entropy path misses.
+	Obfuscation ObfuscationProfile
+
 	// The underlying function (internal use)
 	fn *ssa.Function
 }
@@ -248,6 +253,10 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 		t.EntropyScore = 0
 		t.EntropyProfile = EntropyProfile{Classification: EntropyLow}
 	}
+
+	// Multi-signal obfuscation analysis. Reads t.fn, t.StringLiterals and
+	// t.CallSignatures — all populated by this point.
+	t.Obfuscation = AnalyzeObfuscation(t)
 
 	// Generate hash last so all metrics are populated
 	t.FuzzyHash = GenerateFuzzyHash(t)

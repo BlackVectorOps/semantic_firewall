@@ -48,14 +48,28 @@ func MatchSignature(topo *topology.FunctionTopology, funcName string, sig Signat
 		scores = append(scores, 0.5)
 	}
 
+	// Obfuscation evidence for analyst visibility. Set before any return so a
+	// function that gets hard-gated below still reports why it was obfuscated.
+	details.ObfuscationScore = topo.Obfuscation.Score
+	details.ObfuscationClass = topo.Obfuscation.Class.String()
+	details.ObfuscationSignals = topo.Obfuscation.Indicators
+
 	if len(sig.IdentifyingFeatures.RequiredCalls) > 0 {
 		callScore, matched, missing := MatchCalls(topo, sig.IdentifyingFeatures.RequiredCalls)
 		details.CallsMatched = matched
 		details.CallsMissing = missing
 		if len(missing) > 0 {
-			result.Confidence = 0.0
-			result.MatchDetails = details
-			return result
+			// A missing required call normally clears the match. But obfuscated
+			// samples replace named calls with reflective/dynamic dispatch, so the
+			// absence is expected, not exculpatory — hard-zeroing here would clear
+			// a sample precisely because it is obfuscated. Only zero when dispatch
+			// is direct enough that a missing name is meaningful; otherwise fall
+			// through and credit the partial callScore (matched/required).
+			if topo.Obfuscation.IndirectCallRatio < 0.5 && topo.Obfuscation.Class < topology.ObfuscationModerate {
+				result.Confidence = 0.0
+				result.MatchDetails = details
+				return result
+			}
 		}
 		scores = append(scores, callScore)
 	}
@@ -75,6 +89,21 @@ func MatchSignature(topo *topology.FunctionTopology, funcName string, sig Signat
 		}
 		result.Confidence = total / float64(len(scores))
 	}
+
+	// Obfuscation floor: a heavily obfuscated function shouldn't be cleared
+	// against a signature it already partially resembles just because obfuscation
+	// erased the structural/name evidence. Gate on the aggregate partial-match
+	// confidence (>= 0.4), not on the EntropyMatch/TopologyMatch booleans —
+	// EntropyMatch is true for free when both entropy scores sit near zero, which
+	// would readmit the database-wide false-positive flood through the side door.
+	// With an obf*0.5 floor and a 0.4 prior, only genuinely HIGH-class obfuscation
+	// (score > 0.8) on an already-partial match can raise confidence.
+	if result.Confidence >= 0.4 {
+		if floor := topo.Obfuscation.Score * 0.5; result.Confidence < floor {
+			result.Confidence = floor
+		}
+	}
+
 	result.MatchDetails = details
 	return result
 }
@@ -176,6 +205,7 @@ func IndexFunction(topo *topology.FunctionTopology, name, description, severity,
 		EntropyTolerance: 0.5,
 		NodeCount:        topo.BlockCount,
 		LoopDepth:        topo.LoopCount,
+		ObfuscationScore: topo.Obfuscation.Score,
 		IdentifyingFeatures: IdentifyingFeatures{
 			RequiredCalls:  requiredCalls,
 			StringPatterns: ExtractStringPatterns(topo.StringLiterals),

@@ -22,6 +22,10 @@ type Signature struct {
 	LoopDepth           int                 `json:"loop_depth"`
 	IdentifyingFeatures IdentifyingFeatures `json:"identifying_features"`
 	Metadata            SignatureMetadata   `json:"metadata"`
+
+	// ObfuscationScore is the indexed function's aggregate obfuscation score
+	// (0..1) at signature-creation time, for triage and threshold tuning.
+	ObfuscationScore float64 `json:"obfuscation_score,omitempty"`
 }
 
 // IdentifyingFeatures captures behavioral markers for detection.
@@ -64,4 +68,9 @@ type MatchDetails struct {
 	StringsMatched     []string `json:"strings_matched"`
 	TopologySimilarity float64  `json:"topology_similarity"`
 	EntropyDistance    float64  `json:"entropy_distance"`
+
+	// Obfuscation evidence carried into the alert for analyst visibility.
+	ObfuscationScore   float64  `json:"obfuscation_score,omitempty"`
+	ObfuscationClass   string   `json:"obfuscation_class,omitempty"`
+	ObfuscationSignals []string `json:"obfuscation_signals,omitempty"`
 }

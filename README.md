@@ -610,6 +610,17 @@ Where $p(x_i)$ is the probability of byte value $x_i$ appearing in the function'
 
 Functions with HIGH or PACKED entropy combined with suspicious call patterns receive elevated confidence scores.
 
+### Multi-Signal Obfuscation Profile
+
+Beyond string-literal entropy, each function gets an `ObfuscationProfile` combining six signals into a single 0..1 score (`NONE`/`LOW`/`MODERATE`/`HIGH`). The signals are weighted by evidentiary strength:
+
+- **Dispositive** (data-entropy — sufficient alone to flag a function): sliding-window entropy over the full constant pool (catches a packed blob averaged away by benign log strings), non-string const-pool entropy (catches `[]byte{...}` / `[]int` payloads that never enter string literals), and byte-array payload runs.
+- **Corroborating** (structural — consistent with idiomatic Go, so meaningful only in combination): indirect/reflective dispatch ratio, control-flow-flattening (fan-in concentration at a dispatcher header), and in-loop byte-decoder shape.
+
+A single corroborating signal cannot by itself reach `MODERATE` — it takes one dispositive signal, or two corroborating signals together. This avoids flagging benign higher-order functions (callback runners, visitors, middleware), which are indirect-dispatch by construction.
+
+**Known gap — package-level payloads.** Payload entropy is attributed per-function: a high-entropy literal local to the analyzed function is detected directly. Package-level payload globals are **not yet** attributed to their consuming function (the constants are lowered into package `init`, not the function body); these are intended to be caught by a paired decoder-loop heuristic, which is not yet implemented. Until then, package-level-blob + separate-decoder layouts are a known gap.
+
 ### Call Signature Resolution
 
 The topology extractor resolves call targets to stable identifiers:
