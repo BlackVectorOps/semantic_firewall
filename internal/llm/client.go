@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/models"
@@ -184,8 +185,11 @@ func executeOpenAIRaw(ctx context.Context, sysPrompt, userMsg, apiKey, model, ap
 	userItem.Content = json.RawMessage(userJSON)
 
 	reqBody := models.OpenAIResponsesRequest{
-		Model:          model,
-		Store:          true,
+		Model: model,
+		// Do not retain payloads server-side. Audited commit messages and diffs
+		// can originate from private/proprietary repositories; persisting them on
+		// the provider is an unnecessary data-exposure surface for a security tool.
+		Store:          false,
 		Items:          []models.OpenAIItem{sysItem, userItem},
 		ResponseFormat: &models.OpenAIRespFmt{Type: "json_object"},
 	}
@@ -411,14 +415,73 @@ func validateOutput(res models.LLMResult) error {
 		return fmt.Errorf("invalid verdict type '%s'", res.Verdict)
 	}
 
-	forbiddenPhrases := []string{"ignore previous", "system prompt"}
-	lowerEv := strings.ToLower(res.Evidence)
+	// Structural bounds: the evidence field is a plain-string summary. An
+	// over-long or control-char-laden value is itself a signal that the model
+	// was steered off-protocol, independent of any specific phrase.
+	if utf8.RuneCountInString(res.Evidence) > models.MaxEvidenceRunes {
+		return fmt.Errorf("evidence exceeds maximum length (%d runes)", models.MaxEvidenceRunes)
+	}
+	for _, r := range res.Evidence {
+		// Allow common whitespace; reject other control characters that have no
+		// place in a plain-text summary and are frequently used to smuggle
+		// delimiters or terminal escapes past naive substring checks.
+		if r == '\n' || r == '\r' || r == '\t' {
+			continue
+		}
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("evidence contains disallowed control character U+%04X", r)
+		}
+	}
+
+	// Normalize before matching so spacing/case tricks do not defeat the check.
+	// This is a defense-in-depth backstop, not the primary control: collapse
+	// runs of whitespace and lowercase, then scan for known injection markers.
+	lowerEv := collapseWhitespace(strings.ToLower(res.Evidence))
+	forbiddenPhrases := []string{
+		"ignore previous",
+		"ignore prior",
+		"ignore the above",
+		"ignore all previous",
+		"disregard previous",
+		"disregard prior",
+		"disregard the above",
+		"system prompt",
+		"system message",
+		"developer message",
+		"you are now",
+		"new instructions",
+		"override instructions",
+		"begin data",
+		"end data",
+	}
 	for _, phrase := range forbiddenPhrases {
 		if strings.Contains(lowerEv, phrase) {
 			return fmt.Errorf("unsafe content: '%s'", phrase)
 		}
 	}
 	return nil
+}
+
+// collapseWhitespace lowercases nothing (caller does that) but reduces every
+// run of Unicode whitespace to a single ASCII space, defeating the common
+// "i g n o r e" / "ignore\u00a0previous" spacing evasions against the phrase
+// denylist above.
+func collapseWhitespace(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	prevSpace := false
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			if !prevSpace {
+				b.WriteByte(' ')
+				prevSpace = true
+			}
+			continue
+		}
+		b.WriteRune(r)
+		prevSpace = false
+	}
+	return b.String()
 }
 
 func parseLLMJSON(content string) (models.LLMResult, error) {
@@ -476,3 +539,5 @@ func (t *testProxyTransport) RoundTrip(req *http.Request) (*http.Response, error
 	}
 	return rt.RoundTrip(req)
 }
+
+

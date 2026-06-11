@@ -15,6 +15,10 @@ const (
 	MaxAPIResponseSize = 5 * 1024 * 1024 // 5 MB
 	// controls the verbosity of the diff output to keep CLI reports readable.
 	MaxDiffOpsDisplay = 10
+	// caps the length of the LLM "evidence" summary. A response longer than a
+	// short plain-text rationale indicates the model strayed from the output
+	// protocol (e.g. echoing the payload or injected instructions back).
+	MaxEvidenceRunes = 4000
 
 	// limits the number of attempts to reach an API before conceding failure.
 	MaxHTTPRetries = 3
@@ -97,3 +101,5 @@ const (
 	//  high performance, LSM tree based storage for large scale analysis history.
 	BackendPebbleDB = "pebbledb"
 )
+
+

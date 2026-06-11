@@ -575,6 +575,19 @@ func (s *PebbleScanner) ScanCandidates(topo *topology.FunctionTopology) ([]*dete
 
 		var sig detection.Signature
 		if err := decodeSignature(sigData, &sig); err == nil {
+			// Legacy (unpacked) index entries carry no entropy score, so the
+			// pre-filter above was skipped. Apply the same hard entropy gate
+			// here using the signature's stored score, so the JSON and PebbleDB
+			// backends admit an identical candidate set for the same database.
+			if !isPacked {
+				effectiveTol := sig.EntropyTolerance
+				if effectiveTol == 0 {
+					effectiveTol = entropyTolerance
+				}
+				if math.Abs(sig.EntropyScore-topo.EntropyScore) > effectiveTol {
+					return
+				}
+			}
 			cp := sig
 			candidates = append(candidates, &cp)
 		}
@@ -697,6 +710,18 @@ func (s *PebbleScanner) ScanTopologyExact(topo *topology.FunctionTopology, funcN
 			continue
 		}
 		closer.Close()
+
+		// Legacy (unpacked) entries skipped the pre-filter; apply the same hard
+		// entropy gate using the decoded signature's stored score for parity.
+		if !isPacked {
+			effectiveTol := sig.EntropyTolerance
+			if effectiveTol == 0 {
+				effectiveTol = tolerance
+			}
+			if math.Abs(sig.EntropyScore-topo.EntropyScore) > effectiveTol {
+				continue
+			}
+		}
 
 		res := detection.MatchSignature(topo, funcName, sig, tolerance)
 		if res.Confidence >= threshold {
@@ -1235,6 +1260,19 @@ func (s *PebbleScanner) ScanTopologyWithSnapshot(snap *pebble.Snapshot, topo *to
 			return
 		}
 
+		// Legacy (unpacked) entries skipped the pre-filter above; apply the same
+		// hard entropy gate using the decoded signature's stored score so this
+		// backend stays consistent with the JSON store and with packed entries.
+		if !isPacked {
+			effectiveTol := sig.EntropyTolerance
+			if effectiveTol == 0 {
+				effectiveTol = tolerance
+			}
+			if math.Abs(sig.EntropyScore-topo.EntropyScore) > effectiveTol {
+				return
+			}
+		}
+
 		res := detection.MatchSignature(topo, funcName, sig, tolerance)
 		if res.Confidence >= threshold {
 			results = append(results, res)
@@ -1466,3 +1504,5 @@ func (s *PebbleScanner) InitializeMetadata(version, description string) error {
 func (s *PebbleScanner) TouchLastUpdated() error {
 	return s.SetMetadata("last_updated_at", time.Now().Format(time.RFC3339Nano))
 }
+
+
