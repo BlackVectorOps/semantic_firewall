@@ -10,11 +10,11 @@
 [![Marketplace](https://img.shields.io/badge/Marketplace-Semantic_Firewall-7c3aed.svg)](https://github.com/marketplace/actions/semantic-firewall)
 [![Semantic Check](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic-check.yml/badge.svg)](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic-check.yml)
 
-**Protect your codebase from hidden risks.**
+**Catch the risky change a `git diff` hides.**
 
-**Semantic Firewall** goes beyond traditional static analysis: it understands your code's *intent* and *behavior*, not just the text. Instantly spot risky changes, catch malware, and prove your code is safe--no matter how it's refactored or renamed.
+**Semantic Firewall** fingerprints Go by its *structure and behavior*, not its text -- so refactors and renames don't break your security gates, and a newly introduced capability (an `os/exec`, `net`, or raw `syscall` call that wasn't there before) stands out even when it's moved or obfuscated.
 
-**No more false positives. No more missed backdoors.**
+Deterministic, and honest about its edges: it tells you what it catches, where it hands off to a judgment layer, and what it does not score -- see [Detection scope](#detection-scope).
 
 </div>
 
@@ -62,6 +62,24 @@
 | **gVisor Isolation** | Sandboxed execution via runsc for defense-in-depth |
 
 </details>
+
+---
+
+## Detection scope
+
+Semantic Firewall is a **deterministic** structural analyzer, and it is deliberate about its boundaries -- naming them is what makes a green result worth trusting.
+
+**What it demonstrably catches.** Capability *introductions* that resolve to a concrete call target -- a function that newly reaches the process-exec, network, or raw-syscall families (`os/exec`, `net`, `syscall`, `plugin`). This is validated on labeled synthetic pairs run through the full pipeline: each malicious introduction escalates while its size-matched benign twin stays silent (`HasExecFamily`, `HasNetListen`, `HasRawSyscall`). Structural fingerprinting makes this survive renames, moves, and reformatting.
+
+**Where it hands off.** Calls reached through interface dispatch, function values, or reflection don't resolve to a concrete target -- they land in an `invoke:` / `dynamic:` bucket (roughly one in ten call sites across a 10-module corpus). These are **ceded, not flagged**: the deterministic core marks the seam where a separate judgment layer is needed, rather than guessing.
+
+**What it does not score (known limitations).**
+
+- **Deletion-attack blind spot.** The risk score is computed from what a change *adds*. A backdoor introduced by *removing* a guard -- a bounds check, an auth verification, a TLS-validation call -- removes structure, and lost structure carries no score. It will not appear in `high_risk_changes` or flip the verdict. Closing this requires scoring the *loss* of structure in the engine itself; until that ships it is a real gap, named here on purpose.
+- **Parse coverage.** Files the loader can't build are skipped, not analyzed -- so "0 escalations" on a corpus means *zero among the analyzed commits*, not zero overall.
+- **A clean false-positive rate is not a proven catch rate.** 0% FP on benign code shows the engine doesn't over-fire; catch rate is established separately, by the labeled positive controls above.
+
+> The tool that tells you what it doesn't catch earns more trust than the one that implies it catches everything. The seams above (dynamic dispatch, deletion attacks) are exactly where a deeper, model-assisted judgment layer adds value -- and where we'd rather be honest about the gap than paper over it.
 
 ---
 
