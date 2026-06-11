@@ -24,7 +24,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          # Match the version go.mod requires. sfw runs the loader with
+          # GOTOOLCHAIN=local, so a mismatched toolchain can't auto-upgrade and
+          # `go list` refuses with "go.mod requires go >= X (running go Y)".
+          go-version-file: 'go.mod'
           cache: true
 
       - name: Build SFW
@@ -36,18 +39,19 @@ jobs:
           # Verify binary works
           ./bin/sfw --version || ./bin/sfw help || true
 
-      - name: Vendor Dependencies
-        # Vendor modules into workspace so they're available inside the sandbox.
-        # The sandbox only mounts the workspace, not GOMODCACHE (/home/runner/go/pkg/mod).
-        run: go mod vendor
-
       - name: Determine Mode
         id: mode
+        env:
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-             echo "mode=BLOCKER" >> $GITHUB_OUTPUT
+          # BLOCKER fails the build on ANY semantic change, so it is opt-in: it
+          # applies only to PRs labeled 'semantic-safe' (claimed behavior-preserving
+          # refactors). Every other PR runs in 'check' mode, which reports the
+          # semantic diff without failing on intentional logic changes.
+          if [[ "${{ github.event_name }}" == "pull_request" ]] && [[ ",${PR_LABELS}," == *",semantic-safe,"* ]]; then
+             echo "mode=BLOCKER" >> "$GITHUB_OUTPUT"
           else
-             echo "mode=check" >> $GITHUB_OUTPUT
+             echo "mode=check" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Prepare Analysis Environment
@@ -104,8 +108,6 @@ jobs:
           MODE: ${{ steps.mode.outputs.mode }}
           WORKTREE_DIR: ${{ steps.prep.outputs.worktree_dir }}
           HAS_GO: ${{ steps.prep.outputs.has_go_files }}
-          # Use vendored dependencies - sandbox can't access GOMODCACHE
-          GOFLAGS: "-mod=vendor"
           GOPROXY: "off"
         run: |
           set -euo pipefail
@@ -168,6 +170,8 @@ jobs:
             # Execute SFW diff (sfw handles its own sandboxing internally)
             if ! OUTPUT=$(./bin/sfw diff "$OLD_FILE" "$NEW_FILE" 2>&1); then
                 echo "::error::sfw failed to process $NEW_FILE_REF"
+                # Surface the tool's actual error instead of swallowing it.
+                printf '%s\n' "$OUTPUT" | sed 's/^/  [sfw] /'
                 ERROR_COUNT=$((ERROR_COUNT + 1))
                 continue
             fi
@@ -175,6 +179,7 @@ jobs:
             # Validate JSON
             if ! echo "$OUTPUT" | jq -e . >/dev/null 2>&1; then
                 echo "::error::Invalid JSON output for $NEW_FILE_REF"
+                printf '%s\n' "$OUTPUT" | sed 's/^/  [sfw] /'
                 ERROR_COUNT=$((ERROR_COUNT + 1))
                 continue
             fi
