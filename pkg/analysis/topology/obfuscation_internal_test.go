@@ -80,13 +80,38 @@ func TestHasPrefix(t *testing.T) {
 
 func TestIsIndirectCallSig(t *testing.T) {
 	t.Parallel()
-	indirect := []string{"dynamic:func()", "reflect:Call", "invoke:T.M", "go:dynamic:x", "defer:dynamic:x"}
+	indirect := []string{
+		"dynamic:func()",
+		"invoke:T.M",
+		"go:dynamic:x",
+		"defer:dynamic:x",
+		// Reflection invocation: the DOT-form is what ExtractTopology actually
+		// emits under InstantiateGenerics (verified against real SSA). Matching
+		// only the colon-form previously let all reflection dispatch escape the
+		// IndirectCallRatio, under-counting obfuscation for reflection-hidden
+		// capabilities. Both forms must match.
+		"reflect.Call",
+		"reflect.CallSlice",
+		"reflect.MethodByName",
+		"reflect:Call", // colon-form: unreachable under this loader, matched defensively
+	}
 	for _, s := range indirect {
 		if !isIndirectCallSig(s) {
 			t.Errorf("isIndirectCallSig(%q)=false, want true", s)
 		}
 	}
-	direct := []string{"net.Dial", "builtin:println", "closure:func()", "", "call:unknown"}
+	direct := []string{
+		"net.Dial",
+		"builtin:println",
+		"closure:func()",
+		"",
+		"call:unknown",
+		// reflect introspection helpers emit "reflect.<Func>" too but are
+		// ordinary direct calls, NOT dynamic dispatch -- they must NOT count.
+		"reflect.TypeOf",
+		"reflect.ValueOf",
+		"reflect.DeepEqual",
+	}
 	for _, s := range direct {
 		if isIndirectCallSig(s) {
 			t.Errorf("isIndirectCallSig(%q)=true, want false", s)
@@ -272,3 +297,5 @@ func FuzzMaxWindowEntropy(f *testing.F) {
 		}
 	})
 }
+
+

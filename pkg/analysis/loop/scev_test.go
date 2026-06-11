@@ -137,6 +137,36 @@ func TestTripCountLogic(t *testing.T) {
 			funcName: "count",
 			expected: -1, // Unknown
 		},
+		{
+			name: "Inclusive equality up (runs once)",
+			src: `package main
+			func count() {
+				// Start=5, Limit=5, "i <= 5": runs exactly once, not dead.
+				for i := 5; i <= 5; i++ { }
+			}`,
+			funcName: "count",
+			expected: 1,
+		},
+		{
+			name: "Inclusive equality down (runs once)",
+			src: `package main
+			func count() {
+				// Start=5, Limit=5, "i >= 5": runs exactly once, not dead.
+				for i := 5; i >= 5; i-- { }
+			}`,
+			funcName: "count",
+			expected: 1,
+		},
+		{
+			name: "Exclusive equality up (dead)",
+			src: `package main
+			func count() {
+				// Start=5, Limit=5, "i < 5": false on entry, dead.
+				for i := 5; i < 5; i++ { }
+			}`,
+			funcName: "count",
+			expected: 0,
+		},
 	}
 
 	for _, tc := range tests {
@@ -247,3 +277,5 @@ func TestFloatExclusion(t *testing.T) {
 		t.Errorf("Expected 0 IVs for float loop, got %d", len(l.Inductions))
 	}
 }
+
+

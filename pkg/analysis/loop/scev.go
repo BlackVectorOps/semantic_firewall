@@ -457,27 +457,22 @@ func deriveTripCount(loop *Loop) {
 		return
 	}
 
-	var isUpCounting, ivOnLeft bool
+	var isUpCounting bool
 	var isInclusive, isNEQ bool
 
 	switch binOp.Op {
 	case token.LSS:
 		isUpCounting = true
-		ivOnLeft = true
 	case token.LEQ:
 		isUpCounting = true
-		ivOnLeft = true
 		isInclusive = true
 	case token.GTR:
 		isUpCounting = false
-		ivOnLeft = true
 	case token.GEQ:
 		isUpCounting = false
-		ivOnLeft = true
 		isInclusive = true
 	case token.NEQ:
 		isNEQ = true
-		ivOnLeft = true
 	default:
 		loop.TripCount = &SCEVUnknown{Value: nil}
 		return
@@ -497,7 +492,11 @@ func deriveTripCount(loop *Loop) {
 	} else if found := findIV(binOp.Y); found != nil {
 		iv = found
 		limit = binOp.X
-		ivOnLeft = !ivOnLeft
+		// IV is on the right-hand side (e.g. "limit < i"). Normalize to the
+		// canonical "iv OP limit" form by reversing the comparison direction.
+		// For symmetric NEQ this is a no-op. Strictness/inclusivity is preserved
+		// by the swap (e.g. "limit < i" == "i > limit": both strict), so only the
+		// counting direction needs to flip.
 		if !isNEQ {
 			isUpCounting = !isUpCounting
 		}
@@ -523,21 +522,26 @@ func deriveTripCount(loop *Loop) {
 			// Determine if Dead (TripCount 0) or Divergent (Unknown)
 			isDead := false
 			if isUpCounting {
-				// Condition: i < limit. Loop runs if Start < Limit.
-				if startC.Cmp(limitC) >= 0 {
-					// Condition is false immediately.
+				// Condition: i < limit (or i <= limit when inclusive).
+				// Loop runs if Start < Limit, or Start == Limit when inclusive.
+				cmp := startC.Cmp(limitC)
+				if cmp > 0 || (cmp == 0 && !isInclusive) {
+					// Condition is false on entry. For "<" equality is dead;
+					// for "<=" equality runs exactly once, so not dead.
 					isDead = true
 				} else if stepC.Sign() <= 0 {
-					// Start < Limit, but step is negative (or zero). Diverges.
+					// Start <= Limit, but step is negative (or zero). Diverges.
 					loop.TripCount = &SCEVUnknown{Value: nil}
 					return
 				}
 			} else {
-				// Condition: i > limit. Loop runs if Start > Limit.
-				if startC.Cmp(limitC) <= 0 {
+				// Condition: i > limit (or i >= limit when inclusive).
+				// Loop runs if Start > Limit, or Start == Limit when inclusive.
+				cmp := startC.Cmp(limitC)
+				if cmp < 0 || (cmp == 0 && !isInclusive) {
 					isDead = true
 				} else if stepC.Sign() >= 0 {
-					// Start > Limit, but step is positive. Diverges.
+					// Start >= Limit, but step is positive. Diverges.
 					loop.TripCount = &SCEVUnknown{Value: nil}
 					return
 				}
@@ -812,3 +816,5 @@ func negateSCEV(s SCEV) SCEV {
 		return &SCEVGenericExpr{Op: token.MUL, X: s, Y: &SCEVConstant{Value: big.NewInt(-1)}}
 	}
 }
+
+

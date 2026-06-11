@@ -330,3 +330,46 @@ func BenchmarkAnalyzeObfuscation(b *testing.B) {
 		_ = topology.AnalyzeObfuscation(topo)
 	}
 }
+
+
+// TestIndirectCallRatio_CountsReflectionDispatch is the behavioral regression
+// guard for the reflection-undercount bug: reflect.Value.Call emits the dot-form
+// "reflect.Call" (verified against real SSA), which the original isIndirectCallSig
+// missed because it matched only the never-emitted colon-form "reflect:Call".
+// Result was IndirectCallRatio == 0 for reflection-hidden dispatch -- exactly the
+// evasion the signal exists to catch. This test compiles real reflection dispatch
+// and asserts the ratio now counts it.
+func TestIndirectCallRatio_CountsReflectionDispatch(t *testing.T) {
+	t.Parallel()
+
+	// A function whose ONLY call is reflect.Value.Call. Pre-fix this scored
+	// IndirectCallRatio 0.0; it must now be 1.0 (1 of 1 calls is indirect).
+	src := "package main\n" +
+		"import \"reflect\"\n" +
+		"func f(v reflect.Value, a []reflect.Value) { v.Call(a) }"
+	p := analyze(t, src, "f")
+
+	if p.IndirectCallRatio != 1.0 {
+		t.Errorf("IndirectCallRatio=%.2f want 1.0; reflection dispatch (reflect.Call) must count as indirect", p.IndirectCallRatio)
+	}
+	if !hasIndicator(p, "indirect-dispatch") {
+		t.Errorf("missing indirect-dispatch indicator for reflection dispatch: %v", p.Indicators)
+	}
+}
+
+// TestIndirectCallRatio_ExcludesReflectIntrospection pins the scope boundary:
+// reflect.TypeOf / reflect.ValueOf emit "reflect.<Func>" too but are ordinary
+// direct calls, not dynamic dispatch. They must NOT inflate IndirectCallRatio,
+// or every use of the reflect package would read as obfuscated.
+func TestIndirectCallRatio_ExcludesReflectIntrospection(t *testing.T) {
+	t.Parallel()
+
+	src := "package main\n" +
+		"import \"reflect\"\n" +
+		"func f(x int) { _ = reflect.TypeOf(x); _ = reflect.ValueOf(x) }"
+	p := analyze(t, src, "f")
+
+	if p.IndirectCallRatio != 0.0 {
+		t.Errorf("IndirectCallRatio=%.2f want 0.0; reflect introspection (TypeOf/ValueOf) is direct, not dispatch", p.IndirectCallRatio)
+	}
+}

@@ -185,7 +185,10 @@ func AnalyzeObfuscation(t *FunctionTopology) ObfuscationProfile {
 	}
 
 	// 4. Indirect / reflective call ratio from the call signatures the topology
-	//    already collected. extractCallSignature tags these "dynamic:" / "reflect:".
+	//    already collected. extractCallSignature tags these "dynamic:" / "invoke:";
+	//    reflection invocation emits the dot-form "reflect.Call" (see
+	//    isIndirectCallSig for the verified form set and why "reflect:" alone was
+	//    insufficient).
 	totalCalls, indirectCalls := 0, 0
 	for sig, n := range t.CallSignatures {
 		totalCalls += n
@@ -398,12 +401,57 @@ func structuralConstOperands(instr ssa.Instruction) map[*ssa.Value]bool {
 // "go:invoke:T.M", "defer:invoke:T.M") are NOT matched — only the bare
 // "invoke:" prefix and "go:dynamic:"/"defer:dynamic:" are. Pinned by
 // TestIsIndirectCallSig; closing the gap should update that test deliberately.
+// isIndirectCallSig reports whether a call signature represents indirect or
+// reflective dispatch -- the calls whose target is not statically a named
+// function and which therefore evade call-target detection.
+//
+// SIGNATURE FORMS ARE EMPIRICALLY VERIFIED against topology.ExtractTopology on
+// real SSA built with ssa.InstantiateGenerics (the mode both ir/builder.go and
+// scan.go use). Do not infer forms from the emitter source alone -- the
+// optimizing SSA build resolves some calls differently than NaiveForm would.
+//
+//   - "dynamic:"        raw function-pointer call. VERIFIED.
+//   - "invoke:"         interface method dispatch. VERIFIED.
+//   - "go:dynamic:"     dynamic call spawned in a goroutine.
+//   - "defer:dynamic:"  dynamic call in a defer.
+//   - reflect invocation: reflect.Value.Call and friends. VERIFIED to emit the
+//     DOT-form "reflect.Call" / "reflect.MethodByName" via extractFunctionSig
+//     (<pkg>.<func>), NOT the colon-form "reflect:Call". The colon-form branch
+//     in extractCallSignature is UNREACHABLE under InstantiateGenerics (verified
+//     by exhausting method-value / method-expression / stored-value shapes), so
+//     matching only "reflect:" silently MISSED all reflection dispatch and
+//     under-counted IndirectCallRatio to zero for reflection-hidden capabilities
+//     -- precisely the evasion technique the signal exists to catch. Both forms
+//     are now matched; the colon-form is retained for loader-independence.
+//
+// Only the reflect *invocation* entry points count as indirect dispatch.
+// reflect.TypeOf / reflect.ValueOf and similar introspection helpers also emit
+// "reflect.<Func>" but are ordinary direct calls, not dynamic dispatch, so they
+// are matched by name, not by a blanket "reflect." prefix (which would also
+// capture a user package named reflect).
 func isIndirectCallSig(sig string) bool {
 	return hasPrefix(sig, "dynamic:") ||
-		hasPrefix(sig, "reflect:") ||
+		hasPrefix(sig, "reflect:") || // colon-form: unreachable under this loader, kept defensively
 		hasPrefix(sig, "invoke:") ||
 		hasPrefix(sig, "go:dynamic:") ||
-		hasPrefix(sig, "defer:dynamic:")
+		hasPrefix(sig, "defer:dynamic:") ||
+		isReflectInvokeSig(sig)
+}
+
+// reflectInvokeMethods are the reflect.Value methods that perform DYNAMIC
+// INVOCATION of an underlying callable -- the reflection equivalent of an
+// indirect call. Introspection methods (Kind, Type, Field, Len, ...) are
+// deliberately excluded: they do not dispatch a call. Emitted dot-form is
+// "reflect.<Method>".
+var reflectInvokeMethods = map[string]bool{
+	"reflect.Call":         true,
+	"reflect.CallSlice":    true,
+	"reflect.MethodByName": true, // resolves a method dynamically; its result is invoked
+	"reflect.Method":       true,
+}
+
+func isReflectInvokeSig(sig string) bool {
+	return reflectInvokeMethods[sig]
 }
 
 // flatteningScore estimates control-flow-flattening from the dispatcher's
@@ -548,3 +596,5 @@ func totalStringLen(ss []string) int {
 func hasPrefix(s, prefix string) bool {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
+
+
