@@ -144,6 +144,11 @@ jobs:
 
             if [[ "$NEW_FILE_REF" != *.go ]] && [[ "$OLD_FILE_REF" != *.go ]]; then continue; fi
 
+            # Skip test files. sfw's single-file loader can't form a package from a
+            # _test.go in isolation (it fails with "input packages list is empty"),
+            # and test changes don't alter the production semantics this check guards.
+            if [[ "$NEW_FILE_REF" == *_test.go ]] || [[ "$OLD_FILE_REF" == *_test.go ]]; then continue; fi
+
             if [ -f "$NEW_FILE_REF" ]; then
                 NEW_FILE="$NEW_FILE_REF"
             else
