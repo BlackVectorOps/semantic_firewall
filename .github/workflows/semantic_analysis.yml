@@ -167,11 +167,14 @@ jobs:
                 continue
             fi
 
-            # Execute SFW diff (sfw handles its own sandboxing internally)
-            if ! OUTPUT=$(./bin/sfw diff "$OLD_FILE" "$NEW_FILE" 2>&1); then
+            # Execute SFW diff (sfw handles its own sandboxing internally).
+            # Capture STDOUT (the JSON report) only -- sfw writes warnings/errors
+            # to stderr (e.g. the "runsc not found, falling back" notice), and
+            # merging them with 2>&1 corrupts the JSON parsed below.
+            if ! OUTPUT=$(./bin/sfw diff "$OLD_FILE" "$NEW_FILE" 2>sfw_stderr.log); then
                 echo "::error::sfw failed to process $NEW_FILE_REF"
                 # Surface the tool's actual error instead of swallowing it.
-                printf '%s\n' "$OUTPUT" | sed 's/^/  [sfw] /'
+                sed 's/^/  [sfw] /' sfw_stderr.log
                 ERROR_COUNT=$((ERROR_COUNT + 1))
                 continue
             fi
@@ -179,7 +182,8 @@ jobs:
             # Validate JSON
             if ! echo "$OUTPUT" | jq -e . >/dev/null 2>&1; then
                 echo "::error::Invalid JSON output for $NEW_FILE_REF"
-                printf '%s\n' "$OUTPUT" | sed 's/^/  [sfw] /'
+                printf '%s\n' "$OUTPUT" | sed 's/^/  [out] /'
+                sed 's/^/  [sfw] /' sfw_stderr.log
                 ERROR_COUNT=$((ERROR_COUNT + 1))
                 continue
             fi
