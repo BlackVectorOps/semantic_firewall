@@ -110,6 +110,30 @@ func computeVirtualControlFlow(fn *ssa.Function) *virtualControlFlowState {
 
 const MaxFunctionBlocks = 5000
 
+// rangeFuncYield is the Synthetic tag x/tools gives the closure holding the
+// body of a range-over-func loop. Unlike other synthetic functions, it is
+// user code.
+const rangeFuncYield = "range-over-func yield"
+
+// oversizedFingerprint hashes the raw SSA of a function too large to
+// canonicalize. It is deterministic but not canonical: a rename can change it.
+// A constant placeholder would instead make every change to such a function
+// invisible -- padding a function past MaxFunctionBlocks would hide anything.
+func oversizedFingerprint(fn *ssa.Function) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "oversized\n%s\n", fn.Signature)
+	for _, b := range fn.Blocks {
+		fmt.Fprintf(h, "b%d:\n", b.Index)
+		for _, instr := range b.Instrs {
+			if v, ok := instr.(ssa.Value); ok && v.Name() != "" {
+				fmt.Fprintf(h, "%s = ", v.Name())
+			}
+			fmt.Fprintf(h, "%s\n", instr)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 func GenerateFingerprint(fn *ssa.Function, policy ir.LiteralPolicy, strictMode bool) FingerprintResult {
 	line := 0
 	filename := ""
@@ -122,8 +146,8 @@ func GenerateFingerprint(fn *ssa.Function, policy ir.LiteralPolicy, strictMode b
 	if len(fn.Blocks) > MaxFunctionBlocks {
 		return FingerprintResult{
 			FunctionName: fn.RelString(nil),
-			Fingerprint:  "OVERSIZED",
-			CanonicalIR:  fmt.Sprintf("; Skipped: Function too large (%d blocks > %d)", len(fn.Blocks), MaxFunctionBlocks),
+			Fingerprint:  oversizedFingerprint(fn),
+			CanonicalIR:  fmt.Sprintf("; Not canonicalized: function too large (%d blocks > %d); fingerprint is over raw SSA", len(fn.Blocks), MaxFunctionBlocks),
 			Pos:          fn.Pos(),
 			Line:         line,
 			Filename:     filename,
@@ -305,7 +329,7 @@ func processFunctionAndAnons(fn *ssa.Function, policy ir.LiteralPolicy, strictMo
 	}
 	visited[fn] = true
 
-	if fn.Synthetic != "" && fn.Name() != "init" {
+	if fn.Synthetic != "" && fn.Name() != "init" && fn.Synthetic != rangeFuncYield {
 		return
 	}
 

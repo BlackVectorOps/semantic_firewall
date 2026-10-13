@@ -25,37 +25,24 @@ const (
 // *name* for signature-matching stability, these keys carry the import path so
 // that "crypto/rand.Read" and "math/rand.Read" stay distinct.
 //
-// Closures are fingerprinted and diffed as functions of their own, so their
-// calls are not attributed to the enclosing function -- with one exception:
-// the synthetic bodies x/tools creates for range-over-func loops are never
-// reported separately, so their calls are folded in here to keep them visible.
+// Closures, including range-over-func loop bodies, are fingerprinted and
+// diffed as functions of their own, so their calls are attributed to them,
+// not to the enclosing function.
 func collectCallTargets(fn *ssa.Function, t *FunctionTopology) {
-	visited := map[*ssa.Function]bool{fn: true}
-	var walk func(f *ssa.Function)
-	walk = func(f *ssa.Function) {
-		for _, block := range f.Blocks {
-			for _, instr := range block.Instrs {
-				for _, op := range instr.Operands(nil) {
-					if op == nil || *op == nil {
-						continue
-					}
-					callee, ok := (*op).(*ssa.Function)
-					if !ok {
-						continue
-					}
-					if callee.Parent() != nil {
-						if callee.Synthetic != "" && !visited[callee] {
-							visited[callee] = true
-							walk(callee)
-						}
-						continue
-					}
-					recordCallTarget(t, callee)
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			for _, op := range instr.Operands(nil) {
+				if op == nil || *op == nil {
+					continue
 				}
+				callee, ok := (*op).(*ssa.Function)
+				if !ok || callee.Parent() != nil {
+					continue
+				}
+				recordCallTarget(t, callee)
 			}
 		}
 	}
-	walk(fn)
 }
 
 func recordCallTarget(t *FunctionTopology, callee *ssa.Function) {

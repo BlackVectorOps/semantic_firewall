@@ -145,10 +145,8 @@ func Sum(xs []int) int {
 	}
 }
 
-// A capability added to an existing closure is scored on the closure's own
-// diff entry; one added inside a range-over-func loop body (a synthetic
-// closure that is never reported separately) is scored on the enclosing
-// function.
+// A capability added to an existing closure, or to a range-over-func loop
+// body (a synthetic closure), is scored on that closure's own diff entry.
 func TestDiffRisk_CapabilityInsideClosures(t *testing.T) {
 	t.Run("closure", func(t *testing.T) {
 		out := diffSources(t, `package x
@@ -198,8 +196,19 @@ func Serve(addrs []string) {
 	}
 }
 `)
-		if f := findFunc(t, out, "Serve"); f.RiskScore < models.RiskScoreHigh {
-			t.Errorf("Serve risk = %d (%s); want >= %d", f.RiskScore, f.TopologyDelta, models.RiskScoreHigh)
+		// The loop body is a synthetic closure ("Serve$1") with its own
+		// diff entry; the capability is scored there, not on Serve.
+		var body *models.FunctionDiff
+		for i, f := range out.Functions {
+			if strings.HasPrefix(f.Function, "Serve$") {
+				body = &out.Functions[i]
+			}
+		}
+		if body == nil {
+			t.Fatalf("range-over-func body missing from diff: %+v", out.Functions)
+		}
+		if body.RiskScore < models.RiskScoreHigh {
+			t.Errorf("%s risk = %d (%s); want >= %d", body.Function, body.RiskScore, body.TopologyDelta, models.RiskScoreHigh)
 		}
 	})
 }

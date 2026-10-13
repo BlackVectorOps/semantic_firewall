@@ -1,8 +1,10 @@
 package diff_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/ir"
@@ -213,5 +215,59 @@ func B(s string, count int) string {
 `)
 	if fps["A"] != fps["B"] {
 		t.Errorf("renamed locals changed the fingerprint: %s vs %s", fps["A"], fps["B"])
+	}
+}
+
+// Range-over-func loop bodies are synthetic closures; they used to be skipped
+// entirely, so anything inside such a loop was invisible.
+func TestFingerprint_RangeOverFuncBodies(t *testing.T) {
+	fps := fingerprintsOf(t, `package x
+
+import (
+	"os"
+	"slices"
+)
+
+func IterA(s []string) {
+	for v := range slices.Values(s) {
+		_ = v
+	}
+}
+
+func IterB(s []string) {
+	for v := range slices.Values(s) {
+		os.RemoveAll(v)
+	}
+}
+`)
+	a, b := fps["IterA$1"], fps["IterB$1"]
+	if a == "" || b == "" {
+		t.Fatalf("range-over-func bodies not fingerprinted: %v", fps)
+	}
+	if a == b {
+		t.Error("loop bodies differ but share a fingerprint")
+	}
+}
+
+// Functions too large to canonicalize used to share the constant fingerprint
+// "OVERSIZED", so any change inside one was invisible.
+func TestFingerprint_OversizedFunctionsStillChange(t *testing.T) {
+	big := func(name, tail string) string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "func %s(x int) int {\n", name)
+		for i := 0; i < diff.MaxFunctionBlocks/2+10; i++ {
+			fmt.Fprintf(&b, "\tif x == %d {\n\t\treturn %d\n\t}\n", i, i)
+		}
+		fmt.Fprintf(&b, "\t%s\n\treturn -1\n}\n", tail)
+		return b.String()
+	}
+	fps := fingerprintsOf(t, "package x\n\nimport \"os\"\n\n"+
+		big("BigA", "_ = x")+big("BigB", "os.Exit(x)"))
+	a, b := fps["BigA"], fps["BigB"]
+	if a == "" || b == "" || a == "OVERSIZED" {
+		t.Fatalf("unexpected oversized fingerprints: %q %q", a, b)
+	}
+	if a == b {
+		t.Error("oversized functions differ but share a fingerprint")
 	}
 }
