@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/ir"
-	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/diff"
-	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/testutil"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/testutil"
 )
 
 func FuzzFingerprintSource(f *testing.F) {

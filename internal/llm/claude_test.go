@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/models"
 )
 
 // claudeMessage writes a Messages API response whose single text block is

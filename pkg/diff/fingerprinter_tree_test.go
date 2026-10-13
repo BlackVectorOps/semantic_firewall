@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/ir"
-	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff"
 )
 
 // TestFingerprintTree_SyntheticGoMod covers the no-real-go.mod path: loader

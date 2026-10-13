@@ -17,9 +17,9 @@ inputs:
     required: false
     default: 'check'
   go-version:
-    description: 'Go version to use'
+    description: 'Go version to use (sfw v5 requires Go 1.26+)'
     required: false
-    default: '1.24'
+    default: '1.26'
   signatures:
     description: 'Path to signature database (scan mode only). Required for scan mode.'
     required: false
@@ -94,7 +94,7 @@ runs:
     - name: Install sfw
       shell: bash
       env:
-        SFW_VERSION: "v4.0.0"
+        SFW_VERSION: "v5.0.0"
       run: |
         set -euo pipefail
         
@@ -109,7 +109,7 @@ runs:
         RETRY_DELAY=5
         
         for attempt in $(seq 1 $MAX_RETRIES); do
-          if go install "github.com/BlackVectorOps/semantic_firewall/v4/cmd/sfw@${SFW_VERSION}"; then
+          if go install "github.com/BlackVectorOps/semantic_firewall/v5/cmd/sfw@${SFW_VERSION}"; then
             break
           fi
           

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/testutil"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/testutil"
 )
 
 // itoa is a tiny dependency-free int formatter for building array-literal source.

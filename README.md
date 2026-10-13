@@ -5,7 +5,7 @@
 
 ### Next-Gen Code Integrity & Malware Detection for Go
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/BlackVectorOps/semantic_firewall.svg)](https://pkg.go.dev/github.com/BlackVectorOps/semantic_firewall/v4)
+[![Go Reference](https://pkg.go.dev/badge/github.com/BlackVectorOps/semantic_firewall.svg)](https://pkg.go.dev/github.com/BlackVectorOps/semantic_firewall/v5)
 [![License: MIT](https://img.shields.io/badge/License-MIT-00d4aa.svg)](LICENSE)
 [![Marketplace](https://img.shields.io/badge/Marketplace-Semantic_Firewall-7c3aed.svg)](https://github.com/marketplace/actions/semantic-firewall)
 [![Semantic Check](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic_analysis.yml/badge.svg)](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic_analysis.yml)
@@ -86,7 +86,7 @@ Semantic Firewall is a **deterministic** structural analyzer, and it is delibera
 ## Getting Started
 
 ```bash
-go install github.com/BlackVectorOps/semantic_firewall/v4/cmd/sfw@latest
+go install github.com/BlackVectorOps/semantic_firewall/v5/cmd/sfw@latest
 ```
 
 
@@ -289,7 +289,7 @@ jobs:
       - uses: actions/checkout@v3
       - name: Run Semantic Firewall
         run: |
-          go install github.com/BlackVectorOps/semantic_firewall/v4/cmd/sfw@latest
+          go install github.com/BlackVectorOps/semantic_firewall/v5/cmd/sfw@latest
           sfw diff old.go new.go
           sfw scan . --deps
 ```
@@ -763,7 +763,7 @@ The library packages live under `pkg/`; `pkg/api` is the entry point the CLI its
 ### Semantic Diff
 
 ```go
-import "github.com/BlackVectorOps/semantic_firewall/v4/pkg/api"
+import "github.com/BlackVectorOps/semantic_firewall/v5/pkg/api"
 
 out, err := api.Diff("old/handler.go", "new/handler.go")
 if err != nil {
@@ -778,8 +778,8 @@ for _, f := range out.Functions {
 
 ```go
 import (
-    "github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/ir"
-    "github.com/BlackVectorOps/semantic_firewall/v4/pkg/diff"
+    "github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
+    "github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff"
 )
 
 src := `package main
@@ -800,8 +800,8 @@ for _, r := range results {
 
 ```go
 import (
-    "github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
-    "github.com/BlackVectorOps/semantic_firewall/v4/pkg/storage/pebbledb"
+    "github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/topology"
+    "github.com/BlackVectorOps/semantic_firewall/v5/pkg/storage/pebbledb"
 )
 
 // Open the signature database
@@ -833,7 +833,7 @@ for _, alert := range alerts {
 ### Topology Extraction
 
 ```go
-import "github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
+import "github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/topology"
 
 // Extract structural features from an SSA function
 topo := topology.ExtractTopology(ssaFunction)
