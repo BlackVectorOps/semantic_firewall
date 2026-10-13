@@ -127,15 +127,22 @@ func ClassifyCallTarget(pkgPath, recv, name string) string {
 	case "os/exec":
 		return CapExec
 	case "os":
-		if recv != "" {
-			return ""
-		}
-		switch name {
-		case "StartProcess":
-			return CapExec
-		case "WriteFile", "Create", "OpenFile", "Remove", "RemoveAll", "Rename",
-			"Chmod", "Chown", "Lchown", "Truncate", "Symlink", "Link":
-			return CapFilesystem
+		switch recv {
+		case "":
+			switch name {
+			case "StartProcess":
+				return CapExec
+			case "CopyFS":
+				return CapFilesystem
+			}
+			if isFilesystemMutation(name) {
+				return CapFilesystem
+			}
+		case "Root":
+			// os.Root confines paths to a directory but still mutates it.
+			if isFilesystemMutation(name) {
+				return CapFilesystem
+			}
 		}
 	case "syscall", "golang.org/x/sys/unix", "golang.org/x/sys/windows":
 		// Methods are on value types like Errno and Signal; only the raw
@@ -163,9 +170,25 @@ func ClassifyCallTarget(pkgPath, recv, name string) string {
 				return CapNetwork
 			}
 		}
-	case "crypto/tls", "net/rpc", "net/rpc/jsonrpc", "net/smtp", "net/textproto":
+	case "crypto/tls", "net/rpc", "net/rpc/jsonrpc", "net/smtp", "net/textproto", "log/syslog":
 		if hasAnyPrefix(name, "Dial", "Listen") || name == "SendMail" {
 			return CapNetwork
+		}
+	case "net/http/httptest":
+		// The server constructors open a listening socket.
+		switch name {
+		case "NewServer", "NewTLSServer", "NewUnstartedServer":
+			return CapNetwork
+		}
+	case "net/http/httputil":
+		// A reverse proxy forwards each request it serves to its target.
+		if recv == "ReverseProxy" && name == "ServeHTTP" {
+			return CapNetwork
+		}
+	case "net/http/cgi":
+		// cgi.Handler runs Path as a child process for every request.
+		if recv == "Handler" && name == "ServeHTTP" {
+			return CapExec
 		}
 	case "reflect":
 		if recv == "Value" && (name == "Call" || name == "CallSlice") {
@@ -173,6 +196,18 @@ func ClassifyCallTarget(pkgPath, recv, name string) string {
 		}
 	}
 	return ""
+}
+
+// isFilesystemMutation reports whether an os function or os.Root method of
+// this name creates, writes, removes, renames or changes the metadata of a
+// file.
+func isFilesystemMutation(name string) bool {
+	switch name {
+	case "WriteFile", "Create", "OpenFile", "Remove", "RemoveAll", "Rename",
+		"Chmod", "Chown", "Lchown", "Truncate", "Symlink", "Link":
+		return true
+	}
+	return false
 }
 
 func hasAnyPrefix(s string, prefixes ...string) bool {

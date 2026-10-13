@@ -4,8 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"go/build"
+	"go/build/constraint"
 	"go/token"
 	"go/types"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -262,6 +265,41 @@ func loadPackagesFromSource(filename string, src string) ([]*packages.Package, e
 		return nil, fmt.Errorf("failed to execute loader: %w", err)
 	}
 
+	// A file the default build leaves out (a _test.go file, a GOOS/GOARCH
+	// name suffix, or a //go:build line that does not hold for this host) is
+	// in none of the loaded packages. Reload under a configuration that
+	// includes it.
+	if !packagesContain(initialPkgs, absFilename) && strings.HasSuffix(absFilename, "_test.go") {
+		cfg.Tests = true
+		if initialPkgs, err = packages.Load(cfg, "file="+absFilename); err != nil {
+			return nil, fmt.Errorf("failed to execute loader: %w", err)
+		}
+	}
+	if !packagesContain(initialPkgs, absFilename) {
+		goos, goarch, tags, ok := buildConfigFor(absFilename, src)
+		if !ok {
+			return nil, fmt.Errorf("%s is excluded by its build constraints for every known GOOS/GOARCH and tag combination", filename)
+		}
+		cfg.Env = append(GetHardenedEnv(), "GOOS="+goos, "GOARCH="+goarch)
+		if len(tags) > 0 {
+			cfg.BuildFlags = []string{"-tags=" + strings.Join(tags, ",")}
+		}
+		if initialPkgs, err = packages.Load(cfg, "file="+absFilename); err != nil {
+			return nil, fmt.Errorf("failed to execute loader: %w", err)
+		}
+	}
+	if cfg.Tests {
+		// Keep only the test variant that compiles this file, not the
+		// package itself or the synthesized test main.
+		var withFile []*packages.Package
+		for _, p := range initialPkgs {
+			if packagesContain([]*packages.Package{p}, absFilename) {
+				withFile = append(withFile, p)
+			}
+		}
+		initialPkgs = withFile
+	}
+
 	var errorMessages strings.Builder
 	packages.Visit(initialPkgs, nil, func(pkg *packages.Package) {
 		for _, e := range pkg.Errors {
@@ -274,6 +312,120 @@ func loadPackagesFromSource(filename string, src string) ([]*packages.Package, e
 	}
 
 	return initialPkgs, nil
+}
+
+// packagesContain reports whether any of pkgs compiles the file at absPath.
+func packagesContain(pkgs []*packages.Package, absPath string) bool {
+	for _, p := range pkgs {
+		for _, files := range [][]string{p.GoFiles, p.CompiledGoFiles} {
+			for _, f := range files {
+				if filepath.Clean(f) == absPath {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// knownPlatforms are GOOS/GOARCH pairs tried, after the host's own, when a
+// file's build constraints exclude it from the host build. All are valid
+// `go tool dist list` targets.
+var knownPlatforms = [][2]string{
+	{"linux", "amd64"}, {"linux", "arm64"}, {"linux", "386"}, {"linux", "arm"},
+	{"linux", "ppc64le"}, {"linux", "s390x"}, {"linux", "riscv64"}, {"linux", "loong64"},
+	{"linux", "mips64le"}, {"darwin", "arm64"}, {"darwin", "amd64"},
+	{"windows", "amd64"}, {"windows", "arm64"}, {"windows", "386"},
+	{"freebsd", "amd64"}, {"freebsd", "arm64"}, {"netbsd", "amd64"}, {"openbsd", "amd64"},
+	{"dragonfly", "amd64"}, {"solaris", "amd64"}, {"illumos", "amd64"}, {"aix", "ppc64"},
+	{"android", "arm64"}, {"ios", "arm64"}, {"js", "wasm"}, {"wasip1", "wasm"}, {"plan9", "amd64"},
+}
+
+// maxCustomTags bounds the tag subsets buildConfigFor tries (2^n).
+const maxCustomTags = 4
+
+// buildConfigFor finds a GOOS, GOARCH and set of custom build tags under
+// which the file's name suffix and //go:build line include it, using
+// go/build's own constraint matching on src. Cgo is assumed disabled, as
+// the loader runs with CGO_ENABLED=0.
+func buildConfigFor(absFilename, src string) (goos, goarch string, tags []string, ok bool) {
+	ctxt := build.Default
+	ctxt.CgoEnabled = false
+	ctxt.OpenFile = func(path string) (io.ReadCloser, error) {
+		if filepath.Clean(path) == absFilename {
+			return io.NopCloser(strings.NewReader(src)), nil
+		}
+		return os.Open(path)
+	}
+	custom := customBuildTags(src)
+	if len(custom) > maxCustomTags {
+		custom = custom[:maxCustomTags]
+	}
+	platforms := append([][2]string{{build.Default.GOOS, build.Default.GOARCH}}, knownPlatforms...)
+	dir, name := filepath.Dir(absFilename), filepath.Base(absFilename)
+	for _, p := range platforms {
+		for mask := 0; mask < 1<<len(custom); mask++ {
+			var set []string
+			for i, t := range custom {
+				if mask&(1<<i) != 0 {
+					set = append(set, t)
+				}
+			}
+			ctxt.GOOS, ctxt.GOARCH, ctxt.BuildTags = p[0], p[1], set
+			if match, err := ctxt.MatchFile(dir, name); err == nil && match {
+				return p[0], p[1], set, true
+			}
+		}
+	}
+	return "", "", nil, false
+}
+
+// customBuildTags returns, sorted, the tags in src's //go:build lines that
+// are not platform, toolchain or release tags and so must be supplied with
+// -tags.
+func customBuildTags(src string) []string {
+	platform := map[string]bool{"unix": true, "cgo": true, "gc": true, "gccgo": true}
+	for _, p := range knownPlatforms {
+		platform[p[0]], platform[p[1]] = true, true
+	}
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(src, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "package ") {
+			break
+		}
+		if !constraint.IsGoBuild(line) {
+			continue
+		}
+		expr, err := constraint.Parse(line)
+		if err != nil {
+			continue
+		}
+		var walk func(constraint.Expr)
+		walk = func(e constraint.Expr) {
+			switch e := e.(type) {
+			case *constraint.TagExpr:
+				if !platform[e.Tag] && !strings.HasPrefix(e.Tag, "go1.") && !strings.HasPrefix(e.Tag, "goexperiment.") {
+					seen[e.Tag] = true
+				}
+			case *constraint.NotExpr:
+				walk(e.X)
+			case *constraint.AndExpr:
+				walk(e.X)
+				walk(e.Y)
+			case *constraint.OrExpr:
+				walk(e.X)
+				walk(e.Y)
+			}
+		}
+		walk(expr)
+	}
+	tags := make([]string, 0, len(seen))
+	for t := range seen {
+		tags = append(tags, t)
+	}
+	sort.Strings(tags)
+	return tags
 }
 
 func FingerprintPackages(initialPkgs []*packages.Package, policy ir.LiteralPolicy, strictMode bool) ([]FingerprintResult, error) {

