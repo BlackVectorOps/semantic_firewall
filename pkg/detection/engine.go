@@ -210,7 +210,7 @@ func IndexFunction(topo *topology.FunctionTopology, name, description, severity,
 			RequiredCalls:  requiredCalls,
 			StringPatterns: ExtractStringPatterns(topo.StringLiterals),
 			ControlFlow: &ControlFlowHints{
-				HasInfiniteLoop:   topo.LoopCount > 0 && !topo.HasRange,
+				HasInfiniteLoop:   topo.HasInfiniteLoop,
 				HasReconnectLogic: HasReconnectLogic(topo),
 			},
 		},

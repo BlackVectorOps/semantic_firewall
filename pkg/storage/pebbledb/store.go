@@ -11,8 +11,6 @@ import (
 	"io"
 	"math"
 	"os"
-	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -20,6 +18,7 @@ import (
 
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/topology"
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/storage/pathguard"
 	"github.com/cockroachdb/pebble"
 )
 
@@ -82,25 +81,15 @@ func DefaultPebbleScannerOptions() PebbleScannerOptions {
 // It includes retry logic to handle transient file locks common in containerized environments.
 func NewPebbleScanner(dbPath string, opts PebbleScannerOptions) (*PebbleScanner, error) {
 	// 1. Path Sanitization
-	// We prevent the engine from initializing in sensitive system roots.
-	// This captures cases where a misconfigured env var points the DB to /etc or /root.
-	absPath, err := filepath.EvalSymlinks(dbPath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("failed to resolve absolute path for db: %w", err)
-		}
-		absPath, _ = filepath.Abs(dbPath)
-	}
-	// Restricts database writes to non critical directories. Creating or
-	// writing a database in a system root could let an attacker overwrite
-	// binaries or configuration if the process runs with elevated privileges.
-	// Read-only opens are exempt: reading a shared database from a system
-	// location (/usr/local/share/sfw) is the documented install layout.
-	if runtime.GOOS == "linux" && !opts.ReadOnly {
-		if dir := sensitiveSystemDir(absPath); dir != "" {
-			return nil, fmt.Errorf("security violation: refusing to write a database under system directory %s (%q)", dir, absPath)
+	// Restricts database writes to non critical directories. Read-only opens
+	// are exempt: reading a shared database from a system location is a
+	// supported install layout.
+	if !opts.ReadOnly {
+		if err := pathguard.CheckWritable(dbPath); err != nil {
+			return nil, err
 		}
 	}
+	var err error
 
 	if opts.MatchThreshold == 0 {
 		opts.MatchThreshold = 0.75
@@ -189,26 +178,6 @@ func NewPebbleScanner(dbPath string, opts PebbleScannerOptions) (*PebbleScanner,
 	}
 
 	return scanner, nil
-}
-
-// sensitiveSystemDirs are the Linux roots a writable database may not live
-// under. Matching is by whole path component, so /etc does not cover
-// /etcd-data, and /usr/local (where administrators install shared data) is
-// allowed.
-var sensitiveSystemDirs = []string{"/etc", "/usr", "/bin", "/sbin", "/boot", "/lib", "/lib32", "/lib64", "/proc", "/sys", "/dev"}
-
-// sensitiveSystemDir returns the system root containing path, or "".
-func sensitiveSystemDir(path string) string {
-	path = filepath.Clean(path)
-	if path == "/usr/local" || strings.HasPrefix(path, "/usr/local/") {
-		return ""
-	}
-	for _, dir := range sensitiveSystemDirs {
-		if path == dir || strings.HasPrefix(path, dir+"/") {
-			return dir
-		}
-	}
-	return ""
 }
 
 func (s *PebbleScanner) Close() error {
@@ -945,6 +914,10 @@ func (s *PebbleScanner) MigrateFromJSON(jsonPath string) (int, error) {
 }
 
 func (s *PebbleScanner) ExportToJSON(jsonPath string) error {
+	if err := pathguard.CheckWritable(jsonPath); err != nil {
+		return err
+	}
+
 	var sigs []detection.Signature
 
 	upper := incrementLastByte(prefixSignatures)
@@ -972,14 +945,12 @@ func (s *PebbleScanner) ExportToJSON(jsonPath string) error {
 		sigs = append(sigs, sig)
 	}
 
-	export := struct {
-		Version    string                `json:"version"`
-		Generated  time.Time             `json:"generated_at"`
-		Signatures []detection.Signature `json:"signatures"`
-	}{
-		Version:    "2.1 (Pebble/Gob+PackedIdx)",
-		Generated:  time.Now(),
-		Signatures: sigs,
+	// Write the JSON backend's own format so the export can be opened with
+	// --db <file>.json as well as re-imported with sfw migrate.
+	export := detection.SignatureDatabase{
+		Version:     "2.1 (Pebble/Gob+PackedIdx)",
+		Description: "Exported from PebbleDB at " + time.Now().UTC().Format(time.RFC3339),
+		Signatures:  sigs,
 	}
 
 	data, err := json.MarshalIndent(export, "", "  ")

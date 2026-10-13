@@ -264,3 +264,84 @@ func TestTopologySimilarity_Variant(t *testing.T) {
 		t.Errorf("Similarity score too low: %f. Dice coefficient logic failed.", score)
 	}
 }
+
+// HasInfiniteLoop is set only by a condition-less `for` in the function's
+// own body: bounded, conditional and range loops do not set it, and a
+// closure's loop belongs to the closure.
+func TestExtractTopology_HasInfiniteLoop(t *testing.T) {
+	src := `package main
+
+import "time"
+
+func Forever() {
+	for {
+		time.Sleep(time.Second)
+	}
+}
+
+func ForeverWithExit(done chan bool) {
+	for i := 0; ; i++ {
+		select {
+		case <-done:
+			return
+		default:
+		}
+	}
+}
+
+func Bounded() int {
+	n := 0
+	for i := 0; i < 10; i++ {
+		n += i
+	}
+	return n
+}
+
+func Conditional(ok func() bool) {
+	for ok() {
+	}
+}
+
+func Ranged(xs []int) int {
+	n := 0
+	for _, x := range xs {
+		n += x
+	}
+	return n
+}
+
+func Outer() func() {
+	return func() {
+		for {
+		}
+	}
+}
+
+func main() {}
+`
+	cases := map[string]bool{
+		"Forever":         true,
+		"ForeverWithExit": true,
+		"Bounded":         false,
+		"Conditional":     false,
+		"Ranged":          false,
+		"Outer":           false,
+	}
+	for name, want := range cases {
+		topo := topology.ExtractTopology(testutil.CompileAndGetFunction(t, src, name))
+		if topo == nil {
+			t.Fatalf("%s: ExtractTopology returned nil", name)
+		}
+		if topo.HasInfiniteLoop != want {
+			t.Errorf("%s: HasInfiniteLoop = %v; want %v", name, topo.HasInfiniteLoop, want)
+		}
+	}
+
+	outer := testutil.CompileAndGetFunction(t, src, "Outer")
+	if len(outer.AnonFuncs) != 1 {
+		t.Fatalf("Outer has %d closures; want 1", len(outer.AnonFuncs))
+	}
+	if topo := topology.ExtractTopology(outer.AnonFuncs[0]); topo == nil || !topo.HasInfiniteLoop {
+		t.Errorf("Outer$1: HasInfiniteLoop = false; want true")
+	}
+}

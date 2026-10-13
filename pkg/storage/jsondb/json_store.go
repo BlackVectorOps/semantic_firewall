@@ -14,6 +14,7 @@ import (
 
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/topology"
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/storage/pathguard"
 )
 
 const (
@@ -143,6 +144,10 @@ func (s *Scanner) SaveDatabase(path string) error {
 
 	cleanPath := filepath.Clean(path)
 	dir := filepath.Dir(cleanPath)
+
+	if err := pathguard.CheckWritable(cleanPath); err != nil {
+		return err
+	}
 
 	// Ensure directory exists and is writable
 	if _, err := os.Stat(dir); err != nil {

@@ -2,11 +2,13 @@ package pebbledb_test
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/storage/jsondb"
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/storage/pebbledb"
 )
 
@@ -249,5 +251,45 @@ func TestPebbleScanner_MetadataPersistence(t *testing.T) {
 	// Verify LastUpdatedAt changed (should be > created1)
 	if !meta2.LastUpdatedAt.After(created1) {
 		t.Errorf("LastUpdatedAt should be updated. Got %v", meta2.LastUpdatedAt)
+	}
+}
+
+// An export must be readable by both consumers of JSON signature files: the
+// JSON backend (--db <file>.json), which rejects unknown fields, and
+// MigrateFromJSON.
+func TestPebbleScanner_ExportToJSONRoundTrip(t *testing.T) {
+	s, err := pebbledb.NewPebbleScanner(t.TempDir(), pebbledb.DefaultPebbleScannerOptions())
+	if err != nil {
+		t.Fatalf("NewPebbleScanner failed: %v", err)
+	}
+	defer s.Close()
+	for _, id := range []string{"SIG-1", "SIG-2"} {
+		sig := detection.Signature{ID: id, Name: "N-" + id, TopologyHash: "H-" + id, EntropyScore: 3.5}
+		if err := s.AddSignature(&sig); err != nil {
+			t.Fatalf("AddSignature(%s) failed: %v", id, err)
+		}
+	}
+
+	exportPath := filepath.Join(t.TempDir(), "export.json")
+	if err := s.ExportToJSON(exportPath); err != nil {
+		t.Fatalf("ExportToJSON failed: %v", err)
+	}
+
+	js := jsondb.NewScanner()
+	if err := js.LoadDatabase(exportPath); err != nil {
+		t.Fatalf("JSON backend rejected the export: %v", err)
+	}
+	if got, err := js.GetSignature("SIG-2"); err != nil || got.Name != "N-SIG-2" {
+		t.Errorf("JSON backend GetSignature(SIG-2) = %+v, %v", got, err)
+	}
+
+	m, err := pebbledb.NewPebbleScanner(t.TempDir(), pebbledb.DefaultPebbleScannerOptions())
+	if err != nil {
+		t.Fatalf("NewPebbleScanner failed: %v", err)
+	}
+	defer m.Close()
+	n, err := m.MigrateFromJSON(exportPath)
+	if err != nil || n != 2 {
+		t.Fatalf("MigrateFromJSON = %d, %v; want 2, nil", n, err)
 	}
 }

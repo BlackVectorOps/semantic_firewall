@@ -406,7 +406,7 @@ How each field is derived (`detection.IndexFunction`):
 | `loop_depth` | `LoopCount` (the number of loops, not nesting depth) |
 | `required_calls` | every `CallSignatures` key, sorted |
 | `string_patterns` | every string literal of 3 or more characters |
-| `control_flow.has_infinite_loop` | `LoopCount > 0 && !HasRange` |
+| `control_flow.has_infinite_loop` | `HasInfiniteLoop`: a `for` statement without a condition (`for { ... }`) in the function's own body |
 | `control_flow.has_reconnect_logic` | some call contains `net.Dial`, some call contains `time.Sleep`, and `LoopCount > 0` |
 
 `optional_calls` and `control_flow` are stored but not read by matching.
@@ -521,7 +521,13 @@ Concurrency:
 - Scans read from a snapshot.
 - Pebble locks the directory, so a second process cannot open the database, even with `ReadOnly: true`.
 
-On Linux, a writable open refuses paths inside `/etc`, `/usr` (except `/usr/local`), `/bin`, `/sbin`, `/boot`, `/lib`, `/lib32`, `/lib64`, `/proc`, `/sys` and `/dev`. Read-only opens are not checked, and the JSON backend has no such check.
+Every database write goes through `pkg/storage/pathguard`: PebbleDB writable opens, JSON backend saves and `ExportToJSON`. It refuses a path inside a system directory, checking both the path as written and the path after resolving symlinks in its longest existing prefix. A file that does not exist yet therefore cannot reach a system directory through a symlinked parent. The protected directories are:
+
+- **Unix-like systems:** `/etc`, `/usr` (except `/usr/local`), `/bin`, `/sbin`, `/boot`, `/lib`, `/lib32`, `/lib64`, `/proc`, `/sys` and `/dev`.
+- **macOS:** the same list plus `/private/etc` and `/System`.
+- **Windows:** `%SystemRoot%`.
+
+Read-only opens are not checked.
 
 ### stats and migrate
 
@@ -543,7 +549,7 @@ sfw stats --db signatures.db
 
 `stats` counts every key under each index prefix, so its cost is linear in the number of signatures.
 
-`sfw migrate --from signatures.json --to signatures.db` streams the JSON file's `signatures` array into PebbleDB in batches of 1000. `PebbleScanner.ExportToJSON` writes a file that `migrate` can read back; the JSON backend rejects that file because of its extra `generated_at` field.
+`sfw migrate --from signatures.json --to signatures.db` streams the JSON file's `signatures` array into PebbleDB in batches of 1000. `PebbleScanner.ExportToJSON` writes the JSON backend's own format (`version`, `description`, `signatures`), so its output can be opened with `--db <file>.json` or imported with `migrate`.
 
 ### API
 
@@ -714,6 +720,7 @@ Two instructions are equivalent when all of the following hold:
 | `BinOpCounts`, `UnOpCounts`, `InstrCounts` | operator and instruction-type histograms |
 | `HasDefer`, `HasPanic`, `HasGo`, `HasSelect` | control-flow flags |
 | `HasRange` | true only for `range` over a map or string |
+| `HasInfiniteLoop` | a `for` statement without a condition in the function's own body (closures excluded) |
 | `HasRecover` | true only when the function itself defers and calls `recover` directly |
 | `StringLiterals` | see [Entropy](#entropy) |
 | `EntropyScore`, `EntropyProfile` | see [Entropy](#entropy) |
@@ -840,8 +847,8 @@ The OCI spec sets:
 | `RLIMIT_NOFILE` | 1024 |
 | Namespaces | pid, network, ipc, uts, mount, user |
 | Resources | memory 512 MiB, CPU shares 1024, pids 64 |
-| Environment | `GOPROXY=off`, `GOPATH=/tmp/gopath`, `HOME=/tmp`, `GOCACHE=/gocache` |
-| Read-only mounts | the `sfw` binary, system library directories, `GOROOT`, `GOCACHE`, the working directory, the inputs, and each input's `go.mod`/`.git` root |
+| Environment | `GOPROXY=off`, `GOPATH=/tmp/gopath`, `HOME=/tmp`, `GOCACHE=/tmp/gocache`, `GOMODCACHE=/gomodcache` |
+| Read-only mounts | the `sfw` binary, system library directories, `GOROOT`, the host module cache at `/gomodcache`, the working directory, the inputs, and each input's `go.mod`/`.git` root |
 | Writable mounts | `/tmp` and `/dev` (tmpfs) |
 
 Limitations:
@@ -874,7 +881,7 @@ The Action does the following before running `sfw`:
 - installs `runsc` release `20260126.0` and checks its SHA-512;
 - relaxes the AppArmor user-namespace restriction for it.
 
-`diff` and `audit` analyze every `.go` file changed between a base and `HEAD`, and ignore `path`. The base is `origin/<base branch>` for a pull request, the `before` commit for a push, and `HEAD~1` otherwise.
+`diff` and `audit` analyze every `.go` file changed between a base and `HEAD`, and ignore `path`. The base is `origin/<base branch>` for a pull request, the `before` commit for a push, and `HEAD~1` otherwise. In `diff` mode the job fails if `sfw diff` fails on any changed file.
 
 | Input | Default | Purpose |
 |-------|---------|---------|

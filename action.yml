@@ -340,6 +340,12 @@ runs:
                 AVG_PCT="100.0"
               fi
               echo "semantic-match-pct=${AVG_PCT}" >> "$GITHUB_OUTPUT"
+
+              # A file that could not be analyzed is not a passing file.
+              if [[ $ERROR_COUNT -gt 0 ]]; then
+                echo "::error::sfw diff failed for ${ERROR_COUNT} file(s)"
+                EXIT_CODE=1
+              fi
             fi
             ;;
 

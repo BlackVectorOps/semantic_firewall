@@ -162,8 +162,8 @@ func prepareMountPoints(rootfs string, mounts []Mount) error {
 	return nil
 }
 
-// Detects GOROOT, GOCACHE, and GOMODCACHE from the host.
-func resolveGoToolchain(ctx context.Context) (goroot, gocache string) {
+// Detects GOROOT and GOMODCACHE from the host.
+func resolveGoToolchain(ctx context.Context) (goroot, gomodcache string) {
 	getEnv := func(key string) string {
 		if val := os.Getenv(key); val != "" {
 			return val
@@ -176,14 +176,14 @@ func resolveGoToolchain(ctx context.Context) (goroot, gocache string) {
 		}
 		return ""
 	}
-	return getEnv("GOROOT"), getEnv("GOCACHE")
+	return getEnv("GOROOT"), getEnv("GOMODCACHE")
 }
 
 func generateSpec(ctx context.Context, cfg Config, selfExe string) (*Spec, error) {
 	libPaths := []string{"/lib", "/usr/lib", "/lib64", "/bin", "/usr/bin", "/usr/include", "/usr/local/include"}
 
 	// Detect Toolchain Paths
-	goroot, gocache := resolveGoToolchain(ctx)
+	goroot, gomodcache := resolveGoToolchain(ctx)
 
 	// Dynamically build PATH to include discovered GOROOT
 	sandboxPath := "/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -210,26 +210,28 @@ func generateSpec(ctx context.Context, cfg Config, selfExe string) (*Spec, error
 		}
 	}
 
-	// Mount GOCACHE (Read-Only) to allow reuse of build artifacts
-	envCaches := []string{}
-	if gocache != "" {
-		if _, err := os.Stat(gocache); err == nil {
-			// Mount to /gocache to avoid /tmp overlay issues
-			mounts = append(mounts, Mount{Destination: "/gocache", Type: "bind", Source: gocache, Options: []string{"ro", "rbind"}})
-			envCaches = append(envCaches, "GOCACHE=/gocache")
+	// The build cache must be writable: `go list` stores its results there
+	// and fails if it cannot, and Go has no read-only cache mode. Use a fresh
+	// cache on the tmpfs; package loading compiles nothing, so it stays small.
+	envCaches := []string{"GOCACHE=/tmp/gocache"}
+
+	// Mount the module cache (Read-Only). The loader runs with GOPROXY=off,
+	// so without it no package importing a third-party module can load.
+	if gomodcache != "" {
+		if _, err := os.Stat(gomodcache); err == nil {
+			mounts = append(mounts, Mount{Destination: "/gomodcache", Type: "bind", Source: gomodcache, Options: []string{"ro", "rbind"}})
+			envCaches = append(envCaches, "GOMODCACHE=/gomodcache")
 		}
-	} else {
-		envCaches = append(envCaches, "GOCACHE=/tmp/gocache")
 	}
 
 	// Define Reserved Paths to prevent shadowing critical sandbox infrastructure via user input.
 	reservedPaths := map[string]bool{
-		"/app/sfw": true,
-		"/proc":    true,
-		"/sys":     true,
-		"/dev":     true,
-		"/tmp":     true,
-		"/gocache": true,
+		"/app/sfw":    true,
+		"/proc":       true,
+		"/sys":        true,
+		"/dev":        true,
+		"/tmp":        true,
+		"/gomodcache": true,
 	}
 
 	// Bind User Inputs
