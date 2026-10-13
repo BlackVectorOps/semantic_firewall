@@ -257,131 +257,107 @@ func RunScanParallel(fsys FileSystem, files []string, scanner SignatureScanner, 
 }
 
 func RunScanDeps(pkgLoader PackageLoader, target string, opts models.ScanOptions, scanner SignatureScanner) ([]detection.ScanResult, int, []string, error) {
-	pkgs, err := loadPackagesWithDeps(pkgLoader, target, opts.DepsDepth == "transitive")
+	roots, err := loadPackagesWithDeps(pkgLoader, target)
 	if err != nil {
 		return nil, 0, nil, err
 	}
 
-	// Identify root module to filter internal packages from being flagged as deps
-	var rootModule string
-	if len(pkgs) > 0 && pkgs[0].Module != nil {
-		rootModule = pkgs[0].Module.Path
-	}
-
-	depPkgs := make(map[string]*packages.Package)
-	visited := make(map[string]bool)
-	for _, pkg := range pkgs {
-		collectDependencies(pkg, depPkgs, opts.DepsDepth == "transitive", visited, rootModule)
-	}
-
-	if len(depPkgs) == 0 {
+	deps := selectDependencies(roots, opts.DepsDepth == "transitive")
+	if len(deps) == 0 {
 		return nil, 0, []string{}, nil
 	}
 
-	var pkgKeys []string
-	for k := range depPkgs {
-		pkgKeys = append(pkgKeys, k)
-	}
-	sort.Strings(pkgKeys)
-
-	var depSlice []*packages.Package
-	for _, k := range pkgKeys {
-		depSlice = append(depSlice, depPkgs[k])
+	// One SSA program spans the whole import graph so cross-package calls
+	// resolve; only the dependencies being scanned have their bodies built.
+	var prog *ssa.Program
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "warning: panic during SSA construction: %v\n", r)
+			}
+		}()
+		prog, _ = ssautil.AllPackages(roots, ssa.InstantiateGenerics)
+	}()
+	if prog == nil {
+		return nil, 0, nil, fmt.Errorf("failed to construct SSA for dependencies of %s", target)
 	}
 
 	var (
 		allAlerts      []detection.ScanResult
 		totalFunctions int
-		scannedDeps    []string
-		mu             sync.Mutex
+		scannedDeps    = []string{}
 	)
-
-	const batchSize = 50
-	for batchStart := 0; batchStart < len(depSlice); batchStart += batchSize {
-		batchEnd := batchStart + batchSize
-		if batchEnd > len(depSlice) {
-			batchEnd = len(depSlice)
-		}
-		batch := depSlice[batchStart:batchEnd]
-
-		// Guard SSA construction
-		var prog *ssa.Program
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					fmt.Fprintf(os.Stderr, "warning: panic during SSA build: %v\n", r)
-				}
-			}()
-			var ssaPkgs []*ssa.Package
-			prog, ssaPkgs = ssautil.AllPackages(batch, ssa.InstantiateGenerics)
-			if prog == nil || len(ssaPkgs) == 0 {
-				fmt.Fprintf(os.Stderr, "warning: failed to build SSA for batch\n")
-			} else {
-				prog.Build()
-			}
-		}()
-
-		if prog == nil {
+	for _, pkg := range deps {
+		ssaPkg := prog.Package(pkg.Types)
+		if ssaPkg == nil {
+			fmt.Fprintf(os.Stderr, "warning: skipping dependency %s: package did not type-check\n", pkg.PkgPath)
 			continue
 		}
+		if !buildPackage(ssaPkg) {
+			continue
+		}
+		scannedDeps = append(scannedDeps, pkg.PkgPath)
 
-		for _, pkg := range batch {
-			pkgPath := pkg.PkgPath
-			mu.Lock()
-			scannedDeps = append(scannedDeps, pkgPath)
-			mu.Unlock()
+		for _, fn := range packageFunctions(prog, ssaPkg) {
+			totalFunctions++
+			allAlerts = append(allAlerts, scanFunction(fn, ShortFunctionName(fn.String()), scanner, opts.ExactOnly)...)
+		}
+	}
 
-			ssaPkg := prog.Package(pkg.Types)
-			if ssaPkg == nil {
-				continue
-			}
+	return allAlerts, totalFunctions, scannedDeps, nil
+}
 
-			for _, member := range ssaPkg.Members {
-				switch m := member.(type) {
-				case *ssa.Function:
-					if m == nil || len(m.Blocks) == 0 {
-						continue
-					}
-					funcName := ShortFunctionName(m.String())
-					alerts := scanFunction(m, funcName, scanner, opts.ExactOnly)
-					if len(alerts) > 0 {
-						mu.Lock()
-						allAlerts = append(allAlerts, alerts...)
-						mu.Unlock()
-					}
-					mu.Lock()
-					totalFunctions++
-					mu.Unlock()
-				case *ssa.Type:
-					if named, ok := m.Type().(*types.Named); ok {
-						for i := 0; i < named.NumMethods(); i++ {
-							method := named.Method(i)
-							fn := prog.FuncValue(method)
-							if fn == nil || len(fn.Blocks) == 0 {
-								continue
-							}
-							funcName := ShortFunctionName(fn.String())
-							alerts := scanFunction(fn, funcName, scanner, opts.ExactOnly)
-							if len(alerts) > 0 {
-								mu.Lock()
-								allAlerts = append(allAlerts, alerts...)
-								mu.Unlock()
-							}
-							mu.Lock()
-							totalFunctions++
-							mu.Unlock()
-						}
-					}
+func buildPackage(pkg *ssa.Package) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "warning: skipping dependency %s: panic during SSA build: %v\n", pkg.Pkg.Path(), r)
+			ok = false
+		}
+	}()
+	pkg.Build()
+	return true
+}
+
+// packageFunctions lists every function with a body that a dependency
+// contributes: package-level functions, methods of its named types, and,
+// recursively, the closures they contain -- including the synthetic bodies of
+// range-over-func loops. Ordered by name for deterministic output.
+func packageFunctions(prog *ssa.Program, pkg *ssa.Package) []*ssa.Function {
+	names := make([]string, 0, len(pkg.Members))
+	for name := range pkg.Members {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var fns []*ssa.Function
+	seen := make(map[*ssa.Function]bool)
+	var add func(fn *ssa.Function)
+	add = func(fn *ssa.Function) {
+		if fn == nil || seen[fn] {
+			return
+		}
+		seen[fn] = true
+		if len(fn.Blocks) > 0 {
+			fns = append(fns, fn)
+		}
+		for _, anon := range fn.AnonFuncs {
+			add(anon)
+		}
+	}
+
+	for _, name := range names {
+		switch m := pkg.Members[name].(type) {
+		case *ssa.Function:
+			add(m)
+		case *ssa.Type:
+			if named, ok := m.Type().(*types.Named); ok {
+				for i := 0; i < named.NumMethods(); i++ {
+					add(prog.FuncValue(named.Method(i)))
 				}
 			}
 		}
-
-		prog = nil
-		runtime.GC()
 	}
-
-	sort.Strings(scannedDeps)
-	return allAlerts, totalFunctions, scannedDeps, nil
+	return fns
 }
 
 func scanFunction(fn *ssa.Function, funcName string, scanner SignatureScanner, exactOnly bool) []detection.ScanResult {
@@ -390,20 +366,29 @@ func scanFunction(fn *ssa.Function, funcName string, scanner SignatureScanner, e
 		return nil
 	}
 	if exactOnly {
-		if alert, err := scanner.ScanTopologyExact(topo, funcName); err == nil && alert != nil {
+		alert, err := scanner.ScanTopologyExact(topo, funcName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: scanning %s: %v\n", funcName, err)
+			return nil
+		}
+		if alert != nil {
 			return []detection.ScanResult{*alert}
 		}
 		return nil
 	}
-	alerts, _ := scanner.ScanTopology(topo, funcName)
+	alerts, err := scanner.ScanTopology(topo, funcName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: scanning %s: %v\n", funcName, err)
+	}
 	return alerts
 }
 
-func loadPackagesWithDeps(pkgLoader PackageLoader, target string, transitive bool) ([]*packages.Package, error) {
-	mode := packages.NeedName | packages.NeedFiles | packages.NeedImports | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedModule
-	if transitive {
-		mode |= packages.NeedDeps
-	}
+// loadPackagesWithDeps loads the target with its full import graph. Without
+// NeedDeps, imported packages are placeholders with no types or syntax and
+// nothing in them can be scanned -- even for a "direct" scan.
+func loadPackagesWithDeps(pkgLoader PackageLoader, target string) ([]*packages.Package, error) {
+	mode := packages.NeedName | packages.NeedFiles | packages.NeedImports | packages.NeedDeps |
+		packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedModule
 
 	var dir string
 	var pattern string
@@ -433,32 +418,66 @@ func loadPackagesWithDeps(pkgLoader PackageLoader, target string, transitive boo
 	return pkgLoader.Load(cfg, pattern)
 }
 
-func collectDependencies(pkg *packages.Package, deps map[string]*packages.Package, transitive bool, visited map[string]bool, rootModule string) {
-	if pkg == nil || visited[pkg.PkgPath] {
-		return
+// selectDependencies returns the third-party packages to scan, sorted by
+// import path. Packages of the target's own module(s) are traversed but never
+// reported as dependencies, so an external package counts as a direct
+// dependency when any of the project's packages imports it -- not only the
+// root package. Transitive mode additionally follows dependencies' imports.
+// Standard library packages are skipped.
+func selectDependencies(roots []*packages.Package, transitive bool) []*packages.Package {
+	ownModules := make(map[string]bool)
+	for _, p := range roots {
+		if p.Module != nil {
+			ownModules[p.Module.Path] = true
+		}
 	}
-	visited[pkg.PkgPath] = true
-	for importPath, importPkg := range pkg.Imports {
-		// Filter: Standard Library
-		// If Module is nil, it's typically stdlib. Fallback to string check for safety.
-		if importPkg.Module == nil {
-			parts := strings.Split(importPath, "/")
-			if len(parts) > 0 && !strings.Contains(parts[0], ".") {
+
+	deps := make(map[string]*packages.Package)
+	visited := make(map[*packages.Package]bool)
+	var visit func(p *packages.Package)
+	visit = func(p *packages.Package) {
+		if visited[p] {
+			return
+		}
+		visited[p] = true
+		for _, imp := range p.Imports {
+			if isStdlibPackage(imp) {
 				continue
 			}
-		}
-
-		// Filter: Internal packages of the target project
-		if rootModule != "" && strings.HasPrefix(importPath, rootModule) {
-			continue
-		}
-
-		if _, ok := deps[importPath]; ok {
-			continue
-		}
-		deps[importPath] = importPkg
-		if transitive {
-			collectDependencies(importPkg, deps, transitive, visited, rootModule)
+			if imp.Module != nil && ownModules[imp.Module.Path] {
+				visit(imp)
+				continue
+			}
+			deps[imp.PkgPath] = imp
+			if transitive {
+				visit(imp)
+			}
 		}
 	}
+	for _, r := range roots {
+		visit(r)
+	}
+
+	paths := make([]string, 0, len(deps))
+	for path := range deps {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	out := make([]*packages.Package, 0, len(paths))
+	for _, path := range paths {
+		out = append(out, deps[path])
+	}
+	return out
+}
+
+// isStdlibPackage reports whether p belongs to the standard library: it has
+// no module and its first path element has no dot (third-party import paths
+// start with a domain). Std-vendored packages ("vendor/golang.org/x/...")
+// therefore count as standard library too.
+func isStdlibPackage(p *packages.Package) bool {
+	if p.Module != nil {
+		return false
+	}
+	first, _, _ := strings.Cut(p.PkgPath, "/")
+	return !strings.Contains(first, ".")
 }
