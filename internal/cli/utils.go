@@ -12,6 +12,7 @@ import (
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/api"
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff"
 	"golang.org/x/tools/go/packages"
+	"golang.org/x/tools/go/ssa"
 )
 
 // -- Real Implementations --
@@ -209,6 +210,17 @@ func LoadAndFingerprint(fsys FileSystem, filename string) ([]diff.FingerprintRes
 // import pkg/api directly.
 func ShortFunctionName(fullName string) string {
 	return api.ShortFunctionName(fullName)
+}
+
+// resultName is the reported name of a fingerprinted function; see
+// api.ResultName.
+func resultName(r diff.FingerprintResult) string {
+	return api.ResultName(r)
+}
+
+// ssaFunctionName is fn's package-relative name; see api.SSAFunctionName.
+func ssaFunctionName(fn *ssa.Function) string {
+	return api.SSAFunctionName(fn)
 }
 
 func IsJSON(path string) bool {

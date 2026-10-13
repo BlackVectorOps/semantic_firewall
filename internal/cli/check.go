@@ -231,7 +231,7 @@ func ProcessFile(fsys FileSystem, filename string, strictMode bool, scanner Sign
 			if fn != nil {
 				topo := topology.ExtractTopology(fn)
 				if topo != nil {
-					alerts, scanErr := scanner.ScanTopology(topo, ShortFunctionName(r.FunctionName))
+					alerts, scanErr := scanner.ScanTopology(topo, resultName(r))
 					if scanErr == nil {
 						output.ScanResults = append(output.ScanResults, alerts...)
 					} else {

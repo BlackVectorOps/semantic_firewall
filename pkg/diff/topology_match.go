@@ -1,10 +1,14 @@
 package diff
 
 import (
+	"go/types"
 	"sort"
+	"strconv"
 	"strings"
 
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/topology"
+	"golang.org/x/tools/go/ssa"
 )
 
 type TopologyMatch struct {
@@ -25,12 +29,10 @@ func MatchFunctionsByTopology(oldResults, newResults []FingerprintResult, thresh
 	newByName := make(map[string]FingerprintResult)
 
 	for _, r := range oldResults {
-		shortName := ShortFuncName(r.FunctionName)
-		oldByName[shortName] = r
+		oldByName[pairingName(r)] = r
 	}
 	for _, r := range newResults {
-		shortName := ShortFuncName(r.FunctionName)
-		newByName[shortName] = r
+		newByName[pairingName(r)] = r
 	}
 
 	matchedOld := make(map[string]bool)
@@ -41,38 +43,20 @@ func MatchFunctionsByTopology(oldResults, newResults []FingerprintResult, thresh
 	oldNames := sortedKeys(oldByName)
 	newNames := sortedKeys(newByName)
 
-	// Phase 1: Direct matches by Name
+	// Phase 1: Direct matches by Name. Closure names ("F$1", "F$2") only
+	// record creation order, which shifts when a closure is inserted, so
+	// closures are paired by content within their enclosing function instead.
 	for _, name := range oldNames {
-		oldR := oldByName[name]
+		if isClosureName(name) {
+			continue
+		}
 		if newR, ok := newByName[name]; ok {
-			oldFn := oldR.GetSSAFunction()
-			newFn := newR.GetSSAFunction()
-
-			var oldTopo, newTopo *topology.FunctionTopology
-			if oldFn != nil {
-				oldTopo = topology.ExtractTopology(oldFn)
-			}
-			if newFn != nil {
-				newTopo = topology.ExtractTopology(newFn)
-			}
-
-			sim := 1.0
-			if oldTopo != nil && newTopo != nil {
-				sim = topology.TopologySimilarity(oldTopo, newTopo)
-			}
-
-			matched = append(matched, TopologyMatch{
-				OldResult:   oldR,
-				NewResult:   newR,
-				OldTopology: oldTopo,
-				NewTopology: newTopo,
-				Similarity:  sim,
-				ByName:      true,
-			})
+			matched = append(matched, sameFunctionMatch(oldByName[name], newR))
 			matchedOld[name] = true
 			matchedNew[name] = true
 		}
 	}
+	matched = append(matched, matchClosures(oldByName, newByName, oldNames, newNames, matchedOld, matchedNew, threshold)...)
 
 	var unmatchedOld []FingerprintResult
 	var unmatchedNew []FingerprintResult
@@ -185,6 +169,236 @@ func MatchFunctionsByTopology(oldResults, newResults []FingerprintResult, thresh
 	}
 
 	return matched, addedFuncs, removedFuncs
+}
+
+// sameFunctionMatch pairs two versions of what is known to be the same
+// function.
+func sameFunctionMatch(oldR, newR FingerprintResult) TopologyMatch {
+	var oldTopo, newTopo *topology.FunctionTopology
+	if fn := oldR.GetSSAFunction(); fn != nil {
+		oldTopo = topology.ExtractTopology(fn)
+	}
+	if fn := newR.GetSSAFunction(); fn != nil {
+		newTopo = topology.ExtractTopology(fn)
+	}
+	sim := 1.0
+	if oldTopo != nil && newTopo != nil {
+		sim = topology.TopologySimilarity(oldTopo, newTopo)
+	}
+	return TopologyMatch{
+		OldResult:   oldR,
+		NewResult:   newR,
+		OldTopology: oldTopo,
+		NewTopology: newTopo,
+		Similarity:  sim,
+		ByName:      true,
+	}
+}
+
+// isClosureName reports whether a short function name names a closure:
+// one or more "$<n>" suffixes, as go/ssa numbers anonymous functions.
+func isClosureName(name string) bool {
+	_, ok := closureParent(name)
+	return ok
+}
+
+// closureParent returns the enclosing named function of a closure name
+// ("F" for "F$2" and "F$1$3").
+func closureParent(name string) (string, bool) {
+	i := strings.IndexByte(name, '$')
+	if i <= 0 {
+		return "", false
+	}
+	for _, part := range strings.Split(name[i+1:], "$") {
+		if part == "" {
+			return "", false
+		}
+		for _, c := range part {
+			if c < '0' || c > '9' {
+				return "", false
+			}
+		}
+	}
+	return name[:i], true
+}
+
+// matchClosures pairs the closures of each enclosing function, in four
+// passes: identical fingerprints with every literal kept (unchanged
+// closures, however their numbers shifted), identical default fingerprints
+// (closures that changed only a literal), topology similarity of at least
+// threshold, best first, and finally identical names for what remains.
+// Paired names are marked in matchedOld and matchedNew; unpaired closures
+// fall through to the global topology phase.
+func matchClosures(oldByName, newByName map[string]FingerprintResult, oldNames, newNames []string,
+	matchedOld, matchedNew map[string]bool, threshold float64) []TopologyMatch {
+
+	group := func(names []string) map[string][]string {
+		g := make(map[string][]string)
+		for _, n := range names {
+			if parent, ok := closureParent(n); ok {
+				g[parent] = append(g[parent], n)
+			}
+		}
+		return g
+	}
+	oldGroups, newGroups := group(oldNames), group(newNames)
+	parents := make([]string, 0, len(oldGroups))
+	for p := range oldGroups {
+		if _, ok := newGroups[p]; ok {
+			parents = append(parents, p)
+		}
+	}
+	sort.Strings(parents)
+
+	var out []TopologyMatch
+	pair := func(o, n string) {
+		out = append(out, sameFunctionMatch(oldByName[o], newByName[n]))
+		matchedOld[o] = true
+		matchedNew[n] = true
+	}
+
+	keepAll := make(map[*ssa.Function]string)
+	exact := func(r FingerprintResult) string {
+		fn := r.GetSSAFunction()
+		if fn == nil {
+			return ""
+		}
+		if fp, ok := keepAll[fn]; ok {
+			return fp
+		}
+		fp := GenerateFingerprint(fn, ir.KeepAllLiteralsPolicy, false).Fingerprint
+		keepAll[fn] = fp
+		return fp
+	}
+
+	for _, p := range parents {
+		olds, news := oldGroups[p], newGroups[p]
+
+		for _, fp := range []func(FingerprintResult) string{
+			exact,
+			func(r FingerprintResult) string { return r.Fingerprint },
+		} {
+			for _, o := range olds {
+				if matchedOld[o] {
+					continue
+				}
+				for _, n := range news {
+					if !matchedNew[n] && fp(oldByName[o]) != "" && fp(oldByName[o]) == fp(newByName[n]) {
+						pair(o, n)
+						break
+					}
+				}
+			}
+		}
+
+		type candidate struct {
+			o, n string
+			sim  float64
+		}
+		newTopos := make(map[string]*topology.FunctionTopology)
+		for _, n := range news {
+			if fn := newByName[n].GetSSAFunction(); fn != nil && !matchedNew[n] {
+				newTopos[n] = topology.ExtractTopology(fn)
+			}
+		}
+		var candidates []candidate
+		for _, o := range olds {
+			if matchedOld[o] {
+				continue
+			}
+			oldFn := oldByName[o].GetSSAFunction()
+			if oldFn == nil {
+				continue
+			}
+			oldTopo := topology.ExtractTopology(oldFn)
+			for _, n := range news {
+				newTopo := newTopos[n]
+				if matchedNew[n] || oldTopo == nil || newTopo == nil {
+					continue
+				}
+				if sim := topology.TopologySimilarity(oldTopo, newTopo); sim >= threshold {
+					candidates = append(candidates, candidate{o, n, sim})
+				}
+			}
+		}
+		sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].sim > candidates[j].sim })
+		for _, c := range candidates {
+			if !matchedOld[c.o] && !matchedNew[c.n] {
+				pair(c.o, c.n)
+			}
+		}
+
+		for _, o := range olds {
+			if !matchedOld[o] && !matchedNew[o] {
+				if _, ok := newByName[o]; ok {
+					pair(o, o)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// pairingName is the name two versions of a function are paired by: its
+// short name with each type parameter replaced by its position, so renaming
+// the type parameter of "(*List[T]).Push" to E does not unpair the method.
+func pairingName(r FingerprintResult) string {
+	name := ShortFuncName(r.FunctionName)
+	fn := r.GetSSAFunction()
+	if fn == nil || !strings.Contains(name, "[") {
+		return name
+	}
+	positions := make(map[string]string)
+	for f := fn; f != nil; f = f.Parent() {
+		for _, tps := range []*types.TypeParamList{f.Signature.RecvTypeParams(), f.Signature.TypeParams()} {
+			for i := 0; i < tps.Len(); i++ {
+				if n := tps.At(i).Obj().Name(); positions[n] == "" {
+					positions[n] = "#" + strconv.Itoa(len(positions))
+				}
+			}
+		}
+	}
+	if len(positions) == 0 {
+		return name
+	}
+	return replaceTypeParamWords(name, positions)
+}
+
+// replaceTypeParamWords replaces each unqualified identifier inside brackets
+// that is a key of positions. Type parameters appear only inside the
+// brackets of a receiver or function type.
+func replaceTypeParamWords(name string, positions map[string]string) string {
+	var sb strings.Builder
+	depth := 0
+	for i := 0; i < len(name); {
+		c := name[i]
+		switch {
+		case c == '[':
+			depth++
+		case c == ']':
+			depth--
+		case isIdentByte(c) && depth > 0:
+			j := i
+			for j < len(name) && isIdentByte(name[j]) {
+				j++
+			}
+			word := name[i:j]
+			qualified := (i > 0 && name[i-1] == '.') || (j < len(name) && name[j] == '.')
+			if pos, ok := positions[word]; ok && !qualified {
+				word = pos
+			}
+			sb.WriteString(word)
+			i = j
+			continue
+		}
+		sb.WriteByte(c)
+		i++
+	}
+	return sb.String()
+}
+
+func isIdentByte(c byte) bool {
+	return c == '_' || c >= 0x80 || ('0' <= c && c <= '9') || ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z')
 }
 
 func sortedKeys(m map[string]FingerprintResult) []string {

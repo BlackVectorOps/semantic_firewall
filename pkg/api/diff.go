@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -55,7 +56,11 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 		if err != nil {
 			absPath = path
 		}
-		return diff.FingerprintSource(absPath, string(content), ir.DefaultLiteralPolicy)
+		results, err := diff.FingerprintSource(absPath, string(content), ir.DefaultLiteralPolicy)
+		if err != nil {
+			return nil, err
+		}
+		return inFile(results, absPath), nil
 	}
 
 	oldResults, err := processFile(oldPath)
@@ -76,8 +81,8 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 	preserved, modified, renamed, highRisk := 0, 0, 0, 0
 
 	for _, m := range matched {
-		oldShort := ShortFunctionName(m.OldResult.FunctionName)
-		newShort := ShortFunctionName(m.NewResult.FunctionName)
+		oldShort := ResultName(m.OldResult)
+		newShort := ResultName(m.NewResult)
 
 		d := CompareFunctions(oldShort, m.OldResult, m.NewResult)
 
@@ -102,6 +107,11 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 			d.Function = fmt.Sprintf("%s → %s", oldShort, newShort)
 			d.Status = models.StatusRenamed
 			renamed++
+		} else if oldShort != newShort {
+			// Paired as the same function under a different name: a closure
+			// whose creation number shifted ("F$1" -> "F$2") or a method whose
+			// type parameter was renamed. It keeps its status.
+			d.Function = fmt.Sprintf("%s → %s", oldShort, newShort)
 		}
 
 		functionDiffs = append(functionDiffs, d)
@@ -152,7 +162,7 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 		}
 
 		functionDiffs = append(functionDiffs, models.FunctionDiff{
-			Function:       ShortFunctionName(r.FunctionName),
+			Function:       ResultName(r),
 			Status:         models.StatusAdded,
 			NewFingerprint: r.Fingerprint,
 			RiskScore:      risk,
@@ -162,7 +172,7 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 
 	for _, r := range removedFuncs {
 		d := models.FunctionDiff{
-			Function:       ShortFunctionName(r.FunctionName),
+			Function:       ResultName(r),
 			Status:         models.StatusRemoved,
 			OldFingerprint: r.Fingerprint,
 		}
@@ -219,9 +229,10 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 // FunctionDiff. A function is preserved only when its canonical IR is
 // unchanged with every literal kept: the default fingerprint masks strings
 // and larger integers, so on its own it would report a changed URL, command,
-// size limit or permission mode as preserved. Otherwise the Zipper computes
-// the structural delta, falling back to "modified" if SSA reconstruction
-// fails.
+// size limit or permission mode as preserved. Any other function is
+// modified; the Zipper only supplies the instruction-level evidence. Its
+// alignment is driven by data flow, so it must not decide the status: a
+// swapped branch or a call moved out of its guard aligns completely.
 func CompareFunctions(funcName string, oldResult, newResult diff.FingerprintResult) models.FunctionDiff {
 	d := models.FunctionDiff{
 		Function:         funcName,
@@ -258,13 +269,7 @@ func CompareFunctions(funcName string, oldResult, newResult diff.FingerprintResu
 	d.MatchedNodes = artifacts.MatchedNodes
 	d.AddedOps = artifacts.Added
 	d.RemovedOps = artifacts.Removed
-
-	if artifacts.Preserved {
-		d.Status = models.StatusPreserved
-	} else {
-		d.Status = models.StatusModified
-	}
-
+	d.Status = models.StatusModified
 	return d
 }
 
@@ -273,4 +278,31 @@ func CompareFunctions(funcName string, oldResult, newResult diff.FingerprintResu
 func literalsUnchanged(oldFn, newFn *ssa.Function) bool {
 	return diff.GenerateFingerprint(oldFn, ir.KeepAllLiteralsPolicy, false).Fingerprint ==
 		diff.GenerateFingerprint(newFn, ir.KeepAllLiteralsPolicy, false).Fingerprint
+}
+
+// inFile keeps the functions declared in the file at path. The loader
+// returns every function of the file's package; a diff of one file must not
+// report its siblings' changes. Functions without a source file (the
+// synthesized package initializer, which runs every file's package-level
+// initializers) are kept so a payload in a package-level variable is never
+// hidden.
+func inFile(results []diff.FingerprintResult, path string) []diff.FingerprintResult {
+	want := filepath.Clean(path)
+	if resolved, err := filepath.EvalSymlinks(want); err == nil {
+		want = resolved
+	}
+	kept := results[:0:0]
+	for _, r := range results {
+		file := r.Filename
+		if file != "" {
+			file = filepath.Clean(file)
+			if resolved, err := filepath.EvalSymlinks(file); err == nil {
+				file = resolved
+			}
+		}
+		if file == "" || file == want {
+			kept = append(kept, r)
+		}
+	}
+	return kept
 }

@@ -104,7 +104,7 @@ func RunIndexPebble(target string, results []diff.FingerprintResult, name, sever
 		}
 
 		processedCount++
-		funcName := ShortFunctionName(result.FunctionName)
+		funcName := resultName(result)
 		sigName := fmt.Sprintf("%s_%s", name, funcName)
 		desc := fmt.Sprintf("Function %s from %s", funcName, filepath.Base(result.Filename))
 
@@ -156,7 +156,7 @@ func RunIndexJSON(target string, results []diff.FingerprintResult, name, severit
 			continue
 		}
 
-		funcName := ShortFunctionName(result.FunctionName)
+		funcName := resultName(result)
 		sigName := fmt.Sprintf("%s_%s", name, funcName)
 		desc := fmt.Sprintf("Function %s from %s", funcName, filepath.Base(result.Filename))
 

@@ -89,6 +89,10 @@ type Canonicalizer struct {
 	// package carry their import path.
 	ownPkg *types.Package
 
+	// tparams renders the type parameters in scope in the function being
+	// canonicalized by position, so renaming one does not change its form.
+	tparams *TypeParamRenamer
+
 	// selectCasePerm and selectRecvPerm map a Select's original case index
 	// (and receive-case ordinal) to its position in the sorted rendering, so
 	// the comparisons and extracts that bind each case to its body follow the
@@ -192,6 +196,7 @@ func (c *Canonicalizer) setOwnPackage(fn *ssa.Function) {
 	if fn.Pkg != nil {
 		c.ownPkg = fn.Pkg.Pkg
 	}
+	c.tparams = NewTypeParamRenamer(fn)
 }
 
 // qualifier renders the canonicalized function's own package unqualified and
@@ -636,6 +641,7 @@ func (c *Canonicalizer) resetScratch() {
 
 	c.effectiveInstrs = nil
 	c.ownPkg = nil
+	c.tparams = nil
 	for k := range c.selectCasePerm {
 		delete(c.selectCasePerm, k)
 	}
@@ -1035,9 +1041,9 @@ func (c *Canonicalizer) processInstruction(instr ssa.Instruction) {
 			c.scratch.WriteString("]")
 		}
 	case *ssa.FieldAddr:
-		c.scratch.WriteString(fmt.Sprintf("FieldAddr %s, field(%d)", c.NormalizeOperand(i.X, instr), i.Field))
+		c.scratch.WriteString(fmt.Sprintf("FieldAddr %s, field(%s)", c.NormalizeOperand(i.X, instr), FieldName(i.X, i.Field)))
 	case *ssa.Field:
-		c.scratch.WriteString(fmt.Sprintf("Field %s, field(%d)", c.NormalizeOperand(i.X, instr), i.Field))
+		c.scratch.WriteString(fmt.Sprintf("Field %s, field(%s)", c.NormalizeOperand(i.X, instr), FieldName(i.X, i.Field)))
 	case *ssa.Send:
 		c.scratch.WriteString(fmt.Sprintf("Send %s, %s", c.NormalizeOperand(i.Chan, instr), c.NormalizeOperand(i.X, instr)))
 	case *ssa.MakeChan:
@@ -1371,7 +1377,7 @@ func (c *Canonicalizer) NormalizeOperand(v ssa.Value, context ssa.Instruction) s
 		// alone made same-named, same-signature functions from different
 		// packages (crypto/rand.Read vs math/rand.Read) or receivers
 		// indistinguishable.
-		return fmt.Sprintf("<func_ref:%s:%s>", operand.RelString(c.ownPkg), c.sanitizeType(operand.Signature))
+		return fmt.Sprintf("<func_ref:%s:%s>", c.tparams.FuncName(operand, c.ownPkg), c.sanitizeType(operand.Signature))
 	default:
 		return c.normalizeValue(v)
 	}
@@ -1384,8 +1390,25 @@ func packageQualifier(p *types.Package) string {
 	return ""
 }
 
+// FieldName names field index of x's struct type, where x is a struct or a
+// pointer to one, as Field and FieldAddr select it. A field is identified by
+// its name, not its position: reordering a struct's fields must not change a
+// function that reads them, and reading a different field that moved into
+// the old one's position must. Falls back to "#index" when x's type is not a
+// struct.
+func FieldName(x ssa.Value, index int) string {
+	t := x.Type().Underlying()
+	if p, ok := t.(*types.Pointer); ok {
+		t = p.Elem().Underlying()
+	}
+	if s, ok := t.(*types.Struct); ok && index >= 0 && index < s.NumFields() {
+		return s.Field(index).Name()
+	}
+	return "#" + strconv.Itoa(index)
+}
+
 func (c *Canonicalizer) sanitizeType(t types.Type) string {
-	return sanitizeTypeWith(t, c.qualifier)
+	return sanitizeTypeWith(c.tparams.Rename(t), c.qualifier)
 }
 
 func sanitizeTypeWith(t types.Type, q types.Qualifier) string {

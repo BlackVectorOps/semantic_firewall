@@ -3,10 +3,37 @@ package api
 import (
 	"fmt"
 	"strings"
+
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff"
+	"golang.org/x/tools/go/ssa"
 )
+
+// SSAFunctionName returns fn's name relative to its own package: "F",
+// "(*T).M", "F$1". Unlike ShortFunctionName it does not have to guess where
+// the package path ends, so a package whose last path element contains a dot
+// ("gopkg.in/yaml.v3", "example.com/lib.v2") is stripped completely.
+func SSAFunctionName(fn *ssa.Function) string {
+	if fn.Pkg != nil {
+		return fn.RelString(fn.Pkg.Pkg)
+	}
+	return ShortFunctionName(fn.RelString(nil))
+}
+
+// ResultName is the name reported for a fingerprinted function: its
+// SSAFunctionName, or ShortFunctionName of its full name when the result
+// carries no SSA function.
+func ResultName(r diff.FingerprintResult) string {
+	if fn := r.GetSSAFunction(); fn != nil {
+		return SSAFunctionName(fn)
+	}
+	return ShortFunctionName(r.FunctionName)
+}
 
 // ShortFunctionName strips package paths and qualifying identifiers
 // from a Go SSA function name so it is readable in diffs and reports.
+// Given only the string, it takes the text up to the first dot after the
+// last slash as the package name; prefer SSAFunctionName when the function
+// is at hand.
 //
 // It handles three shapes:
 //   - "fmt.Println"                              -> "Println"

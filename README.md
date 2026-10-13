@@ -38,14 +38,14 @@ The analysis never executes the code under test.
 ## Install
 
 ```bash
-go install github.com/BlackVectorOps/semantic_firewall/v5/cmd/sfw@v5.1.0
+go install github.com/BlackVectorOps/semantic_firewall/v5/cmd/sfw@v5.2.0
 ```
 
 `go.mod` declares `go 1.26.3`. `sfw version` prints the build:
 
 ```
 Semantic Firewall CLI
-Build: v5.1.0 (Pebble/Gob+PackedIdx)
+Build: v5.2.0 (Pebble/Gob+PackedIdx)
 ```
 
 ## Commands
@@ -206,6 +206,8 @@ func Sum(a, b int) int { return a + b }
 
 The `preserved` test compares fingerprints under two literal policies. The default policy masks strings and integers outside [-16, 16], so its fingerprint survives a changed literal; the keep-all policy does not. A changed URL, command, limit or file mode therefore produces `modified`, with the literal in `added_ops`/`removed_ops`.
 
+Only the fingerprints decide the status. The [Zipper](#semantic-zipper) aligns instructions by data flow, so it pairs every instruction of a swapped `if`/`else`, a negated condition or a call moved out of its guard. Such a change is `modified`, and the Zipper lists the moved instructions and the changed branch in both `added_ops` and `removed_ops`.
+
 The summary fields:
 - `semantic_match_pct` = preserved / total × 100.
 - `topology_matched_pct` = matched pairs / total × 100.
@@ -213,12 +215,29 @@ The summary fields:
 
 The package `init` function is diffed like any other. Swapping an import changes it (`fmt.init` → `net.init` above), but that change scores 0.
 
+### Files
+
+The diff reports the functions declared in the given file, closures included, plus the package's synthesized `init`. That function has no source file and runs every file's package-level initializers. The package's other files are loaded for type-checking but their functions are not reported.
+
+A file that the host build excludes is loaded under a configuration that includes it:
+- **`_test.go` file:** loaded with the package's tests.
+- **`_GOOS`/`_GOARCH` name suffix or `//go:build` line:** `go/build` matches the file against GOOS/GOARCH pairs, the host's first and then a fixed list of 27 (`knownPlatforms` in `pkg/diff/fingerprinter.go`). For each pair it tries every subset of the line's custom tags, at most 4. Platform names, `unix`, `cgo`, `gc`, `gccgo`, `go1.*` and `goexperiment.*` do not count as custom tags. The first match is loaded, with cgo disabled.
+- A file that no combination matches is an error.
+
+Reported names are relative to the function's own package: `F`, `(*T).M`, `F$1`. A package whose last path element contains a dot (`gopkg.in/yaml.v3`) is stripped completely.
+
 ### Function matching
 
-`pkg/diff/topology_match.go` pairs the functions of the two files in two phases:
+`pkg/diff/topology_match.go` pairs the functions of the two files in three steps:
 
-1. Functions with the same short name are paired. No similarity threshold applies.
-2. The remaining functions are paired only if their fuzzy hashes are identical and their `TopologySimilarity` is at least 0.6 (`DefaultTopologyMatchThreshold`). Pairs are assigned greedily, highest similarity first.
+1. Functions with the same short name are paired. No similarity threshold applies. Type parameters are compared by position, so `(*List[T]).Push` pairs with `(*List[E]).Push`.
+2. Closures are named by creation order (`F$1`, `F$2`), which shifts when a closure is inserted. They are therefore paired by content within their enclosing function, not by name. The passes run in this order:
+   1. equal keep-all-literals fingerprints;
+   2. equal default fingerprints;
+   3. `TopologySimilarity` of at least 0.6, best first;
+   4. equal names.
+   A pair whose names differ is reported as `F$1 → F$2` and keeps its own status; it is not `renamed`.
+3. The remaining functions are paired only if their fuzzy hashes are identical and their `TopologySimilarity` is at least 0.6 (`DefaultTopologyMatchThreshold`). Pairs are assigned greedily, highest similarity first.
 
 Unpaired functions are reported as `added` or `removed`. Because the fuzzy hash must match exactly, a rename combined with one added `if` changes the `BR` bucket and is reported as remove + add, even at similarity 0.92.
 
@@ -293,12 +312,12 @@ Call targets come from `*ssa.Function` callees and functions passed by name. Eac
 
 | Class | Members |
 |-------|---------|
-| `exec` | every function in `os/exec`; `os.StartProcess`; `Exec`, `ForkExec` and `StartProcess` in `syscall`, `golang.org/x/sys/unix` and `golang.org/x/sys/windows` |
+| `exec` | every function in `os/exec`; `os.StartProcess`; `Exec`, `ForkExec` and `StartProcess` in `syscall`, `golang.org/x/sys/unix` and `golang.org/x/sys/windows`; `net/http/cgi.Handler.ServeHTTP`, which runs `Handler.Path` for every request |
 | `syscall` | every other package-level function in `syscall`, `golang.org/x/sys/unix` and `golang.org/x/sys/windows` (methods excluded) |
 | `plugin` | everything in `plugin` |
-| `network` | `net` functions starting with `Dial`, `Listen`, `Lookup`, `Resolve` or `File`. `net/http` package-level functions and methods on `Client`, `Server` and `Transport` named `Get`, `Post`, `PostForm`, `Head`, `Do`, `RoundTrip`, `ListenAndServe`, `ListenAndServeTLS`, `Serve` or `ServeTLS`. Functions starting with `Dial` or `Listen`, plus `SendMail`, in `crypto/tls`, `net/rpc`, `net/rpc/jsonrpc`, `net/smtp` and `net/textproto` |
+| `network` | `net` functions starting with `Dial`, `Listen`, `Lookup`, `Resolve` or `File`. `net/http` package-level functions and methods on `Client`, `Server` and `Transport` named `Get`, `Post`, `PostForm`, `Head`, `Do`, `RoundTrip`, `ListenAndServe`, `ListenAndServeTLS`, `Serve` or `ServeTLS`. Functions starting with `Dial` or `Listen`, plus `SendMail`, in `crypto/tls`, `net/rpc`, `net/rpc/jsonrpc`, `net/smtp`, `net/textproto` and `log/syslog`. `net/http/httptest.NewServer`, `NewTLSServer` and `NewUnstartedServer`. `net/http/httputil.ReverseProxy.ServeHTTP` |
 | `reflection` | `reflect.Value.Call`, `reflect.Value.CallSlice` |
-| `filesystem` | `os.WriteFile`, `Create`, `OpenFile`, `Remove`, `RemoveAll`, `Rename`, `Chmod`, `Chown`, `Lchown`, `Truncate`, `Symlink`, `Link` (package-level only) |
+| `filesystem` | `os.WriteFile`, `Create`, `OpenFile`, `Remove`, `RemoveAll`, `Rename`, `Chmod`, `Chown`, `Lchown`, `Truncate`, `Symlink` and `Link`, as package-level functions or `os.Root` methods; `os.CopyFS` |
 
 Verification calls (`topology.IsVerificationCall`), whose removal is a `RemovedCheck`:
 - `crypto/subtle.ConstantTime*`, `crypto/hmac.Equal`
@@ -679,6 +698,8 @@ b3:
   - `KeepAllLiteralsPolicy` keeps everything.
   - Loop start values, steps and trip counts bypass the policy, so `i < 100` and `i < 200` fingerprint differently under both policies.
 - **Escaping:** a kept string is emitted as an escaped `const("...")` (`"x\ny"` stays on one line), and struct tags are quoted, so literal content cannot inject IR lines.
+- **Fields** are named, not indexed: `FieldAddr p0, field(IsAdmin)`. Reordering or inserting a struct's fields does not change a function that reads them, but reading a different field does.
+- **Type parameters** are written by position: `$0`, `$1`, ... The receiver's and the function's type parameters are numbered together; in a closure, the enclosing function's come first. This covers value types and the receivers and type arguments of callees, e.g. `<func_ref:(*List[$0]).Push:func($0)>`. Renaming a type parameter keeps the fingerprint; reordering type parameters changes it.
 
 ## Semantic Zipper
 
@@ -686,19 +707,22 @@ b3:
 
 1. **Setup:**
    - run SCEV on both functions and build a canonicalizer for each;
-   - map parameters by position; a count or type mismatch is an error;
-   - map free variables when both the counts and the types match.
+   - map parameters, and separately free variables, that share a name and type. Then map the rest in order wherever the types agree;
+   - a parameter left without a partner leaves its uses unmapped, so a changed signature still reports the body's changes.
 2. **Entry seed:** take a longest common subsequence over at most 100 instructions of the two entry blocks.
 3. **Propagation:** breadth-first over def-use edges. For each mapped pair (old, new), each user of old is compared with the users of new in the same bucket, and the first equivalent one is mapped.
    - The bucket key is the instruction's Go type plus a kind-specific suffix, e.g. `*ssa.BinOp:+`.
    - Buckets are capped at 100 candidates (`MaxCandidates`); extra candidates are dropped.
 4. **Terminators:** the last instruction of every block is matched by operand equivalence.
-5. **Result:** unmapped instructions are `added` or `removed`. Instructions replaced by an IV rewrite are omitted.
+5. **Control flow:** blocks are paired one-to-one. The entry blocks are paired first. The others are paired greedily by the number of mapped instructions they share, with ties broken by block index. A mapped pair is reported in both lists, and excluded from `matched_nodes`, if either:
+   - its two instructions sit in blocks that are not paired with each other; or
+   - it is an `If` or `Jump` where an old successor is paired with a block other than the new successor in the same position.
+6. **Result:** unmapped instructions are `added` or `removed`. Instructions replaced by an IV rewrite are omitted.
 
 Two instructions are equivalent when all of the following hold:
 - **Same instruction type:** they have the same `reflect` type.
-- **Same value type:** the types are identical by `types.Identical`. If that check fails, the comparison falls back to type strings, with each side's own package unqualified.
-- **Same operator properties:** e.g. the `BinOp` operator, the field index, `Alloc.Heap`.
+- **Same value type:** the types are identical by `types.Identical`. If that check fails, the comparison falls back to type strings, with each side's own package unqualified and type parameters written by position.
+- **Same operator properties:** e.g. the `BinOp` operator, the field name, `Alloc.Heap`.
 - **Equivalent operands:** each operand pair is already mapped or has an equal canonical string. φ edges only need matching types. The check is not recursive. Commutative operand swaps are allowed for `+`, `*`, `&`, `|` and `^` on numeric types, and for `==` and `!=` on any type.
 
 ## Function topology
@@ -870,14 +894,14 @@ jobs:
         with:
           fetch-depth: 0        # diff and audit read HEAD~1
       - id: sfw
-        uses: BlackVectorOps/semantic_firewall@v5.1.0
+        uses: BlackVectorOps/semantic_firewall@v5.2.0
         with:
           mode: audit
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
 The Action does the following before running `sfw`:
-- installs `sfw` v5.1.0 with `go install`, or uses an `sfw` already on `PATH`;
+- installs `sfw` v5.2.0 with `go install`, or uses an `sfw` already on `PATH`;
 - installs `runsc` release `20260126.0` and checks its SHA-512;
 - relaxes the AppArmor user-namespace restriction for it.
 

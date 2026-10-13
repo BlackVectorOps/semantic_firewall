@@ -228,7 +228,7 @@ func RunScanParallel(fsys FileSystem, files []string, scanner SignatureScanner, 
 				}
 
 				localCount++
-				funcName := ShortFunctionName(result.FunctionName)
+				funcName := resultName(result)
 
 				if exactOnly {
 					if alert, err := scanner.ScanTopologyExact(topo, funcName); err == nil && alert != nil {
@@ -300,7 +300,7 @@ func RunScanDeps(pkgLoader PackageLoader, target string, opts models.ScanOptions
 
 		for _, fn := range packageFunctions(prog, ssaPkg) {
 			totalFunctions++
-			allAlerts = append(allAlerts, scanFunction(fn, ShortFunctionName(fn.String()), scanner, opts.ExactOnly)...)
+			allAlerts = append(allAlerts, scanFunction(fn, ssaFunctionName(fn), scanner, opts.ExactOnly)...)
 		}
 	}
 

@@ -6,7 +6,6 @@ import (
 	"go/types"
 	"reflect"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
@@ -41,6 +40,10 @@ type Zipper struct {
 	queue []valuePair
 
 	fpCache map[ssa.Instruction]string
+
+	// oldTP and newTP render each side's type parameters by position, so a
+	// type-parameter rename does not unmatch the instructions that use it.
+	oldTP, newTP *ir.TypeParamRenamer
 }
 
 type valuePair struct {
@@ -61,6 +64,8 @@ func NewZipper(oldFn, newFn *ssa.Function, policy ir.LiteralPolicy) (*Zipper, er
 		revInstrMap: make(map[ssa.Instruction]ssa.Instruction),
 		queue:       make([]valuePair, 0),
 		fpCache:     make(map[ssa.Instruction]string),
+		oldTP:       ir.NewTypeParamRenamer(oldFn),
+		newTP:       ir.NewTypeParamRenamer(newFn),
 	}, nil
 }
 
@@ -76,40 +81,68 @@ func (z *Zipper) ComputeDiff() (*ZipperArtifacts, error) {
 	z.newCanon.AnalyzeLoops(z.newFn)
 	z.newCanon.NormalizeInductionVariables()
 
-	if err := z.alignAnchors(); err != nil {
-		return nil, err
-	}
-
+	z.alignAnchors()
 	z.propagate()
 	z.matchTerminators()
 
 	return z.isolateDivergence(), nil
 }
 
-func (z *Zipper) alignAnchors() error {
-	if len(z.oldFn.Params) != len(z.newFn.Params) {
-		return fmt.Errorf("parameter count mismatch: %d vs %d", len(z.oldFn.Params), len(z.newFn.Params))
-	}
+// alignAnchors maps the parameters and free variables the two versions
+// share. A signature change does not stop the diff: the uses of a parameter
+// without a partner stay unmatched and are reported as added or removed.
+func (z *Zipper) alignAnchors() {
+	z.alignByName(paramValues(z.oldFn.Params), paramValues(z.newFn.Params))
+	z.alignByName(freeVarValues(z.oldFn.FreeVars), freeVarValues(z.newFn.FreeVars))
+	z.alignEntryBlock()
+}
 
-	for i, pOld := range z.oldFn.Params {
-		pNew := z.newFn.Params[i]
-		if !z.sameType(pOld.Type(), pNew.Type()) {
-			return fmt.Errorf("parameter %d type mismatch: %s vs %s", i, pOld.Type(), pNew.Type())
-		}
-		z.mapValue(pOld, pNew)
-	}
-
-	if len(z.oldFn.FreeVars) == len(z.newFn.FreeVars) {
-		for i, fvOld := range z.oldFn.FreeVars {
-			fvNew := z.newFn.FreeVars[i]
-			if z.sameType(fvOld.Type(), fvNew.Type()) {
-				z.mapValue(fvOld, fvNew)
+// alignByName pairs values of the same name and type, then pairs the
+// remaining values in order where their types agree, so a renamed parameter
+// still aligns while an inserted one does not shift the others.
+func (z *Zipper) alignByName(olds, news []ssa.Value) {
+	used := make([]bool, len(news))
+	var restOld []ssa.Value
+	for _, o := range olds {
+		paired := false
+		for j, n := range news {
+			if !used[j] && o.Name() == n.Name() && z.sameType(o.Type(), n.Type()) {
+				z.mapValue(o, n)
+				used[j], paired = true, true
+				break
 			}
 		}
+		if !paired {
+			restOld = append(restOld, o)
+		}
 	}
+	var restNew []ssa.Value
+	for j, n := range news {
+		if !used[j] {
+			restNew = append(restNew, n)
+		}
+	}
+	for i := 0; i < len(restOld) && i < len(restNew); i++ {
+		if z.sameType(restOld[i].Type(), restNew[i].Type()) {
+			z.mapValue(restOld[i], restNew[i])
+		}
+	}
+}
 
-	z.alignEntryBlock()
-	return nil
+func paramValues(ps []*ssa.Parameter) []ssa.Value {
+	vs := make([]ssa.Value, len(ps))
+	for i, p := range ps {
+		vs[i] = p
+	}
+	return vs
+}
+
+func freeVarValues(fvs []*ssa.FreeVar) []ssa.Value {
+	vs := make([]ssa.Value, len(fvs))
+	for i, fv := range fvs {
+		vs[i] = fv
+	}
+	return vs
 }
 
 func (z *Zipper) alignEntryBlock() {
@@ -316,10 +349,10 @@ func (z *Zipper) compareOps(a, b ssa.Instruction) bool {
 		return true
 	case *ssa.Field:
 		iB := b.(*ssa.Field)
-		return iA.Field == iB.Field
+		return ir.FieldName(iA.X, iA.Field) == ir.FieldName(iB.X, iB.Field)
 	case *ssa.FieldAddr:
 		iB := b.(*ssa.FieldAddr)
-		return iA.Field == iB.Field
+		return ir.FieldName(iA.X, iA.Field) == ir.FieldName(iB.X, iB.Field)
 	case *ssa.Alloc:
 		iB := b.(*ssa.Alloc)
 		return iA.Heap == iB.Heap
@@ -507,10 +540,15 @@ func (z *Zipper) compareOneOperand(ptrA, ptrB *ssa.Value) bool {
 }
 
 func (z *Zipper) isolateDivergence() *ZipperArtifacts {
+	// Matching follows data flow only, so an instruction moved into or out of
+	// a branch, or an If whose targets were swapped, still finds a partner.
+	// Such pairs are control-flow changes and are reported as divergent.
+	misplaced := z.misplacedPairs()
+
 	r := &ZipperArtifacts{
 		OldFunction:  z.oldFn.RelString(nil),
 		NewFunction:  z.newFn.RelString(nil),
-		MatchedNodes: len(z.instrMap),
+		MatchedNodes: len(z.instrMap) - len(misplaced),
 	}
 
 	for _, b := range z.oldFn.Blocks {
@@ -519,7 +557,7 @@ func (z *Zipper) isolateDivergence() *ZipperArtifacts {
 			if z.oldCanon.VirtualizedInstrs[instr] {
 				continue
 			}
-			if _, ok := z.instrMap[instr]; !ok {
+			if _, ok := z.instrMap[instr]; !ok || misplaced[instr] {
 				r.Removed = append(r.Removed, z.formatInstr(instr))
 			}
 		}
@@ -531,7 +569,7 @@ func (z *Zipper) isolateDivergence() *ZipperArtifacts {
 			if z.newCanon.VirtualizedInstrs[instr] {
 				continue
 			}
-			if _, ok := z.revInstrMap[instr]; !ok {
+			if old, ok := z.revInstrMap[instr]; !ok || misplaced[old] {
 				r.Added = append(r.Added, z.formatInstr(instr))
 			}
 		}
@@ -539,8 +577,97 @@ func (z *Zipper) isolateDivergence() *ZipperArtifacts {
 
 	sort.Strings(r.Added)
 	sort.Strings(r.Removed)
-	r.Preserved = len(r.Added) == 0 && len(r.Removed) == 0
+	r.Preserved = len(r.Added) == 0 && len(r.Removed) == 0 && z.sameParams()
 	return r
+}
+
+// sameParams reports whether every parameter kept its position and type, so
+// an added, removed or retyped parameter is a change even when it is unused.
+func (z *Zipper) sameParams() bool {
+	if len(z.oldFn.Params) != len(z.newFn.Params) {
+		return false
+	}
+	for i, p := range z.oldFn.Params {
+		if z.valMap[p] != ssa.Value(z.newFn.Params[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// blockCorrespondence pairs old and new basic blocks one to one. The entry
+// blocks always correspond; the remaining pairs are chosen greedily by how
+// many matched instructions two blocks share, with ties broken by block
+// index so the result is deterministic.
+func (z *Zipper) blockCorrespondence() map[*ssa.BasicBlock]*ssa.BasicBlock {
+	type blockPair struct{ old, new *ssa.BasicBlock }
+	shared := make(map[blockPair]int)
+	for o, n := range z.instrMap {
+		if o.Block() != nil && n.Block() != nil {
+			shared[blockPair{o.Block(), n.Block()}]++
+		}
+	}
+	pairs := make([]blockPair, 0, len(shared))
+	for p := range shared {
+		pairs = append(pairs, p)
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if shared[pairs[i]] != shared[pairs[j]] {
+			return shared[pairs[i]] > shared[pairs[j]]
+		}
+		if pairs[i].old.Index != pairs[j].old.Index {
+			return pairs[i].old.Index < pairs[j].old.Index
+		}
+		return pairs[i].new.Index < pairs[j].new.Index
+	})
+
+	corr := make(map[*ssa.BasicBlock]*ssa.BasicBlock)
+	taken := make(map[*ssa.BasicBlock]bool)
+	if len(z.oldFn.Blocks) > 0 && len(z.newFn.Blocks) > 0 {
+		corr[z.oldFn.Blocks[0]] = z.newFn.Blocks[0]
+		taken[z.newFn.Blocks[0]] = true
+	}
+	for _, p := range pairs {
+		if _, done := corr[p.old]; done || taken[p.new] {
+			continue
+		}
+		corr[p.old] = p.new
+		taken[p.new] = true
+	}
+	return corr
+}
+
+// misplacedPairs returns the matched old instructions whose partner lies in
+// a block that does not correspond to theirs, and matched branches (If,
+// Jump) whose successors lead to non-corresponding blocks. Either means the
+// control flow around otherwise identical operations changed.
+func (z *Zipper) misplacedPairs() map[ssa.Instruction]bool {
+	corr := z.blockCorrespondence()
+	misplaced := make(map[ssa.Instruction]bool)
+	for o, n := range z.instrMap {
+		ob, nb := o.Block(), n.Block()
+		if ob == nil || nb == nil {
+			continue
+		}
+		if corr[ob] != nb {
+			misplaced[o] = true
+			continue
+		}
+		switch o.(type) {
+		case *ssa.If, *ssa.Jump:
+			if len(ob.Succs) != len(nb.Succs) {
+				misplaced[o] = true
+				continue
+			}
+			for k, s := range ob.Succs {
+				if mapped, ok := corr[s]; ok && mapped != nb.Succs[k] {
+					misplaced[o] = true
+					break
+				}
+			}
+		}
+	}
+	return misplaced
 }
 
 func (z *Zipper) formatInstr(instr ssa.Instruction) string {
@@ -597,7 +724,7 @@ func (z *Zipper) getFingerprint(instr ssa.Instruction) string {
 			switch v := i.Call.Value.(type) {
 			case *ssa.Function:
 				sb.WriteString(":call:")
-				sb.WriteString(v.RelString(nil))
+				sb.WriteString(z.renamer(instr).FuncName(v, nil))
 			case *ssa.Builtin:
 				sb.WriteString(":builtin:")
 				sb.WriteString(v.Name())
@@ -605,12 +732,12 @@ func (z *Zipper) getFingerprint(instr ssa.Instruction) string {
 				sb.WriteString(":closure")
 				if fn, ok := v.Fn.(*ssa.Function); ok {
 					sb.WriteString(":")
-					sb.WriteString(fn.Signature.String())
+					sb.WriteString(z.typeString(instr, fn.Signature))
 				}
 			default:
 				if i.Call.Value != nil {
 					sb.WriteString(":dynamic:")
-					sb.WriteString(i.Call.Value.Type().String())
+					sb.WriteString(z.typeString(instr, i.Call.Value.Type()))
 				} else {
 					sb.WriteString(":call")
 				}
@@ -618,13 +745,13 @@ func (z *Zipper) getFingerprint(instr ssa.Instruction) string {
 		}
 	case *ssa.Alloc:
 		sb.WriteString(":")
-		sb.WriteString(i.Type().String())
+		sb.WriteString(z.typeString(instr, i.Type()))
 	case *ssa.Field:
 		sb.WriteString(":field:")
-		sb.WriteString(strconv.Itoa(i.Field))
+		sb.WriteString(ir.FieldName(i.X, i.Field))
 	case *ssa.FieldAddr:
 		sb.WriteString(":fieldaddr:")
-		sb.WriteString(strconv.Itoa(i.Field))
+		sb.WriteString(ir.FieldName(i.X, i.Field))
 	case *ssa.Index:
 		sb.WriteString(":index")
 	case *ssa.IndexAddr:
@@ -651,7 +778,21 @@ func (z *Zipper) sameType(a, b types.Type) bool {
 	if types.Identical(a, b) {
 		return true
 	}
+	a, b = z.oldTP.Rename(a), z.newTP.Rename(b)
 	return types.TypeString(a, localQualifier(z.oldFn)) == types.TypeString(b, localQualifier(z.newFn))
+}
+
+// typeString renders t, a type used by instr, with full package paths and
+// the type parameters of instr's side by position.
+func (z *Zipper) typeString(instr ssa.Instruction, t types.Type) string {
+	return types.TypeString(z.renamer(instr).Rename(t), nil)
+}
+
+func (z *Zipper) renamer(instr ssa.Instruction) *ir.TypeParamRenamer {
+	if instr.Parent() == z.oldFn {
+		return z.oldTP
+	}
+	return z.newTP
 }
 
 func localQualifier(fn *ssa.Function) types.Qualifier {
