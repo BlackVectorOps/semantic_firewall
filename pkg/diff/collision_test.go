@@ -115,6 +115,52 @@ func RecvB(a, b chan int) {
 		useB(y)
 	}
 }
+
+func NestA(m [][]byte, n int) {
+	for i := 0; i < n; i++ {
+		for j := 0; j < n; j++ {
+			m[i][j] = byte(i)
+		}
+	}
+}
+
+func NestB(m [][]byte, n int) {
+	for i := 0; i < n; i++ {
+		for j := 0; j < n; j++ {
+			m[j][i] = byte(j)
+		}
+	}
+}
+
+func WrapA() int {
+	n := 0
+	for i := int8(1); i > 0; i += 8 {
+		n++
+	}
+	return n
+}
+
+func WrapB() int {
+	n := 0
+	for i := int64(1); i > 0; i += 8 {
+		n++
+	}
+	return n
+}
+
+func GeoA(n int, buf []int) {
+	for i := 1; i < n; i *= 2 {
+		buf[0] = i
+	}
+}
+
+func GeoB(n int, buf []int) {
+	i := 1
+	for k := 0; i < n; k++ {
+		buf[0] = i
+		i = 4*k + 2
+	}
+}
 `
 
 func TestFingerprint_NoSemanticCollisions(t *testing.T) {
@@ -127,6 +173,9 @@ func TestFingerprint_NoSemanticCollisions(t *testing.T) {
 		{"CallA", "CallB"},
 		{"SelA", "SelB"},
 		{"RecvA", "RecvB"},
+		{"NestA", "NestB"},
+		{"WrapA", "WrapB"},
+		{"GeoA", "GeoB"},
 	}
 	for _, p := range pairs {
 		a, b := fps[p[0]], fps[p[1]]

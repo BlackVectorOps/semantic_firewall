@@ -220,7 +220,7 @@ func (c *Canonicalizer) normalizeInductionVariablesRecursive(loops []*loop.Loop,
 		for phi, iv := range l.Inductions {
 			if iv.Type == loop.IVTypeBasic {
 				c.VirtualizedInstrs[phi] = true
-				scev := &loop.SCEVAddRec{Start: iv.Start, Step: iv.Step, Loop: l}
+				scev := &loop.SCEVAddRec{Start: iv.Start, Step: iv.Step, Loop: l, IntType: phi.Type()}
 				c.virtualSubstitutions[phi] = scev
 			}
 		}
@@ -236,8 +236,10 @@ func (c *Canonicalizer) normalizeInductionVariablesRecursive(loops []*loop.Loop,
 				}
 				scev := loop.ToSCEV(binOp, l)
 				if addRec, ok := scev.(*loop.SCEVAddRec); ok {
+					typed := *addRec
+					typed.IntType = binOp.Type()
 					c.VirtualizedInstrs[binOp] = true
-					c.virtualSubstitutions[binOp] = addRec
+					c.virtualSubstitutions[binOp] = &typed
 				}
 			}
 		}
@@ -700,7 +702,7 @@ func (c *Canonicalizer) renamerFunc() loop.Renamer {
 			}
 
 			if scev, isScev := sub.(loop.SCEV); isScev {
-				return scev.StringWithRenamer(renamer)
+				return loop.FormatSCEV(scev, renamer, c.recurrenceLabel)
 			}
 
 			current = sub
@@ -709,6 +711,23 @@ func (c *Canonicalizer) renamerFunc() loop.Renamer {
 		return c.normalizeValue(current)
 	}
 	return renamer
+}
+
+// recurrenceLabel tags a recurrence with its loop's canonical header block
+// and, when known, its integer type: "<b2:int8>". Without it the induction
+// variables of nested loops (m[i][j] vs m[j][i]) and of differently sized
+// counters render identically.
+func (c *Canonicalizer) recurrenceLabel(rec *loop.SCEVAddRec) string {
+	header := "?"
+	if rec.Loop != nil && rec.Loop.Header != nil {
+		if name, ok := c.blockMap[rec.Loop.Header]; ok {
+			header = name
+		}
+	}
+	if rec.IntType != nil {
+		return "<" + header + ":" + c.sanitizeType(rec.IntType) + ">"
+	}
+	return "<" + header + ">"
 }
 
 func (c *Canonicalizer) deterministicTraversal(fn *ssa.Function) []*ssa.BasicBlock {
@@ -820,11 +839,11 @@ func (c *Canonicalizer) processBlock(block *ssa.BasicBlock) {
 	c.output.WriteString(c.blockMap[block] + ":\n")
 
 	if c.loopInfo != nil {
-		if loop, ok := c.loopInfo.LoopMap[block]; ok {
+		if l, ok := c.loopInfo.LoopMap[block]; ok {
 			c.output.WriteString("  ; LoopHeader")
-			if loop.TripCount != nil {
+			if l.TripCount != nil {
 				// BUG FIX: Use renamer to ensure TripCount variables match the rest of the IR
-				c.output.WriteString(fmt.Sprintf(" TripCount: %s", loop.TripCount.StringWithRenamer(c.renamerFunc())))
+				c.output.WriteString(fmt.Sprintf(" TripCount: %s", loop.FormatSCEV(l.TripCount, c.renamerFunc(), c.recurrenceLabel)))
 			}
 			c.output.WriteString("\n")
 		}
@@ -1320,7 +1339,7 @@ func (c *Canonicalizer) NormalizeOperand(v ssa.Value, context ssa.Instruction) s
 
 	switch operand := v.(type) {
 	case loop.SCEV:
-		return operand.StringWithRenamer(c.renamerFunc())
+		return loop.FormatSCEV(operand, c.renamerFunc(), c.recurrenceLabel)
 	case *ssa.Const:
 		if k, ok := c.remappedSelectCase(operand, context); ok {
 			return fmt.Sprintf("const(%d)", k)
