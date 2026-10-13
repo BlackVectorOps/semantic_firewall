@@ -1,7 +1,7 @@
 package models
 
 import (
-	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/detection"
 )
 
 // -- Diff & Fingerprinting --

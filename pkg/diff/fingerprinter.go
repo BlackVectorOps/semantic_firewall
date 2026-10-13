@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 )

@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/api"
-	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/models"
 )
 
 // TestShortFunctionName covers the cases that used to live in

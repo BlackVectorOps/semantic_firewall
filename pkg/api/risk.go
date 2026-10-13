@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/models"
 )
 
 // capabilityRisk is the escalation charged the first time a function reaches

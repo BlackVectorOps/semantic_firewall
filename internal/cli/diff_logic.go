@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/api"
 )
 
 // -- Public API --
