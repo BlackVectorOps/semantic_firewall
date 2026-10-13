@@ -130,6 +130,20 @@ func assessTopologyDelta(oldT, newT *topology.FunctionTopology) riskAssessment {
 		r.escalation += extra * riskAdditionalCapability
 	}
 
+	// A removed verification call is how a guard gets deleted: a MAC or
+	// signature check, certificate verification, a password comparison.
+	var removedChecks []string
+	for target := range oldT.Checks {
+		if !newT.Checks[target] {
+			removedChecks = append(removedChecks, target)
+		}
+	}
+	if len(removedChecks) > 0 {
+		sort.Strings(removedChecks)
+		r.labels = append(r.labels, fmt.Sprintf("RemovedCheck(%s)", strings.Join(removedChecks, ",")))
+		r.escalation += models.RiskScoreHigh
+	}
+
 	if newPlain > 0 {
 		r.labels = append(r.labels, fmt.Sprintf("Calls+%d", newPlain))
 		r.structural += newPlain * riskPerNewCallTarget

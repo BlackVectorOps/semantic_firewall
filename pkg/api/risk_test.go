@@ -381,3 +381,68 @@ func TestDiff_EmptyInputHasNoFunctions(t *testing.T) {
 		}
 	}
 }
+
+// Removing a verification call deletes a guard; it must be flagged even
+// though removing structure is otherwise neutral.
+func TestDiffRisk_RemovedVerification(t *testing.T) {
+	t.Run("check removed from function", func(t *testing.T) {
+		out := diffSources(t, `package x
+
+import "crypto/hmac"
+
+func Accept(mac, want []byte) bool {
+	if !hmac.Equal(mac, want) {
+		return false
+	}
+	return true
+}
+`, `package x
+
+func Accept(mac, want []byte) bool {
+	return true
+}
+`)
+		f := findFunc(t, out, "Accept")
+		if f.RiskScore < models.RiskScoreHigh || !strings.Contains(f.TopologyDelta, "RemovedCheck(crypto/hmac.Equal)") {
+			t.Errorf("risk = %d (%s); want a high-risk RemovedCheck", f.RiskScore, f.TopologyDelta)
+		}
+	})
+
+	t.Run("validator function deleted", func(t *testing.T) {
+		out := diffSources(t, `package x
+
+import "crypto/subtle"
+
+func valid(token, want string) bool {
+	return subtle.ConstantTimeCompare([]byte(token), []byte(want)) == 1
+}
+
+func Open(token string) bool { return valid(token, "secret") }
+`, `package x
+
+func Open(token string) bool { return true }
+`)
+		f := findFunc(t, out, "valid")
+		if f.Status != models.StatusRemoved || f.RiskScore < models.RiskScoreHigh {
+			t.Errorf("removed validator: status %q risk %d (%s); want removed and high risk", f.Status, f.RiskScore, f.TopologyDelta)
+		}
+		if out.Summary.HighRiskChanges == 0 {
+			t.Error("summary.high_risk_changes = 0")
+		}
+	})
+
+	t.Run("unrelated function removed", func(t *testing.T) {
+		out := diffSources(t, `package x
+
+func helper() int { return 1 }
+
+func A() int { return 2 }
+`, `package x
+
+func A() int { return 2 }
+`)
+		if f := findFunc(t, out, "helper"); f.RiskScore != 0 {
+			t.Errorf("benign removal risk = %d; want 0", f.RiskScore)
+		}
+	})
+}

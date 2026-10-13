@@ -42,6 +42,11 @@ type FunctionTopology struct {
 	CallTargets  map[string]int
 	Capabilities map[string]string
 
+	// Checks holds the CallTargets keys that are verification primitives
+	// (MAC and signature checks, certificate verification, password hash
+	// comparison). Losing one is how a guard gets deleted.
+	Checks map[string]bool
+
 	// Granular instruction tracking
 	InstrCounts map[string]int
 
@@ -117,6 +122,7 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 		CallSignatures: make(map[string]int),
 		CallTargets:    make(map[string]int),
 		Capabilities:   make(map[string]string),
+		Checks:         make(map[string]bool),
 		InstrCounts:    make(map[string]int),
 		BinOpCounts:    make(map[string]int),
 		UnOpCounts:     make(map[string]int),

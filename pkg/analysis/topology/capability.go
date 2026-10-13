@@ -79,6 +79,34 @@ func recordCallTarget(t *FunctionTopology, callee *ssa.Function) {
 	if class := ClassifyCallTarget(pkgPath, recv, name); class != "" {
 		t.Capabilities[key] = class
 	}
+	if IsVerificationCall(pkgPath, recv, name) {
+		t.Checks[key] = true
+	}
+}
+
+// IsVerificationCall reports whether a callee, identified like
+// ClassifyCallTarget's arguments, is a verification primitive: a constant-time
+// or MAC comparison, a signature or certificate check, a password hash
+// comparison, or a path containment check.
+func IsVerificationCall(pkgPath, recv, name string) bool {
+	switch pkgPath {
+	case "crypto/subtle":
+		return strings.HasPrefix(name, "ConstantTime")
+	case "crypto/hmac":
+		return name == "Equal"
+	case "crypto/ed25519", "crypto/ecdsa", "crypto/rsa":
+		return strings.HasPrefix(name, "Verify")
+	case "crypto/x509":
+		return (recv == "Certificate" || recv == "CertificateRequest") &&
+			(strings.HasPrefix(name, "Verify") || name == "CheckSignature" || name == "CheckSignatureFrom")
+	case "crypto/tls":
+		return recv == "Conn" && name == "VerifyHostname"
+	case "golang.org/x/crypto/bcrypt":
+		return name == "CompareHashAndPassword"
+	case "path/filepath":
+		return name == "IsLocal"
+	}
+	return false
 }
 
 func receiverTypeName(t types.Type) string {

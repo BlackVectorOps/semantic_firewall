@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/ir"
@@ -160,11 +161,27 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 	}
 
 	for _, r := range removedFuncs {
-		functionDiffs = append(functionDiffs, models.FunctionDiff{
+		d := models.FunctionDiff{
 			Function:       ShortFunctionName(r.FunctionName),
 			Status:         models.StatusRemoved,
 			OldFingerprint: r.Fingerprint,
-		})
+		}
+		// Deleting a function is usually neutral, but deleting one that
+		// performed a verification (a validator, a signature check) removes
+		// that check from every caller.
+		if fn := r.GetSSAFunction(); fn != nil {
+			if topo := topology.ExtractTopology(fn); topo != nil && len(topo.Checks) > 0 {
+				checks := make([]string, 0, len(topo.Checks))
+				for c := range topo.Checks {
+					checks = append(checks, c)
+				}
+				sort.Strings(checks)
+				d.TopologyDelta = fmt.Sprintf("RemovedCheck(%s)", strings.Join(checks, ","))
+				d.RiskScore = models.RiskScoreHigh
+				highRisk++
+			}
+		}
+		functionDiffs = append(functionDiffs, d)
 	}
 
 	added := len(addedFuncs)
