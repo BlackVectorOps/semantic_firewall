@@ -83,6 +83,8 @@ const (
 	//  minor issues or code quality concerns.
 	SeverityLow = "LOW"
 
+	// default audit model.
+	ModelClaudeOpus = "claude-opus-5-5"
 	// multimodal reasoning model.
 	ModelGeminiPro = "gemini-3-pro-preview"
 	// high speed, low latency analysis for large codebases.
@@ -101,5 +103,3 @@ const (
 	//  high performance, LSM tree based storage for large scale analysis history.
 	BackendPebbleDB = "pebbledb"
 )
-
-

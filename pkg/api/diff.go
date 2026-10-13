@@ -3,11 +3,14 @@ package api
 import (
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 
 	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/ir"
 	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
 	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/diff"
 	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/models"
+	"golang.org/x/tools/go/ssa"
 )
 
 // Diff is the convenience entry point: it computes a semantic diff
@@ -42,6 +45,11 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 		content, err := fsys.ReadFile(path)
 		if err != nil {
 			return nil, err
+		}
+		// An empty input (an empty file, or /dev/null standing in for the
+		// missing side of an added or deleted file) has no functions.
+		if len(strings.TrimSpace(string(content))) == 0 {
+			return []diff.FingerprintResult{}, nil
 		}
 		absPath, err := fsys.Abs(path)
 		if err != nil {
@@ -153,11 +161,27 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 	}
 
 	for _, r := range removedFuncs {
-		functionDiffs = append(functionDiffs, models.FunctionDiff{
+		d := models.FunctionDiff{
 			Function:       ShortFunctionName(r.FunctionName),
 			Status:         models.StatusRemoved,
 			OldFingerprint: r.Fingerprint,
-		})
+		}
+		// Deleting a function is usually neutral, but deleting one that
+		// performed a verification (a validator, a signature check) removes
+		// that check from every caller.
+		if fn := r.GetSSAFunction(); fn != nil {
+			if topo := topology.ExtractTopology(fn); topo != nil && len(topo.Checks) > 0 {
+				checks := make([]string, 0, len(topo.Checks))
+				for c := range topo.Checks {
+					checks = append(checks, c)
+				}
+				sort.Strings(checks)
+				d.TopologyDelta = fmt.Sprintf("RemovedCheck(%s)", strings.Join(checks, ","))
+				d.RiskScore = models.RiskScoreHigh
+				highRisk++
+			}
+		}
+		functionDiffs = append(functionDiffs, d)
 	}
 
 	added := len(addedFuncs)
@@ -192,33 +216,34 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 }
 
 // CompareFunctions reduces two FingerprintResult values to a
-// FunctionDiff. When the canonical IR fingerprints match the function
-// is preserved verbatim; otherwise the Zipper algorithm computes the
-// structural delta, falling back to "modified" if SSA reconstruction
+// FunctionDiff. A function is preserved only when its canonical IR is
+// unchanged with every literal kept: the default fingerprint masks strings
+// and larger integers, so on its own it would report a changed URL, command,
+// size limit or permission mode as preserved. Otherwise the Zipper computes
+// the structural delta, falling back to "modified" if SSA reconstruction
 // fails.
 func CompareFunctions(funcName string, oldResult, newResult diff.FingerprintResult) models.FunctionDiff {
 	d := models.FunctionDiff{
-		Function:       funcName,
-		OldFingerprint: oldResult.Fingerprint,
-		NewFingerprint: newResult.Fingerprint,
+		Function:         funcName,
+		OldFingerprint:   oldResult.Fingerprint,
+		NewFingerprint:   newResult.Fingerprint,
+		FingerprintMatch: oldResult.Fingerprint == newResult.Fingerprint,
 	}
 
-	if oldResult.Fingerprint == newResult.Fingerprint {
-		d.Status = models.StatusPreserved
-		d.FingerprintMatch = true
-		return d
-	}
-
-	d.FingerprintMatch = false
 	oldFn := oldResult.GetSSAFunction()
 	newFn := newResult.GetSSAFunction()
+
+	if d.FingerprintMatch && (oldFn == nil || newFn == nil || literalsUnchanged(oldFn, newFn)) {
+		d.Status = models.StatusPreserved
+		return d
+	}
 
 	if oldFn == nil || newFn == nil {
 		d.Status = models.StatusModified
 		return d
 	}
 
-	zipper, err := diff.NewZipper(oldFn, newFn, ir.DefaultLiteralPolicy)
+	zipper, err := diff.NewZipper(oldFn, newFn, ir.KeepAllLiteralsPolicy)
 	if err != nil {
 		d.Status = models.StatusModified
 		return d
@@ -241,4 +266,11 @@ func CompareFunctions(funcName string, oldResult, newResult diff.FingerprintResu
 	}
 
 	return d
+}
+
+// literalsUnchanged reports whether two functions canonicalize identically
+// with every literal kept.
+func literalsUnchanged(oldFn, newFn *ssa.Function) bool {
+	return diff.GenerateFingerprint(oldFn, ir.KeepAllLiteralsPolicy, false).Fingerprint ==
+		diff.GenerateFingerprint(newFn, ir.KeepAllLiteralsPolicy, false).Fingerprint
 }

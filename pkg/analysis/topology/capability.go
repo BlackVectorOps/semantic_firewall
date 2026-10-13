@@ -25,37 +25,24 @@ const (
 // *name* for signature-matching stability, these keys carry the import path so
 // that "crypto/rand.Read" and "math/rand.Read" stay distinct.
 //
-// Closures are fingerprinted and diffed as functions of their own, so their
-// calls are not attributed to the enclosing function -- with one exception:
-// the synthetic bodies x/tools creates for range-over-func loops are never
-// reported separately, so their calls are folded in here to keep them visible.
+// Closures, including range-over-func loop bodies, are fingerprinted and
+// diffed as functions of their own, so their calls are attributed to them,
+// not to the enclosing function.
 func collectCallTargets(fn *ssa.Function, t *FunctionTopology) {
-	visited := map[*ssa.Function]bool{fn: true}
-	var walk func(f *ssa.Function)
-	walk = func(f *ssa.Function) {
-		for _, block := range f.Blocks {
-			for _, instr := range block.Instrs {
-				for _, op := range instr.Operands(nil) {
-					if op == nil || *op == nil {
-						continue
-					}
-					callee, ok := (*op).(*ssa.Function)
-					if !ok {
-						continue
-					}
-					if callee.Parent() != nil {
-						if callee.Synthetic != "" && !visited[callee] {
-							visited[callee] = true
-							walk(callee)
-						}
-						continue
-					}
-					recordCallTarget(t, callee)
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			for _, op := range instr.Operands(nil) {
+				if op == nil || *op == nil {
+					continue
 				}
+				callee, ok := (*op).(*ssa.Function)
+				if !ok || callee.Parent() != nil {
+					continue
+				}
+				recordCallTarget(t, callee)
 			}
 		}
 	}
-	walk(fn)
 }
 
 func recordCallTarget(t *FunctionTopology, callee *ssa.Function) {
@@ -92,6 +79,34 @@ func recordCallTarget(t *FunctionTopology, callee *ssa.Function) {
 	if class := ClassifyCallTarget(pkgPath, recv, name); class != "" {
 		t.Capabilities[key] = class
 	}
+	if IsVerificationCall(pkgPath, recv, name) {
+		t.Checks[key] = true
+	}
+}
+
+// IsVerificationCall reports whether a callee, identified like
+// ClassifyCallTarget's arguments, is a verification primitive: a constant-time
+// or MAC comparison, a signature or certificate check, a password hash
+// comparison, or a path containment check.
+func IsVerificationCall(pkgPath, recv, name string) bool {
+	switch pkgPath {
+	case "crypto/subtle":
+		return strings.HasPrefix(name, "ConstantTime")
+	case "crypto/hmac":
+		return name == "Equal"
+	case "crypto/ed25519", "crypto/ecdsa", "crypto/rsa":
+		return strings.HasPrefix(name, "Verify")
+	case "crypto/x509":
+		return (recv == "Certificate" || recv == "CertificateRequest") &&
+			(strings.HasPrefix(name, "Verify") || name == "CheckSignature" || name == "CheckSignatureFrom")
+	case "crypto/tls":
+		return recv == "Conn" && name == "VerifyHostname"
+	case "golang.org/x/crypto/bcrypt":
+		return name == "CompareHashAndPassword"
+	case "path/filepath":
+		return name == "IsLocal"
+	}
+	return false
 }
 
 func receiverTypeName(t types.Type) string {

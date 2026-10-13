@@ -22,6 +22,12 @@ func TestGenerateSpec(t *testing.T) {
 	// Uses t.TempDir() to create a real directory to satisfy os.Stat checks in the manager.
 	mockGoroot := t.TempDir()
 
+	// resolveGoToolchain prefers GOROOT/GOCACHE from the environment over
+	// `go env`; clear them so the mock below is what gets resolved. The go
+	// command exports GOROOT to test binaries when it switches toolchains.
+	t.Setenv("GOROOT", "")
+	t.Setenv("GOCACHE", "")
+
 	restoreExec := replaceExecFunc(func(ctx context.Context, cmd string, args ...string) *exec.Cmd {
 		// Intercepts "go env GOROOT"
 		if cmd == "go" && len(args) > 0 && args[0] == "env" {

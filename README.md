@@ -8,7 +8,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/BlackVectorOps/semantic_firewall.svg)](https://pkg.go.dev/github.com/BlackVectorOps/semantic_firewall/v4)
 [![License: MIT](https://img.shields.io/badge/License-MIT-00d4aa.svg)](LICENSE)
 [![Marketplace](https://img.shields.io/badge/Marketplace-Semantic_Firewall-7c3aed.svg)](https://github.com/marketplace/actions/semantic-firewall)
-[![Semantic Check](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic-check.yml/badge.svg)](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic-check.yml)
+[![Semantic Check](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic_analysis.yml/badge.svg)](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic_analysis.yml)
 
 **Catch the risky change a `git diff` hides.**
 
@@ -69,13 +69,13 @@ Deterministic, and honest about its edges: it tells you what it catches, where i
 
 Semantic Firewall is a **deterministic** structural analyzer, and it is deliberate about its boundaries -- naming them is what makes a green result worth trusting.
 
-**What it demonstrably catches.** Capability *introductions* that resolve to a concrete call target -- a function that newly reaches the process-exec, network, or raw-syscall families (`os/exec`, `net`, `syscall`, `plugin`). This is validated on labeled synthetic pairs run through the full pipeline: each malicious introduction escalates while its size-matched benign twin stays silent (`HasExecFamily`, `HasNetListen`, `HasRawSyscall`). Structural fingerprinting makes this survive renames, moves, and reformatting.
+**What it demonstrably catches.** Capability *introductions* that resolve to a concrete call target -- a function that newly reaches process execution, raw syscalls, plugins, the network, reflective invocation, or filesystem mutation (`os/exec`, `syscall`, `plugin`, `net`, `net/http`, `reflect.Value.Call`, `os.WriteFile`, ...). A newly reached capability escalates on its own, even when it *replaces* an existing call and the call count is unchanged; ordinary churn (new benign calls, loops, branches) stays below the high-risk threshold. See [Risk-Aware Diff Scoring](#architecture--algorithms). Structural fingerprinting makes this survive renames, moves, and reformatting.
 
 **Where it hands off.** Calls reached through interface dispatch, function values, or reflection don't resolve to a concrete target -- they land in an `invoke:` / `dynamic:` bucket (roughly one in ten call sites across a 10-module corpus). These are **ceded, not flagged**: the deterministic core marks the seam where a separate judgment layer is needed, rather than guessing.
 
 **What it does not score (known limitations).**
 
-- **Deletion-attack blind spot.** The risk score is computed from what a change *adds*. A backdoor introduced by *removing* a guard -- a bounds check, an auth verification, a TLS-validation call -- removes structure, and lost structure carries no score. It will not appear in `high_risk_changes` or flip the verdict. Closing this requires scoring the *loss* of structure in the engine itself; until that ships it is a real gap, named here on purpose.
+- **Deletion attacks are only partly covered.** Removing a call to a verification primitive -- `hmac.Equal`, `subtle.ConstantTimeCompare`, a signature or certificate `Verify*`, `bcrypt.CompareHashAndPassword`, `filepath.IsLocal` -- or deleting a function that made one, is a high-risk change (`RemovedCheck(...)`). A guard written as a plain conditional -- a bounds check, `if user != admin`, a TLS field assignment -- carries no call, and removing it is reported (`Branches-1`, changed literals in `added_ops`/`removed_ops`) but not scored. It will not flip the audit verdict on its own.
 - **Parse coverage.** Files the loader can't build are skipped, not analyzed -- so "0 escalations" on a corpus means *zero among the analyzed commits*, not zero overall.
 - **A clean false-positive rate is not a proven catch rate.** 0% FP on benign code shows the engine doesn't over-fire; catch rate is established separately, by the labeled positive controls above.
 
@@ -246,13 +246,14 @@ flowchart LR
 
 **Worried about sneaky changes or hidden intent?**
 
-Supply chain attacks often hide behind boring commit messages like "fix typo" or "update formatting." `sfw audit` uses an LLM (or deterministic simulation if you dont want to bother with an api key) to compare the **developer's claim** against the **code's reality**.
+Supply chain attacks often hide behind boring commit messages like "fix typo" or "update formatting." `sfw audit` uses an LLM (Claude by default) to compare the **developer's claim** against the **code's reality**. The LLM is consulted only when the diff contains high-risk changes; a diff without them passes without an API call (and without an API key).
 
 **Command:**
 
 ```bash
 # Check if the commit message matches the code changes
-sfw audit old.go new.go "minor refactor of logging" --api-key sk-...
+export ANTHROPIC_API_KEY=...
+sfw audit old.go new.go "minor refactor of logging"
 ```
 **The Verdict:**
 
@@ -339,9 +340,9 @@ sfw migrate --from <json> --to <db>
 Migrate legacy JSON database to PebbleDB format for O(1) lookups.
 
 ```bash
-sfw audit <old.go> <new.go> "<commit message>" [--api-key <key>] [--model <model>]
+sfw audit <old.go> <new.go> "<commit message>" [--model <model>] [--api-base <url>] [--no-sandbox]
 ```
-Verify if a commit message matches the structural code changes. Uses an LLM (default: gpt-4o, supports gemini-1.5-pro) to detect deception (e.g., hiding a backdoor in a "typo fix"). API key can also be set via `OPENAI_API_KEY` or `GEMINI_API_KEY` environment variables.
+Verify if a commit message matches the structural code changes. Uses an LLM to detect deception (e.g., hiding a backdoor in a "typo fix"). The default model is `claude-opus-5-5`; `gpt-*` and `gemini-*` models are also supported. The API key is read from `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `GEMINI_API_KEY` according to the model (`--api-key` works but leaks into shell history); for Claude models the Anthropic SDK's credential chain (e.g. an `ant auth login` profile) also applies. A key is needed only when the diff has high-risk changes; if one is needed and missing, the audit fails closed with an `ERROR` verdict.
 
 ---
 
@@ -419,7 +420,7 @@ Pebble uses a flat key-space, and we simulate buckets by using prefixes:
 
 Entropy scores are stored as fixed-width keys for proper lexicographic ordering:
 ```
-Key: "05.1234:SFW-MAL-001"
+Key: "005.1234:SFW-MAL-001"
       ├──────┤ ├─────────┤
       entropy  unique ID
 ```
@@ -472,7 +473,7 @@ count, _ := scanner.CountSignatures()
 scanner.DeleteSignature("SFW-MAL-001")
 scanner.MarkFalsePositive("SFW-MAL-001", "benign library")
 scanner.RebuildIndexes()  // Recover from corruption
-scanner.Compact("signatures-compacted.db")
+scanner.Compact()          // full-range compaction in place
 ```
 
 ---
@@ -493,7 +494,7 @@ The Semantic Firewall includes a **behavioral malware scanner** that matches cod
 ### Phase 2: O(1) Fuzzy Bucket Match (LSH-lite)
 
 ```
-1. Compute fuzzy hash: GenerateFuzzyHash(topology) → "B3L1BR2"
+1. Compute fuzzy hash: GenerateFuzzyHash(topology) → "B3L1BR3P1R1"
 2. PebbleDB prefix scan: fuzzy:FuzzyHash:* → candidate IDs
 3. Verify call signature overlap and entropy distance
 4. Return matches above confidence threshold
@@ -510,11 +511,11 @@ The Semantic Firewall includes a **behavioral malware scanner** that matches cod
 The fuzzy hash creates locality-sensitive buckets based on quantized structural metrics:
 
 ```
-FuzzyHash = "B{log2(blocks)}L{loops}BR{log2(branches)}"
+FuzzyHash = "B{log2(blocks)}L{min(loops,5)}BR{branches == 0 ? 0 : log2(branches)+1}P{params}R{results}"
 
 Examples:
-  B3L1BR2 = 8-15 blocks, 1 loop, 4-7 branches
-  B4L2BR3 = 16-31 blocks, 2 loops, 8-15 branches
+  B3L1BR3P1R1 = 8-15 blocks, 1 loop, 4-7 branches, 1 parameter, 1 result
+  B4L2BR4P2R0 = 16-31 blocks, 2 loops, 8-15 branches, 2 parameters, no results
 ```
 
 Log2 buckets reduce sensitivity to small changes while preserving structural similarity.
@@ -574,7 +575,7 @@ sfw index samples/dirty/dirty_beacon.go \
   "indexed": [{
     "name": "DirtyBeacon_Run",
     "topology_hash": "topo:9a8b7c6d5e4f3a2b...",
-    "fuzzy_hash": "B3L1BR2",
+    "fuzzy_hash": "B3L1BR3P1R1",
     "entropy_score": 5.82,
     "identifying_features": {
       "required_calls": ["net.Dial", "os.Exec", "time.Sleep"],
@@ -757,16 +758,35 @@ Functions are matched by their **structural fingerprint** (block count, call pro
 
 ## Library Usage
 
+The library packages live under `pkg/`; `pkg/api` is the entry point the CLI itself uses.
+
+### Semantic Diff
+
+```go
+import "github.com/BlackVectorOps/semantic_firewall/v4/pkg/api"
+
+out, err := api.Diff("old/handler.go", "new/handler.go")
+if err != nil {
+    log.Fatal(err)
+}
+for _, f := range out.Functions {
+    fmt.Printf("%-30s %-9s risk=%d %s\n", f.Function, f.Status, f.RiskScore, f.TopologyDelta)
+}
+```
+
 ### Fingerprinting
 
 ```go
-import semanticfw "github.com/BlackVectorOps/semantic_firewall/v4"
+import (
+    "github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/ir"
+    "github.com/BlackVectorOps/semantic_firewall/v4/pkg/diff"
+)
 
 src := `package main
 func Add(a, b int) int { return a + b }
 `
 
-results, err := semanticfw.FingerprintSource("example.go", src, semanticfw.DefaultLiteralPolicy)
+results, err := diff.FingerprintSource("example.go", src, ir.DefaultLiteralPolicy)
 if err != nil {
     log.Fatal(err)
 }
@@ -779,26 +799,32 @@ for _, r := range results {
 ### Malware Scanning with PebbleDB
 
 ```go
-import semanticfw "github.com/BlackVectorOps/semantic_firewall/v4"
+import (
+    "github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
+    "github.com/BlackVectorOps/semantic_firewall/v4/pkg/storage/pebbledb"
+)
 
 // Open the signature database
-scanner, err := semanticfw.NewPebbleScanner("signatures.db", semanticfw.DefaultPebbleScannerOptions())
+scanner, err := pebbledb.NewPebbleScanner("signatures.db", pebbledb.DefaultPebbleScannerOptions())
 if err != nil {
     log.Fatal(err)
 }
 defer scanner.Close()
 
-// Extract topology from a function
-topo := semanticfw.ExtractTopology(ssaFunction)
+// Extract topology from an SSA function (r.GetSSAFunction() from a fingerprint result)
+topo := topology.ExtractTopology(ssaFunction)
 
 // O(1) exact topology match
-if alert := scanner.ScanTopologyExact(topo, "suspiciousFunc"); alert != nil {
-    fmt.Printf("ALERT: %s matched %s (confidence: %.2f)\n", 
+if alert, err := scanner.ScanTopologyExact(topo, "suspiciousFunc"); err == nil && alert != nil {
+    fmt.Printf("ALERT: %s matched %s (confidence: %.2f)\n",
         alert.MatchedFunction, alert.SignatureName, alert.Confidence)
 }
 
 // Full scan: exact + fuzzy entropy matching
-alerts := scanner.ScanTopology(topo, "suspiciousFunc")
+alerts, err := scanner.ScanTopology(topo, "suspiciousFunc")
+if err != nil {
+    log.Fatal(err)
+}
 for _, alert := range alerts {
     fmt.Printf("[%s] %s: %s\n", alert.Severity, alert.SignatureName, alert.MatchedFunction)
 }
@@ -807,14 +833,15 @@ for _, alert := range alerts {
 ### Topology Extraction
 
 ```go
-import semanticfw "github.com/BlackVectorOps/semantic_firewall/v4"
+import "github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
 
 // Extract structural features from an SSA function
-topo := semanticfw.ExtractTopology(ssaFunction)
+topo := topology.ExtractTopology(ssaFunction)
 
-fmt.Printf("Blocks: %d, Loops: %d, Entropy: %.2f\n", 
+fmt.Printf("Blocks: %d, Loops: %d, Entropy: %.2f\n",
     topo.BlockCount, topo.LoopCount, topo.EntropyScore)
-fmt.Printf("Calls: %v\n", topo.CallSignatures)
+fmt.Printf("Calls: %v\n", topo.CallTargets)          // import-path qualified
+fmt.Printf("Capabilities: %v\n", topo.Capabilities)  // e.g. "os/exec.Command": "exec"
 fmt.Printf("Entropy Class: %s\n", topo.EntropyProfile.Classification)
 fmt.Printf("Fuzzy Hash: %s\n", topo.FuzzyHash)
 ```
@@ -827,17 +854,15 @@ Enable security scanning during fingerprinting for a unified integrity + securit
 // CLI: sfw check --scan --db signatures.db ./main.go
 
 // Programmatically:
-results, _ := semanticfw.FingerprintSourceAdvanced(
-    path, src, semanticfw.DefaultLiteralPolicy, strictMode)
+results, _ := diff.FingerprintSourceAdvanced(path, src, ir.DefaultLiteralPolicy, strictMode)
 
 for _, r := range results {
     // Integrity: Get fingerprint
     fmt.Printf("Function %s: %s\n", r.FunctionName, r.Fingerprint)
-    
+
     // Security: Scan for malware
-    fn := r.GetSSAFunction()
-    topo := semanticfw.ExtractTopology(fn)
-    alerts := scanner.ScanTopology(topo, r.FunctionName)
+    topo := topology.ExtractTopology(r.GetSSAFunction())
+    alerts, _ := scanner.ScanTopology(topo, r.FunctionName)
     for _, alert := range alerts {
         fmt.Printf("ALERT: %s\n", alert.SignatureName)
     }
@@ -854,7 +879,7 @@ type Signature struct {
     Severity            string              // "CRITICAL", "HIGH", "MEDIUM", "LOW"
     Category            string              // "malware", "backdoor", "dropper"
     TopologyHash        string              // SHA-256 of topology vector
-    FuzzyHash           string              // LSH bucket key "B3L1BR2"
+    FuzzyHash           string              // LSH bucket key "B3L1BR3P1R1"
     EntropyScore        float64             // 0.0-8.0
     EntropyTolerance    float64             // Fuzzy match window (default: 0.5)
     NodeCount           int                 // Basic block count
@@ -917,7 +942,7 @@ flowchart LR
 
 ### Scalar Evolution (SCEV) Engine
 
-The SCEV framework (`scev.go`, 746 LOC) solves the "loop equivalence problem" -- proving that syntactically different loops compute the same sequence of values.
+The SCEV framework (`pkg/analysis/loop/scev.go`) solves the "loop equivalence problem" -- proving that syntactically different loops compute the same sequence of values.
 
 **Core Abstraction: Add Recurrences**
 
@@ -961,7 +986,7 @@ The engine handles:
 
 ### Canonicalization Engine
 
-The canonicalizer (`canonicalizer.go`, 1162 LOC) transforms SSA into a deterministic string representation via five phases:
+The canonicalizer (`pkg/analysis/ir/canonicalizer.go`) transforms SSA into a deterministic string representation via five phases:
 
 **Phase 1: Loop & SCEV Analysis**
 ```go
@@ -997,7 +1022,7 @@ virtualBinOps map[*ssa.BinOp]token.Token         // normalized operators
 
 ### The Semantic Zipper
 
-The Zipper (`zipper.go`, 568 LOC) computes a semantic diff between two functions -- what actually changed in behavior, ignoring cosmetic differences.
+The Zipper (`pkg/diff/zipper.go`) computes a semantic diff between two functions -- what actually changed in behavior, ignoring cosmetic differences.
 
 **Algorithm: Parallel Graph Traversal**
 
@@ -1062,7 +1087,7 @@ Bucket size is capped at 100 to bound worst case complexity.
 | **NaN comparison instability** | Branch normalization restricted to `IsInteger \| IsString` types |
 | **IR injection** (fake instructions in strings) | Struct tags and literals sanitized before hashing |
 | **TypeParam edge cases** | Generic types excluded from branch swap (may hide floats) |
-| **DB path traversal** | Sensitive system directories (`/etc`, `/usr`) blocked |
+| **DB path traversal** | Databases are never created or written under system directories (`/etc`, `/usr` except `/usr/local`, `/bin`, `/lib*`, ...); read-only opens are allowed |
 | **Resource exhaustion** | 512MB memory limit, 64 PIDs max in sandbox |
 
 ### Complexity Analysis
@@ -1082,7 +1107,7 @@ Where $N$ = source size, $V$ = blocks, $E$ = edges, $L$ = loops, $I$ = instructi
 
 ### Malware Scanner Architecture
 
-The scanner (`pkg/storage/pebbledb/store.go`, 1454 LOC) provides two-phase detection with ACID-compliant persistence:
+The scanner (`pkg/storage/pebbledb/store.go`) provides two-phase detection with ACID-compliant persistence:
 
 **Phase 1: O(1) Exact Topology Match**
 
@@ -1096,7 +1121,7 @@ The scanner (`pkg/storage/pebbledb/store.go`, 1454 LOC) provides two-phase detec
 **Phase 2: O(1) Fuzzy Bucket Match (LSH-lite)**
 
 ```
-1. Compute fuzzy hash: GenerateFuzzyHash(topo) → "B3L1BR2"
+1. Compute fuzzy hash: GenerateFuzzyHash(topo) → "B3L1BR3P1R1"
 2. PebbleDB prefix scan: fuzzy:FuzzyHash:* → candidate IDs
 3. For each candidate:
    a. Load signature from sig: prefix
@@ -1114,7 +1139,7 @@ PebbleDB uses a flat key-space with prefixes to simulate logical buckets:
 sig:ID         → Gob-encoded signature blob (full signature)
 topo:Hash:ID   → PackedIndexValue (O(1) exact match index)
 fuzzy:Hash:ID  → PackedIndexValue (LSH bucket index)
-entr:Key       → ID (range scan index, "05.1234:SFW-MAL-001")
+entr:Key       → ID (range scan index, "005.1234:SFW-MAL-001")
 meta:key       → value (version, stats, maintenance info)
 ```
 
@@ -1122,7 +1147,7 @@ meta:key       → value (version, stats, maintenance info)
 
 Entropy is stored as a fixed-width key for proper lexicographic ordering:
 ```go
-key := fmt.Sprintf("%08.4f:%s", entropy, id)  // "05.8200:SFW-MAL-001"
+key := fmt.Sprintf("%08.4f:%s", entropy, id)  // "005.8200:SFW-MAL-001"
 ```
 
 This enables efficient range scans and ensures uniqueness even for identical entropy values.
@@ -1155,7 +1180,7 @@ confidence = avg(
 
 ### Topology Matching Algorithm
 
-The topology matcher (`topology.go`, 673 LOC) enables function matching independent of names:
+The topology matcher (`pkg/analysis/topology/topology.go`) enables function matching independent of names:
 
 **Feature Vector**
 
@@ -1190,10 +1215,19 @@ $$Similarity = \frac{\sum_i w_i \cdot match_i}{\sum_i w_i}$$
 
 > **Output format:** CLI and JSON outputs express similarity as a decimal (e.g., `0.94` = 94% match). The default topology match threshold is `0.6` (60%).
 
-Where weights prioritize:
-1. **Call profile** (w=3): Most discriminative feature
-2. **Control flow** (w=2): defer/recover/panic/select/go
-3. **Metrics** (w=1): Block/instruction counts within 20% tolerance
+Where the weights are:
+
+| Feature | Weight |
+|---------|--------|
+| Call profile (multiset Jaccard) | 4 |
+| Parameter types | 3 |
+| Return types | 2 |
+| Loop count | 2 |
+| Branch count | 1.5 |
+| Binary-operator profile | 1 |
+| Control-flow flags (defer, panic, go, select, range) | 1 |
+| Instruction-type profile | 0.5 |
+| Block count | 0.5 |
 
 **Risk-Aware Diff Scoring**
 
@@ -1212,6 +1246,7 @@ When comparing function versions, each change is scored against the high-risk th
 | New goroutine | +10 |
 | String-literal entropy crossing into the HIGH or PACKED band | +10 |
 | Obfuscation profile rising to MODERATE or HIGH | +10 |
+| Removed verification call (`RemovedCheck`: `hmac.Equal`, `subtle.ConstantTime*`, signature/certificate `Verify*`, `bcrypt.CompareHashAndPassword`, `filepath.IsLocal`), or a deleted function that made one | +10 |
 
 **Structural churn** -- reported in `topology_delta`, but capped at `9` in total (including the `+5` base for an added function), so churn alone never flags a change:
 
@@ -1223,7 +1258,9 @@ When comparing function versions, each change is scored against the high-risk th
 | New defer | +2 |
 | New panic | +3 |
 
-Capabilities are matched by import path, include calls made through function values, and count calls inside range-over-func loop bodies toward the enclosing function. Calls to imported packages' `init` functions are ignored, so adding an import is not itself a change. Removing structure is not scored; see [Detection scope](#detection-scope).
+Capabilities are matched by import path and include calls made through function values. Closures and range-over-func loop bodies are diffed and scored as functions of their own. Calls to imported packages' `init` functions are ignored, so adding an import is not itself a change. Other removed structure is not scored; see [Detection scope](#detection-scope).
+
+A function is reported as `preserved` only if it is unchanged with every literal kept: the fingerprint masks strings and larger integers so it survives constant tuning, but `sfw diff` still reports a changed URL, command, limit or file mode as `modified`, with the literal in `added_ops`/`removed_ops`.
 
 
 </details>

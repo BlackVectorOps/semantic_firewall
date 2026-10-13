@@ -26,6 +26,9 @@ type SCEVAddRec struct {
 	Start SCEV
 	Step  SCEV
 	Loop  *Loop
+	// IntType is the integer type the recurrence is evaluated in, when known.
+	// Wraparound makes {1, +, 8} in int8 and in int64 different sequences.
+	IntType types.Type
 }
 
 func (s *SCEVAddRec) EvaluateAt(k *big.Int, cache map[SCEV]*big.Int) *big.Int {
@@ -648,8 +651,12 @@ func computeSCEVBody(v ssa.Value, loop *Loop, depth int) SCEV {
 	}
 	if phi, ok := v.(*ssa.Phi); ok {
 		if phi.Block() == loop.Header {
-			if iv, exists := loop.Inductions[phi]; exists {
-				return &SCEVAddRec{Start: iv.Start, Step: iv.Step, Loop: loop}
+			// Only a basic induction variable is an affine recurrence. A
+			// geometric one (i *= 2) has Start/Step too, but rendering it as
+			// {start, +, step} made i*2 indistinguishable from the affine
+			// 2 + 4k.
+			if iv, exists := loop.Inductions[phi]; exists && iv.Type == IVTypeBasic {
+				return &SCEVAddRec{Start: iv.Start, Step: iv.Step, Loop: loop, IntType: phi.Type()}
 			}
 		}
 		return &SCEVUnknown{Value: v, IsInvariant: false}
@@ -817,4 +824,28 @@ func negateSCEV(s SCEV) SCEV {
 	}
 }
 
-
+// FormatSCEV renders s like StringWithRenamer, but passes every recurrence to
+// label, whose result is appended to it. StringWithRenamer prints {start, +,
+// step} alone, so the induction variables of two nested loops -- or the same
+// recurrence in int8 and int64 -- render identically; label lets the caller
+// attach the loop identity and type. A nil label behaves like
+// StringWithRenamer. SCEV implementations other than this package's render
+// through their own StringWithRenamer.
+func FormatSCEV(s SCEV, r Renamer, label func(*SCEVAddRec) string) string {
+	switch v := s.(type) {
+	case *SCEVAddRec:
+		out := fmt.Sprintf("{%s, +, %s}", FormatSCEV(v.Start, r, label), FormatSCEV(v.Step, r, label))
+		if label != nil {
+			out += label(v)
+		}
+		return out
+	case *SCEVGenericExpr:
+		return fmt.Sprintf("(%s %s %s)", FormatSCEV(v.X, r, label), v.Op.String(), FormatSCEV(v.Y, r, label))
+	case *SCEVMax:
+		return fmt.Sprintf("max(%s, %s)", FormatSCEV(v.X, r, label), FormatSCEV(v.Y, r, label))
+	case nil:
+		return "<nil>"
+	default:
+		return s.StringWithRenamer(r)
+	}
+}

@@ -41,6 +41,8 @@ var canonicalizerPool = sync.Pool{
 			virtualPhiConstants:  make(map[*ssa.Phi]map[int]string),
 			virtualSubstitutions: make(map[ssa.Value]ssa.Value),
 			VirtualizedInstrs:    make(map[ssa.Instruction]bool),
+			selectCasePerm:       make(map[*ssa.Select][]int),
+			selectRecvPerm:       make(map[*ssa.Select][]int),
 		}
 	},
 }
@@ -80,6 +82,19 @@ type Canonicalizer struct {
 	virtualSubstitutions map[ssa.Value]ssa.Value
 	effectiveInstrs      map[*ssa.BasicBlock][]ssa.Instruction
 	VirtualizedInstrs    map[ssa.Instruction]bool
+
+	// ownPkg is the package of the function being canonicalized. Names from
+	// it are rendered unqualified so two versions of a function loaded under
+	// different package paths still compare equal; names from every other
+	// package carry their import path.
+	ownPkg *types.Package
+
+	// selectCasePerm and selectRecvPerm map a Select's original case index
+	// (and receive-case ordinal) to its position in the sorted rendering, so
+	// the comparisons and extracts that bind each case to its body follow the
+	// case through the sort.
+	selectCasePerm map[*ssa.Select][]int
+	selectRecvPerm map[*ssa.Select][]int
 }
 
 func NewCanonicalizer(policy LiteralPolicy) *Canonicalizer {
@@ -110,10 +125,11 @@ func (c *Canonicalizer) ApplyVirtualControlFlowFromState(swappedBlocks map[*ssa.
 
 func (c *Canonicalizer) CanonicalizeFunction(fn *ssa.Function) string {
 	if len(fn.Blocks) == 0 {
-		return fmt.Sprintf("func%s (external)\n", sanitizeType(fn.Signature))
+		return fmt.Sprintf("func%s (external)\n", sanitizeTypeWith(fn.Signature, packageQualifier))
 	}
 
 	c.resetScratch()
+	c.setOwnPackage(fn)
 	estimatedSize := 0
 	for _, block := range fn.Blocks {
 		estimatedSize += len(block.Instrs) * 50
@@ -163,11 +179,28 @@ func (c *Canonicalizer) CanonicalizeFunction(fn *ssa.Function) string {
 }
 
 func (c *Canonicalizer) AnalyzeLoops(fn *ssa.Function) {
+	c.setOwnPackage(fn)
 	if len(fn.Blocks) == 0 {
 		return
 	}
 	c.loopInfo = loop.DetectLoops(fn)
 	loop.AnalyzeSCEV(c.loopInfo)
+}
+
+func (c *Canonicalizer) setOwnPackage(fn *ssa.Function) {
+	c.ownPkg = nil
+	if fn.Pkg != nil {
+		c.ownPkg = fn.Pkg.Pkg
+	}
+}
+
+// qualifier renders the canonicalized function's own package unqualified and
+// every other package by import path.
+func (c *Canonicalizer) qualifier(p *types.Package) string {
+	if p == nil || p == c.ownPkg {
+		return ""
+	}
+	return p.Path()
 }
 
 func (c *Canonicalizer) NormalizeInductionVariables() {
@@ -187,7 +220,7 @@ func (c *Canonicalizer) normalizeInductionVariablesRecursive(loops []*loop.Loop,
 		for phi, iv := range l.Inductions {
 			if iv.Type == loop.IVTypeBasic {
 				c.VirtualizedInstrs[phi] = true
-				scev := &loop.SCEVAddRec{Start: iv.Start, Step: iv.Step, Loop: l}
+				scev := &loop.SCEVAddRec{Start: iv.Start, Step: iv.Step, Loop: l, IntType: phi.Type()}
 				c.virtualSubstitutions[phi] = scev
 			}
 		}
@@ -203,8 +236,10 @@ func (c *Canonicalizer) normalizeInductionVariablesRecursive(loops []*loop.Loop,
 				}
 				scev := loop.ToSCEV(binOp, l)
 				if addRec, ok := scev.(*loop.SCEVAddRec); ok {
+					typed := *addRec
+					typed.IntType = binOp.Type()
 					c.VirtualizedInstrs[binOp] = true
-					c.virtualSubstitutions[binOp] = addRec
+					c.virtualSubstitutions[binOp] = &typed
 				}
 			}
 		}
@@ -600,6 +635,13 @@ func (c *Canonicalizer) resetScratch() {
 	}
 
 	c.effectiveInstrs = nil
+	c.ownPkg = nil
+	for k := range c.selectCasePerm {
+		delete(c.selectCasePerm, k)
+	}
+	for k := range c.selectRecvPerm {
+		delete(c.selectRecvPerm, k)
+	}
 }
 
 func (c *Canonicalizer) normalizeValue(v ssa.Value, preferredName ...string) string {
@@ -660,7 +702,7 @@ func (c *Canonicalizer) renamerFunc() loop.Renamer {
 			}
 
 			if scev, isScev := sub.(loop.SCEV); isScev {
-				return scev.StringWithRenamer(renamer)
+				return loop.FormatSCEV(scev, renamer, c.recurrenceLabel)
 			}
 
 			current = sub
@@ -669,6 +711,23 @@ func (c *Canonicalizer) renamerFunc() loop.Renamer {
 		return c.normalizeValue(current)
 	}
 	return renamer
+}
+
+// recurrenceLabel tags a recurrence with its loop's canonical header block
+// and, when known, its integer type: "<b2:int8>". Without it the induction
+// variables of nested loops (m[i][j] vs m[j][i]) and of differently sized
+// counters render identically.
+func (c *Canonicalizer) recurrenceLabel(rec *loop.SCEVAddRec) string {
+	header := "?"
+	if rec.Loop != nil && rec.Loop.Header != nil {
+		if name, ok := c.blockMap[rec.Loop.Header]; ok {
+			header = name
+		}
+	}
+	if rec.IntType != nil {
+		return "<" + header + ":" + c.sanitizeType(rec.IntType) + ">"
+	}
+	return "<" + header + ">"
 }
 
 func (c *Canonicalizer) deterministicTraversal(fn *ssa.Function) []*ssa.BasicBlock {
@@ -759,7 +818,7 @@ func (c *Canonicalizer) writeFunctionSignature(fn *ssa.Function) {
 		if i > 0 {
 			c.output.WriteString(", ")
 		}
-		c.output.WriteString(fmt.Sprintf("%s: %s", c.registerMap[p], sanitizeType(p.Type())))
+		c.output.WriteString(fmt.Sprintf("%s: %s", c.registerMap[p], c.sanitizeType(p.Type())))
 	}
 	c.output.WriteString(")")
 	sig := fn.Signature
@@ -769,7 +828,7 @@ func (c *Canonicalizer) writeFunctionSignature(fn *ssa.Function) {
 			if i > 0 {
 				c.output.WriteString(", ")
 			}
-			c.output.WriteString(sanitizeType(sig.Results().At(i).Type()))
+			c.output.WriteString(c.sanitizeType(sig.Results().At(i).Type()))
 		}
 		c.output.WriteString(")")
 	}
@@ -780,11 +839,11 @@ func (c *Canonicalizer) processBlock(block *ssa.BasicBlock) {
 	c.output.WriteString(c.blockMap[block] + ":\n")
 
 	if c.loopInfo != nil {
-		if loop, ok := c.loopInfo.LoopMap[block]; ok {
+		if l, ok := c.loopInfo.LoopMap[block]; ok {
 			c.output.WriteString("  ; LoopHeader")
-			if loop.TripCount != nil {
+			if l.TripCount != nil {
 				// BUG FIX: Use renamer to ensure TripCount variables match the rest of the IR
-				c.output.WriteString(fmt.Sprintf(" TripCount: %s", loop.TripCount.StringWithRenamer(c.renamerFunc())))
+				c.output.WriteString(fmt.Sprintf(" TripCount: %s", loop.FormatSCEV(l.TripCount, c.renamerFunc(), c.recurrenceLabel)))
 			}
 			c.output.WriteString("\n")
 		}
@@ -856,22 +915,22 @@ func (c *Canonicalizer) processInstruction(instr ssa.Instruction) {
 			elemType := ptrType.Elem()
 			if arrType, ok := elemType.Underlying().(*types.Array); ok {
 				length := arrType.Len()
-				typeRep := sanitizeType(elemType)
+				typeRep := c.sanitizeType(elemType)
 				if length >= 0 {
 					lenConst := ssa.NewConst(constant.MakeInt64(length), types.Typ[types.Int])
 					if c.Policy.ShouldAbstract(lenConst, instr) {
-						typeRep = fmt.Sprintf("[<len_literal>]%s", sanitizeType(arrType.Elem()))
+						typeRep = fmt.Sprintf("[<len_literal>]%s", c.sanitizeType(arrType.Elem()))
 					}
 				}
 				c.scratch.WriteString(typeRep)
 				handled = true
 			} else {
-				c.scratch.WriteString(sanitizeType(elemType))
+				c.scratch.WriteString(c.sanitizeType(elemType))
 				handled = true
 			}
 		}
 		if !handled {
-			c.scratch.WriteString(sanitizeType(i.Type().Underlying()))
+			c.scratch.WriteString(c.sanitizeType(i.Type().Underlying()))
 		}
 	case *ssa.Store:
 		c.scratch.WriteString("Store ")
@@ -916,7 +975,7 @@ func (c *Canonicalizer) processInstruction(instr ssa.Instruction) {
 	case *ssa.Next:
 		c.scratch.WriteString(fmt.Sprintf("Next %s", c.NormalizeOperand(i.Iter, instr)))
 	case *ssa.Extract:
-		c.scratch.WriteString(fmt.Sprintf("Extract %s, %d", c.NormalizeOperand(i.Tuple, instr), i.Index))
+		c.scratch.WriteString(fmt.Sprintf("Extract %s, %d", c.NormalizeOperand(i.Tuple, instr), c.remappedExtractIndex(i)))
 	case *ssa.Slice:
 		c.scratch.WriteString(fmt.Sprintf("Slice %s", c.NormalizeOperand(i.X, instr)))
 		if i.Low != nil {
@@ -929,9 +988,9 @@ func (c *Canonicalizer) processInstruction(instr ssa.Instruction) {
 			c.scratch.WriteString(fmt.Sprintf(", Max:%s", c.NormalizeOperand(i.Max, instr)))
 		}
 	case *ssa.MakeSlice:
-		c.scratch.WriteString(fmt.Sprintf("MakeSlice %s, Len:%s, Cap:%s", sanitizeType(i.Type()), c.NormalizeOperand(i.Len, instr), c.NormalizeOperand(i.Cap, instr)))
+		c.scratch.WriteString(fmt.Sprintf("MakeSlice %s, Len:%s, Cap:%s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.Len, instr), c.NormalizeOperand(i.Cap, instr)))
 	case *ssa.MakeMap:
-		c.scratch.WriteString(fmt.Sprintf("MakeMap %s", sanitizeType(i.Type())))
+		c.scratch.WriteString(fmt.Sprintf("MakeMap %s", c.sanitizeType(i.Type())))
 		if i.Reserve != nil {
 			c.scratch.WriteString(fmt.Sprintf(", Reserve:%s", c.NormalizeOperand(i.Reserve, instr)))
 		}
@@ -943,16 +1002,16 @@ func (c *Canonicalizer) processInstruction(instr ssa.Instruction) {
 			c.scratch.WriteString(", CommaOk")
 		}
 	case *ssa.TypeAssert:
-		c.scratch.WriteString(fmt.Sprintf("TypeAssert %s, AssertedType:%s", c.NormalizeOperand(i.X, instr), sanitizeType(i.AssertedType)))
+		c.scratch.WriteString(fmt.Sprintf("TypeAssert %s, AssertedType:%s", c.NormalizeOperand(i.X, instr), c.sanitizeType(i.AssertedType)))
 		if i.CommaOk {
 			c.scratch.WriteString(", CommaOk")
 		}
 	case *ssa.MakeInterface:
-		c.scratch.WriteString(fmt.Sprintf("MakeInterface %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		c.scratch.WriteString(fmt.Sprintf("MakeInterface %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
 	case *ssa.ChangeType:
-		c.scratch.WriteString(fmt.Sprintf("ChangeType %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		c.scratch.WriteString(fmt.Sprintf("ChangeType %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
 	case *ssa.Convert:
-		c.scratch.WriteString(fmt.Sprintf("Convert %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		c.scratch.WriteString(fmt.Sprintf("Convert %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
 	case *ssa.Go:
 		c.scratch.WriteString("Go ")
 		c.writeCallCommon(&c.scratch, &i.Call, instr)
@@ -982,13 +1041,13 @@ func (c *Canonicalizer) processInstruction(instr ssa.Instruction) {
 	case *ssa.Send:
 		c.scratch.WriteString(fmt.Sprintf("Send %s, %s", c.NormalizeOperand(i.Chan, instr), c.NormalizeOperand(i.X, instr)))
 	case *ssa.MakeChan:
-		c.scratch.WriteString(fmt.Sprintf("MakeChan %s, Size:%s", sanitizeType(i.Type()), c.NormalizeOperand(i.Size, instr)))
+		c.scratch.WriteString(fmt.Sprintf("MakeChan %s, Size:%s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.Size, instr)))
 	case *ssa.ChangeInterface:
-		c.scratch.WriteString(fmt.Sprintf("ChangeInterface %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		c.scratch.WriteString(fmt.Sprintf("ChangeInterface %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
 	case *ssa.SliceToArrayPointer:
-		c.scratch.WriteString(fmt.Sprintf("SliceToArrayPointer %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		c.scratch.WriteString(fmt.Sprintf("SliceToArrayPointer %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
 	case *ssa.MultiConvert:
-		c.scratch.WriteString(fmt.Sprintf("MultiConvert %s, %s", sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		c.scratch.WriteString(fmt.Sprintf("MultiConvert %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
 	case *ssa.DebugRef:
 		return
 
@@ -1091,6 +1150,36 @@ func (c *Canonicalizer) writeSelect(w *strings.Builder, i *ssa.Select, context s
 		return states[a].sortKey < states[b].sortKey
 	})
 
+	// Sorting alone would detach each case from its body: the case index the
+	// Select yields (and the position of each received value in its tuple)
+	// still refer to source order, so swapping two cases' bodies would leave
+	// the rendering unchanged. Record where each case landed so the index
+	// comparisons and Extracts that consume it are renumbered to match.
+	casePerm := make([]int, len(i.States))
+	recvOrdinal := make([]int, len(i.States)) // state index -> source-order receive ordinal
+	n := 0
+	for idx, st := range i.States {
+		if st.Dir == types.RecvOnly {
+			recvOrdinal[idx] = n
+			n++
+		}
+	}
+	recvPerm := make([]int, n)
+	pos, recvPos := 0, 0
+	for _, st := range states {
+		if st.origIndex < 0 {
+			continue
+		}
+		casePerm[st.origIndex] = pos
+		pos++
+		if i.States[st.origIndex].Dir == types.RecvOnly {
+			recvPerm[recvOrdinal[st.origIndex]] = recvPos
+			recvPos++
+		}
+	}
+	c.selectCasePerm[i] = casePerm
+	c.selectRecvPerm[i] = recvPerm
+
 	for _, state := range states {
 		w.WriteString(fmt.Sprintf(" (%s %s", state.dir, state.chanRepr))
 		if state.sendValRepr != "" {
@@ -1098,6 +1187,56 @@ func (c *Canonicalizer) writeSelect(w *strings.Builder, i *ssa.Select, context s
 		}
 		w.WriteString(")")
 	}
+}
+
+// selectIndexOf reports the Select whose chosen-case index v is, if v is
+// Extract #0 of a Select tuple.
+func selectIndexOf(v ssa.Value) *ssa.Select {
+	if ext, ok := v.(*ssa.Extract); ok && ext.Index == 0 {
+		if sel, ok := ext.Tuple.(*ssa.Select); ok {
+			return sel
+		}
+	}
+	return nil
+}
+
+// remappedSelectCase renumbers a case-index constant compared against a
+// Select's chosen index to the case's position in the sorted rendering.
+func (c *Canonicalizer) remappedSelectCase(k *ssa.Const, context ssa.Instruction) (int64, bool) {
+	bin, ok := context.(*ssa.BinOp)
+	if !ok || k.Value == nil || k.Value.Kind() != constant.Int {
+		return 0, false
+	}
+	sel := selectIndexOf(bin.X)
+	if sel == nil {
+		sel = selectIndexOf(bin.Y)
+	}
+	if sel == nil {
+		return 0, false
+	}
+	perm, ok := c.selectCasePerm[sel]
+	if !ok {
+		return 0, false
+	}
+	idx, exact := constant.Int64Val(k.Value)
+	if !exact || idx < 0 || idx >= int64(len(perm)) {
+		return 0, false // e.g. -1, the non-blocking default
+	}
+	return int64(perm[idx]), true
+}
+
+// remappedExtractIndex renumbers the received-value slots of a Select tuple
+// (index 2+j holds the j-th receive case's value) to sorted receive order.
+func (c *Canonicalizer) remappedExtractIndex(ext *ssa.Extract) int {
+	sel, ok := ext.Tuple.(*ssa.Select)
+	if !ok || ext.Index < 2 {
+		return ext.Index
+	}
+	perm, ok := c.selectRecvPerm[sel]
+	if !ok || ext.Index-2 >= len(perm) {
+		return ext.Index
+	}
+	return 2 + perm[ext.Index-2]
 }
 
 func (c *Canonicalizer) writePhi(w *strings.Builder, i *ssa.Phi, instr ssa.Instruction) {
@@ -1200,13 +1339,16 @@ func (c *Canonicalizer) NormalizeOperand(v ssa.Value, context ssa.Instruction) s
 
 	switch operand := v.(type) {
 	case loop.SCEV:
-		return operand.StringWithRenamer(c.renamerFunc())
+		return loop.FormatSCEV(operand, c.renamerFunc(), c.recurrenceLabel)
 	case *ssa.Const:
+		if k, ok := c.remappedSelectCase(operand, context); ok {
+			return fmt.Sprintf("const(%d)", k)
+		}
 		if c.Policy.ShouldAbstract(operand, context) {
-			return fmt.Sprintf("<%s_literal>", sanitizeType(operand.Type()))
+			return fmt.Sprintf("<%s_literal>", c.sanitizeType(operand.Type()))
 		}
 		if operand.Value == nil {
-			return fmt.Sprintf("const(%s:nil)", sanitizeType(operand.Type()))
+			return fmt.Sprintf("const(%s:nil)", c.sanitizeType(operand.Type()))
 		}
 		if operand.Value.Kind() == constant.String {
 			return fmt.Sprintf("const(%q)", constant.StringVal(operand.Value))
@@ -1214,17 +1356,22 @@ func (c *Canonicalizer) NormalizeOperand(v ssa.Value, context ssa.Instruction) s
 		return fmt.Sprintf("const(%s)", operand.Value.ExactString())
 	case *ssa.Global:
 		pkgPath := ""
-		if operand.Pkg != nil && operand.Pkg.Pkg != nil {
-			pkgPath = operand.Pkg.Pkg.Path()
+		if operand.Pkg != nil {
+			pkgPath = c.qualifier(operand.Pkg.Pkg)
 		}
-		return fmt.Sprintf("<global:%s.%s:%s>", pkgPath, operand.Name(), sanitizeType(operand.Type()))
+		return fmt.Sprintf("<global:%s.%s:%s>", pkgPath, operand.Name(), c.sanitizeType(operand.Type()))
 	case *ssa.Builtin:
 		return fmt.Sprintf("<builtin:%s>", operand.Name())
 	case *ssa.Function:
 		if name, exists := c.registerMap[v]; exists {
 			return name
 		}
-		return fmt.Sprintf("<func_ref:%s:%s>", operand.Name(), sanitizeType(operand.Signature))
+		// RelString keeps the receiver and, outside the own package, the
+		// import path: "(*os/exec.Cmd).Run", "crypto/rand.Read". Name()
+		// alone made same-named, same-signature functions from different
+		// packages (crypto/rand.Read vs math/rand.Read) or receivers
+		// indistinguishable.
+		return fmt.Sprintf("<func_ref:%s:%s>", operand.RelString(c.ownPkg), c.sanitizeType(operand.Signature))
 	default:
 		return c.normalizeValue(v)
 	}
@@ -1237,7 +1384,11 @@ func packageQualifier(p *types.Package) string {
 	return ""
 }
 
-func sanitizeType(t types.Type) string {
+func (c *Canonicalizer) sanitizeType(t types.Type) string {
+	return sanitizeTypeWith(t, c.qualifier)
+}
+
+func sanitizeTypeWith(t types.Type, q types.Qualifier) string {
 	if t == nil {
 		return "<nil_type>"
 	}
@@ -1249,17 +1400,17 @@ func sanitizeType(t types.Type) string {
 			paramType := sig.Params().At(i).Type()
 			if sig.Variadic() && i == sig.Params().Len()-1 {
 				if slice, ok := paramType.(*types.Slice); ok {
-					elemStr := types.TypeString(slice.Elem(), packageQualifier)
+					elemStr := types.TypeString(slice.Elem(), q)
 					params = append(params, "..."+elemStr)
 					continue
 				}
 			}
-			params = append(params, sanitizeType(paramType))
+			params = append(params, sanitizeTypeWith(paramType, q))
 		}
 
 		var results []string
 		for i := 0; i < sig.Results().Len(); i++ {
-			results = append(results, sanitizeType(sig.Results().At(i).Type()))
+			results = append(results, sanitizeTypeWith(sig.Results().At(i).Type(), q))
 		}
 
 		resStr := ""
@@ -1269,7 +1420,7 @@ func sanitizeType(t types.Type) string {
 
 		res = fmt.Sprintf("func(%s)%s", strings.Join(params, ", "), resStr)
 	} else {
-		res = types.TypeString(t, packageQualifier)
+		res = types.TypeString(t, q)
 	}
 
 	return strings.ReplaceAll(res, "\n", " ")

@@ -4,7 +4,9 @@
 *.dll
 *.so
 *.dylib
-sfw
+# Root-anchored: an unanchored "sfw" also matched the cmd/sfw directory and
+# silently ignored any new source file added there.
+/sfw
 cmd/sfw/sfw
 # Root-anchored: `go build` at repo root produces a binary named after
 # the module's last path segment (semantic_firewall). Anchor with /

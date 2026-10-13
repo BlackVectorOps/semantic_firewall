@@ -1,8 +1,6 @@
 package models
 
 import (
-	"encoding/json"
-
 	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/detection"
 )
 
@@ -127,33 +125,47 @@ type AuditEvidence struct {
 
 // -- OpenAI / Gemini API Types --
 
+// OpenAIResponsesRequest is the body of a POST /v1/responses call.
 type OpenAIResponsesRequest struct {
-	Model          string         `json:"model"`
-	Items          []OpenAIItem   `json:"items"`
-	Store          bool           `json:"store"`
-	ResponseFormat *OpenAIRespFmt `json:"response_format,omitempty"`
+	Model string               `json:"model"`
+	Input []OpenAIInputMessage `json:"input"`
+	Store bool                 `json:"store"`
+	Text  *OpenAITextConfig    `json:"text,omitempty"`
 }
 
-type OpenAIItem struct {
+// OpenAIInputMessage is one message of a Responses API input list.
+type OpenAIInputMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// OpenAITextConfig selects the Responses API output format.
+type OpenAITextConfig struct {
+	Format OpenAITextFormat `json:"format"`
+}
+
+type OpenAITextFormat struct {
 	Type string `json:"type"`
-	Role string `json:"role"`
-	// Content is polymorphic: can be string or array of parts.
-	// We use RawMessage to defer parsing and avoid unmarshal errors.
-	Content json.RawMessage `json:"content"`
 }
 
-// OpenAIContentPart helps parse the array form of content
-type OpenAIContentPart struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
+// OpenAIResponsesResponse is the subset of a Responses API result the client
+// reads: the output items, of which assistant "message" items carry the text.
 type OpenAIResponsesResponse struct {
-	Items []OpenAIItem `json:"items"`
+	Output []OpenAIOutputItem `json:"output"`
 }
 
-type OpenAIRespFmt struct {
-	Type string `json:"type"`
+type OpenAIOutputItem struct {
+	Type    string              `json:"type"`
+	Role    string              `json:"role"`
+	Content []OpenAIContentPart `json:"content"`
+}
+
+// OpenAIContentPart is one part of an output message: "output_text" carries
+// Text, "refusal" carries Refusal.
+type OpenAIContentPart struct {
+	Type    string `json:"type"`
+	Text    string `json:"text"`
+	Refusal string `json:"refusal,omitempty"`
 }
 
 type SentinelResponse struct {

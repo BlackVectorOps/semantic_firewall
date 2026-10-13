@@ -36,8 +36,14 @@ func MatchFunctionsByTopology(oldResults, newResults []FingerprintResult, thresh
 	matchedOld := make(map[string]bool)
 	matchedNew := make(map[string]bool)
 
+	// Iterate in name order: map order would make the output order, and how
+	// equal-similarity rename candidates are paired, vary from run to run.
+	oldNames := sortedKeys(oldByName)
+	newNames := sortedKeys(newByName)
+
 	// Phase 1: Direct matches by Name
-	for name, oldR := range oldByName {
+	for _, name := range oldNames {
+		oldR := oldByName[name]
 		if newR, ok := newByName[name]; ok {
 			oldFn := oldR.GetSSAFunction()
 			newFn := newR.GetSSAFunction()
@@ -71,14 +77,14 @@ func MatchFunctionsByTopology(oldResults, newResults []FingerprintResult, thresh
 	var unmatchedOld []FingerprintResult
 	var unmatchedNew []FingerprintResult
 
-	for name, r := range oldByName {
+	for _, name := range oldNames {
 		if !matchedOld[name] {
-			unmatchedOld = append(unmatchedOld, r)
+			unmatchedOld = append(unmatchedOld, oldByName[name])
 		}
 	}
-	for name, r := range newByName {
+	for _, name := range newNames {
 		if !matchedNew[name] {
-			unmatchedNew = append(unmatchedNew, r)
+			unmatchedNew = append(unmatchedNew, newByName[name])
 		}
 	}
 
@@ -179,6 +185,15 @@ func MatchFunctionsByTopology(oldResults, newResults []FingerprintResult, thresh
 	}
 
 	return matched, addedFuncs, removedFuncs
+}
+
+func sortedKeys(m map[string]FingerprintResult) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func ShortFuncName(fullName string) string {

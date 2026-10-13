@@ -91,15 +91,14 @@ func NewPebbleScanner(dbPath string, opts PebbleScannerOptions) (*PebbleScanner,
 		}
 		absPath, _ = filepath.Abs(dbPath)
 	}
-	// Restricts database operations to non critical directories.
-	// Initializing a database in system roots could allow an attacker
-	// to overwrite binaries or configurations if the process has elevated privileges.
-	if runtime.GOOS == "linux" {
-		sensitivePrefixes := []string{"/etc", "/root", "/usr", "/bin", "/sbin", "/boot"}
-		for _, sp := range sensitivePrefixes {
-			if strings.HasPrefix(absPath, sp) {
-				return nil, fmt.Errorf("security violation: refusing to initialize database in system directory %q", absPath)
-			}
+	// Restricts database writes to non critical directories. Creating or
+	// writing a database in a system root could let an attacker overwrite
+	// binaries or configuration if the process runs with elevated privileges.
+	// Read-only opens are exempt: reading a shared database from a system
+	// location (/usr/local/share/sfw) is the documented install layout.
+	if runtime.GOOS == "linux" && !opts.ReadOnly {
+		if dir := sensitiveSystemDir(absPath); dir != "" {
+			return nil, fmt.Errorf("security violation: refusing to write a database under system directory %s (%q)", dir, absPath)
 		}
 	}
 
@@ -190,6 +189,26 @@ func NewPebbleScanner(dbPath string, opts PebbleScannerOptions) (*PebbleScanner,
 	}
 
 	return scanner, nil
+}
+
+// sensitiveSystemDirs are the Linux roots a writable database may not live
+// under. Matching is by whole path component, so /etc does not cover
+// /etcd-data, and /usr/local (where administrators install shared data) is
+// allowed.
+var sensitiveSystemDirs = []string{"/etc", "/usr", "/bin", "/sbin", "/boot", "/lib", "/lib32", "/lib64", "/proc", "/sys", "/dev"}
+
+// sensitiveSystemDir returns the system root containing path, or "".
+func sensitiveSystemDir(path string) string {
+	path = filepath.Clean(path)
+	if path == "/usr/local" || strings.HasPrefix(path, "/usr/local/") {
+		return ""
+	}
+	for _, dir := range sensitiveSystemDirs {
+		if path == dir || strings.HasPrefix(path, dir+"/") {
+			return dir
+		}
+	}
+	return ""
 }
 
 func (s *PebbleScanner) Close() error {
@@ -1504,5 +1523,3 @@ func (s *PebbleScanner) InitializeMetadata(version, description string) error {
 func (s *PebbleScanner) TouchLastUpdated() error {
 	return s.SetMetadata("last_updated_at", time.Now().Format(time.RFC3339Nano))
 }
-
-
