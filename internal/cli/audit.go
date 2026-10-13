@@ -84,7 +84,13 @@ func RunAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 		Evidence: "Analysis incomplete.",
 	}
 
-	if highRiskDetected {
+	if highRiskDetected && apiKey == "" && llm.RequiresAPIKey(model) {
+		// FAIL-CLOSED: escalations exist but nothing can verify the claim.
+		output.Output = models.LLMResult{
+			Verdict:  models.VerdictError,
+			Evidence: fmt.Sprintf("High-risk changes need LLM verification, but no API key was provided (set %s).", llm.APIKeyEnvVar(model)),
+		}
+	} else if highRiskDetected {
 		result, err := llm.CallLLM(commitMsg, evidence, apiKey, model, apiBase)
 		if err != nil {
 			output.Output = models.LLMResult{

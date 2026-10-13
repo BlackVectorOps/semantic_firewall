@@ -48,9 +48,9 @@ inputs:
     description: 'LLM API Key (audit mode only). Required for intent verification.'
     required: false
   model:
-    description: 'LLM Model to use (audit mode only).'
+    description: 'LLM model to use (audit mode only): claude-* (default), gpt-*, or gemini-*. The api-key must belong to that provider.'
     required: false
-    default: 'gpt-4'
+    default: 'claude-opus-5-5'
   api-base:
     description: 'Custom LLM API Base URL (audit mode only).'
     required: false
@@ -372,16 +372,16 @@ runs:
             ;;
 
           audit)
-            # sfw resolves the audit API key from OPENAI_API_KEY or
-            # GEMINI_API_KEY (selected by the model name) -- it never reads
-            # SFW_API_KEY. Re-export the supplied key under the name the CLI
-            # actually consumes, otherwise audit always fails "API Key required".
+            # sfw resolves the audit API key from ANTHROPIC_API_KEY,
+            # GEMINI_API_KEY or OPENAI_API_KEY (selected by the model name) --
+            # it never reads SFW_API_KEY. Re-export the supplied key under the
+            # name the CLI actually consumes.
             if [[ -n "${SFW_API_KEY:-}" ]]; then
-              if [[ "${INPUT_MODEL,,}" == gemini* ]]; then
-                export GEMINI_API_KEY="$SFW_API_KEY"
-              else
-                export OPENAI_API_KEY="$SFW_API_KEY"
-              fi
+              case "${INPUT_MODEL,,}" in
+                claude*|"") export ANTHROPIC_API_KEY="$SFW_API_KEY" ;;
+                gemini*)    export GEMINI_API_KEY="$SFW_API_KEY" ;;
+                *)          export OPENAI_API_KEY="$SFW_API_KEY" ;;
+              esac
             fi
             readonly WORKTREE_DIR="${PREP_WORKTREE_DIR:-.sfw_base_worktree}"
             readonly DIFF_STREAM_FILE=".sfw_diff_stream.bin"
@@ -432,7 +432,7 @@ runs:
                 fi
 
                 AUDIT_ARGS=("$OLD_FILE" "$NEW_FILE" "$COMMIT_MSG")
-                AUDIT_ARGS+=("--model" "${INPUT_MODEL:-gpt-4}")
+                AUDIT_ARGS+=("--model" "${INPUT_MODEL:-claude-opus-5-5}")
                 if [[ -n "${INPUT_API_BASE:-}" ]]; then
                    AUDIT_ARGS+=("--api-base" "$INPUT_API_BASE")
                 fi

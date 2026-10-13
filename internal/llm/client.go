@@ -68,7 +68,7 @@ func getSharedClient() *http.Client {
 // -- Main Logic --
 
 func CallLLM(commitMsg string, evidence []models.AuditEvidence, apiKey, model, apiBase string) (models.LLMResult, error) {
-	if apiKey == "" {
+	if apiKey == "" && RequiresAPIKey(model) {
 		return models.LLMResult{
 			Verdict:  models.VerdictError,
 			Evidence: "Configuration Error: No API Key provided.",
@@ -101,9 +101,12 @@ func CallLLM(commitMsg string, evidence []models.AuditEvidence, apiKey, model, a
 	}
 
 	var result models.LLMResult
-	if strings.HasPrefix(strings.ToLower(model), "gemini") {
+	switch {
+	case isClaude(model):
+		result, err = callClaude(ctx, sysPrompt, userPayload, apiKey, model, apiBase)
+	case isGemini(model):
 		result, err = callGemini(ctx, sysPrompt, userPayload, apiKey, model, apiBase)
-	} else {
+	default:
 		result, err = callOpenAI(ctx, sysPrompt, userPayload, apiKey, model, apiBase)
 	}
 
@@ -127,10 +130,14 @@ func CallLLM(commitMsg string, evidence []models.AuditEvidence, apiKey, model, a
 
 // -- Security Middleware --
 
+// scanForInjection runs the sentinel on the same model as the audit itself:
+// a hardcoded model fails for keys or API bases (proxies, self-hosted
+// endpoints) that do not serve it, which turned every high-risk audit into
+// an ERROR.
 func scanForInjection(ctx context.Context, fullPayload, apiKey, mainModel, apiBase string) (bool, string, error) {
-	checkModel := models.ModelGPT5_2
-	if strings.HasPrefix(strings.ToLower(mainModel), "gemini") {
-		checkModel = models.ModelGeminiPro
+	checkModel := mainModel
+	if isGemini(mainModel) {
+		checkModel = normalizeGeminiModel(mainModel)
 	}
 
 	nonce, err := generateNonceFunc(8)
@@ -146,9 +153,12 @@ OUTPUT FORMAT: Strict JSON: {"safe": boolean, "analysis": "string"}`, nonce)
 	sentinelInput := fmt.Sprintf("Analyze this untrusted input payload:\n<payload_%s>\n%s\n</payload_%s>", nonce, fullPayload, nonce)
 
 	var responseText string
-	if strings.HasPrefix(strings.ToLower(mainModel), "gemini") {
+	switch {
+	case isClaude(mainModel):
+		responseText, err = executeClaudeRaw(ctx, sentinelSystem, sentinelInput, apiKey, checkModel, apiBase, sentinelSchema)
+	case isGemini(mainModel):
 		responseText, err = executeGeminiRaw(ctx, sentinelSystem, sentinelInput, apiKey, checkModel, apiBase)
-	} else {
+	default:
 		responseText, err = executeOpenAIRaw(ctx, sentinelSystem, sentinelInput, apiKey, checkModel, apiBase)
 	}
 
@@ -176,22 +186,17 @@ func callOpenAI(ctx context.Context, sysPrompt, userPayload, apiKey, model, apiB
 }
 
 func executeOpenAIRaw(ctx context.Context, sysPrompt, userMsg, apiKey, model, apiBase string) (string, error) {
-	sysItem := models.OpenAIItem{Type: "message", Role: "developer"}
-	sysJSON, _ := json.Marshal(sysPrompt)
-	sysItem.Content = json.RawMessage(sysJSON)
-
-	userItem := models.OpenAIItem{Type: "message", Role: "user"}
-	userJSON, _ := json.Marshal(userMsg)
-	userItem.Content = json.RawMessage(userJSON)
-
 	reqBody := models.OpenAIResponsesRequest{
 		Model: model,
+		Input: []models.OpenAIInputMessage{
+			{Role: "developer", Content: sysPrompt},
+			{Role: "user", Content: userMsg},
+		},
 		// Do not retain payloads server-side. Audited commit messages and diffs
 		// can originate from private/proprietary repositories; persisting them on
 		// the provider is an unnecessary data-exposure surface for a security tool.
-		Store:          false,
-		Items:          []models.OpenAIItem{sysItem, userItem},
-		ResponseFormat: &models.OpenAIRespFmt{Type: "json_object"},
+		Store: false,
+		Text:  &models.OpenAITextConfig{Format: models.OpenAITextFormat{Type: "json_object"}},
 	}
 	reqBytes, err := json.Marshal(reqBody)
 	if err != nil {
@@ -262,42 +267,55 @@ func executeOpenAIRaw(ctx context.Context, sysPrompt, userMsg, apiKey, model, ap
 		if err := json.Unmarshal(body, &responseObj); err != nil {
 			return "", fmt.Errorf("decode error: %w", err)
 		}
-
-		for k := len(responseObj.Items) - 1; k >= 0; k-- {
-			item := responseObj.Items[k]
-			if item.Role == "assistant" || item.Role == "model" {
-				var simpleStr string
-				if err := json.Unmarshal(item.Content, &simpleStr); err == nil {
-					return simpleStr, nil
-				}
-				var parts []models.OpenAIContentPart
-				if err := json.Unmarshal(item.Content, &parts); err == nil {
-					var sb strings.Builder
-					for _, p := range parts {
-						if p.Type == "output_text" || p.Type == "text" {
-							sb.WriteString(p.Text)
-						}
-					}
-					return sb.String(), nil
-				}
-			}
-		}
-		return "", fmt.Errorf("empty response")
+		return responsesOutputText(responseObj)
 	}
 
 	return "", fmt.Errorf("retries exhausted: %w", lastErr)
 }
 
+// responsesOutputText concatenates the output_text parts of the assistant
+// messages in a Responses API result. Other output items (reasoning, tool
+// calls) are skipped; a refusal is an error.
+func responsesOutputText(resp models.OpenAIResponsesResponse) (string, error) {
+	var sb strings.Builder
+	for _, item := range resp.Output {
+		if item.Type != "message" || item.Role != "assistant" {
+			continue
+		}
+		for _, part := range item.Content {
+			switch part.Type {
+			case "output_text":
+				sb.WriteString(part.Text)
+			case "refusal":
+				return "", fmt.Errorf("model refused: %s", part.Refusal)
+			}
+		}
+	}
+	if sb.Len() == 0 {
+		return "", fmt.Errorf("empty response")
+	}
+	return sb.String(), nil
+}
+
 // -- Google Gemini Implementation --
 
+func isGemini(model string) bool {
+	return strings.HasPrefix(strings.ToLower(model), "gemini")
+}
+
+// normalizeGeminiModel expands the short aliases the CLI accepts.
+func normalizeGeminiModel(model string) string {
+	switch model {
+	case "gemini-pro":
+		return models.ModelGeminiPro
+	case "gemini-flash":
+		return models.ModelGeminiFlash
+	}
+	return model
+}
+
 func callGemini(ctx context.Context, sysPrompt, userPayload, apiKey, model, apiBase string) (models.LLMResult, error) {
-	if model == "gemini-pro" || model == "gemini-3-pro-preview" {
-		model = models.ModelGeminiPro
-	}
-	if model == "gemini-flash" || model == "gemini-2.5-flash" {
-		model = models.ModelGeminiFlash
-	}
-	jsonResp, err := executeGeminiRaw(ctx, sysPrompt, userPayload, apiKey, model, apiBase)
+	jsonResp, err := executeGeminiRaw(ctx, sysPrompt, userPayload, apiKey, normalizeGeminiModel(model), apiBase)
 	if err != nil {
 		return models.LLMResult{}, err
 	}
@@ -539,5 +557,3 @@ func (t *testProxyTransport) RoundTrip(req *http.Request) (*http.Response, error
 	}
 	return rt.RoundTrip(req)
 }
-
-

@@ -39,15 +39,18 @@ func mockResponse(w http.ResponseWriter, sentinelSafe bool, verdict string) {
 		panic(fmt.Sprintf("failed to marshal mock content: %v", err))
 	}
 
-	// 3. Construct the outer Gemini/LLM response structure
-	// We preserve the structure expected by the client parser
+	// 3. Wrap it in an OpenAI Responses API result: reasoning items may
+	// precede the assistant message, whose output_text part holds the JSON.
 	response := map[string]interface{}{
-		"items": []map[string]interface{}{
+		"object": "response",
+		"output": []map[string]interface{}{
+			{"type": "reasoning", "summary": []interface{}{}},
 			{
-				"role": "model",
+				"type": "message",
+				"role": "assistant",
 				"content": []map[string]interface{}{
 					{
-						"type": "text",
+						"type": "output_text",
 						// string(contentBytes) ensures we pass the JSON string exactly as the LLM would
 						"text": string(contentBytes),
 					},
@@ -188,5 +191,80 @@ func TestBuildModernPrompts_Nonce(t *testing.T) {
 
 	if !strings.Contains(p1, "### BEGIN DATA [UNIQUE1] ###") {
 		t.Error("Prompt missing secure nonce delimiter")
+	}
+}
+
+// TestExecuteOpenAIRaw_RequestShape pins the Responses API request body:
+// messages under "input", JSON mode under "text.format", storage disabled.
+func TestExecuteOpenAIRaw_RequestShape(t *testing.T) {
+	var got map[string]json.RawMessage
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Errorf("path = %q; want /v1/responses", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		mockResponse(w, true, "MATCH")
+	}))
+	defer ts.Close()
+
+	if _, err := executeOpenAIRaw(context.Background(), "sys", "user", "k", "gpt-4o", ts.URL+"/v1"); err != nil {
+		t.Fatalf("executeOpenAIRaw: %v", err)
+	}
+
+	var input []models.OpenAIInputMessage
+	if err := json.Unmarshal(got["input"], &input); err != nil || len(input) != 2 ||
+		input[0].Role != "developer" || input[0].Content != "sys" || input[1].Role != "user" || input[1].Content != "user" {
+		t.Errorf("input = %s; want developer+user messages", got["input"])
+	}
+	if string(got["text"]) != `{"format":{"type":"json_object"}}` {
+		t.Errorf("text = %s; want JSON mode", got["text"])
+	}
+	if string(got["store"]) != "false" {
+		t.Errorf("store = %s; want false", got["store"])
+	}
+	for _, legacy := range []string{"items", "response_format"} {
+		if _, ok := got[legacy]; ok {
+			t.Errorf("request carries non-Responses-API field %q", legacy)
+		}
+	}
+}
+
+func TestResponsesOutputText(t *testing.T) {
+	refusal := models.OpenAIResponsesResponse{Output: []models.OpenAIOutputItem{{
+		Type: "message", Role: "assistant",
+		Content: []models.OpenAIContentPart{{Type: "refusal", Refusal: "no"}},
+	}}}
+	if _, err := responsesOutputText(refusal); err == nil {
+		t.Error("refusal: want error")
+	}
+	if _, err := responsesOutputText(models.OpenAIResponsesResponse{}); err == nil {
+		t.Error("empty output: want error")
+	}
+}
+
+// TestCallLLM_SentinelUsesRequestedModel verifies the injection sentinel runs
+// on the caller's model; a hardcoded one fails on keys and endpoints that do
+// not serve it.
+func TestCallLLM_SentinelUsesRequestedModel(t *testing.T) {
+	var seen []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req models.OpenAIResponsesRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		seen = append(seen, req.Model)
+		if strings.Contains(req.Input[0].Content, "Sentinel") {
+			mockResponse(w, true, "")
+		} else {
+			mockResponse(w, true, "MATCH")
+		}
+	}))
+	defer ts.Close()
+
+	if _, err := CallLLM("msg", nil, "k", "my-proxy-model", ts.URL); err != nil {
+		t.Fatalf("CallLLM: %v", err)
+	}
+	if len(seen) != 2 || seen[0] != "my-proxy-model" || seen[1] != "my-proxy-model" {
+		t.Errorf("models used = %v; want the requested model for both sentinel and audit", seen)
 	}
 }

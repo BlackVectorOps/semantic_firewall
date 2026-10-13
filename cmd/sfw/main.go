@@ -4,9 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/BlackVectorOps/semantic_firewall/v4/internal/cli"
+	"github.com/BlackVectorOps/semantic_firewall/v4/internal/llm"
 	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/models"
 	version "github.com/BlackVectorOps/semantic_firewall/v4/pkg/version"
 )
@@ -50,8 +50,12 @@ Commands:
   audit   Verify if commit message matches structural code changes (Level 3: Intent)
           Uses internal diff engine and optional LLM API to detect "Lies".
           Flags:
-            --api-key     API Key (OpenAI or Gemini). REQUIRED.
-            --model       LLM Model (default: gpt-4o, supports gemini-1.5-pro)
+            --api-key     API key for the model's provider. Prefer the
+                          ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY
+                          environment variables. Needed only when the diff has
+                          high-risk changes to verify; for Claude models the
+                          Anthropic SDK's own credential chain also applies.
+            --model       LLM model (default: claude-opus-5-5; also gpt-*, gemini-*)
             --api-base    Custom API Base URL (for testing/proxying)
             --no-sandbox  Disable gVisor/Namespace isolation
 
@@ -63,7 +67,7 @@ Commands:
 Examples:
   sfw check ./cmd/app
   sfw diff old.go new.go
-  sfw audit old.go new.go "fix typo" --api-key sk-...
+  ANTHROPIC_API_KEY=... sfw audit old.go new.go "fix typo"
   sfw index malware.go --name "Beacon_v1" --severity CRITICAL
   sfw scan ./src --db signatures.db
   sfw version
@@ -90,8 +94,7 @@ Examples:
 
 	auditCmd := flag.NewFlagSet("audit", flag.ExitOnError)
 	auditApiKey := auditCmd.String("api-key", "", "API Key (WARNING: Prefer ENV vars to avoid history leaks)")
-	// Default updated to gpt-4o per 2026 standards (Reasoning Optimized)
-	auditModel := auditCmd.String("model", "gpt-4o", "LLM Model to use")
+	auditModel := auditCmd.String("model", models.ModelClaudeOpus, "LLM model: claude-* (default), gpt-*/o*, or gemini-*")
 	auditApiBase := auditCmd.String("api-base", "", "Custom API Base URL")
 	auditNoSandbox := auditCmd.Bool("no-sandbox", false, "Disable gVisor/Namespace isolation")
 
@@ -154,19 +157,13 @@ Examples:
 		apiKey := *auditApiKey
 		// Warn on flag usage, check env vars if flag is empty
 		if apiKey != "" {
-			fmt.Fprintln(os.Stderr, "warning: passing API key via flag is insecure; use OPENAI_API_KEY or GEMINI_API_KEY environment variables.")
+			fmt.Fprintln(os.Stderr, "warning: passing API key via flag is insecure; use ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY environment variables.")
 		} else {
-			if strings.HasPrefix(strings.ToLower(*auditModel), "gemini") {
-				apiKey = os.Getenv("GEMINI_API_KEY")
-			} else {
-				apiKey = os.Getenv("OPENAI_API_KEY")
-			}
+			apiKey = os.Getenv(llm.APIKeyEnvVar(*auditModel))
 		}
 
-		if apiKey == "" {
-			fmt.Fprintln(os.Stderr, "Error: API Key is required for audit. Set --api-key or OPENAI_API_KEY/GEMINI_API_KEY.")
-			os.Exit(1)
-		}
+		// A key is only needed when the diff contains high-risk changes for
+		// the LLM to verify; RunAudit fails closed if one is needed but absent.
 
 		exitCode, err := cli.RunAudit(os.Stdout, auditCmd.Arg(0), auditCmd.Arg(1), auditCmd.Arg(2), apiKey, *auditModel, *auditApiBase, *auditNoSandbox)
 		if err != nil {
