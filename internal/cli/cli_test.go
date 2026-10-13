@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
 	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/models"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -156,10 +158,6 @@ func TestDependencyFilter(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		// We verify the logic used inside collectDependencies
-		// Mock package structure
-		deps := make(map[string]*packages.Package)
-		visited := make(map[string]bool)
 		pkg := &packages.Package{
 			PkgPath: "main",
 			Imports: map[string]*packages.Package{
@@ -167,12 +165,117 @@ func TestDependencyFilter(t *testing.T) {
 			},
 		}
 
-		collectDependencies(pkg, deps, false, visited, "")
-
-		_, kept := deps[tc.path]
+		kept := false
+		for _, d := range selectDependencies([]*packages.Package{pkg}, false) {
+			if d.PkgPath == tc.path {
+				kept = true
+			}
+		}
 		if kept != tc.expect {
 			t.Errorf("Filter logic for %q = %v; want %v", tc.path, kept, tc.expect)
 		}
+	}
+}
+
+func depPaths(pkgs []*packages.Package) []string {
+	var out []string
+	for _, p := range pkgs {
+		out = append(out, p.PkgPath)
+	}
+	return out
+}
+
+// TestSelectDependencies_TraversesOwnModule verifies that third-party imports
+// reached through the project's own packages count as dependencies, and that
+// only transitive mode follows a dependency's own imports.
+func TestSelectDependencies_TraversesOwnModule(t *testing.T) {
+	own := &packages.Module{Path: "example.com/app"}
+	depMod := &packages.Module{Path: "example.com/lib"}
+	nestedMod := &packages.Module{Path: "example.com/nested"}
+
+	nested := &packages.Package{PkgPath: "example.com/nested", Module: nestedMod}
+	lib := &packages.Package{PkgPath: "example.com/lib", Module: depMod,
+		Imports: map[string]*packages.Package{"example.com/nested": nested}}
+	internalPkg := &packages.Package{PkgPath: "example.com/app/internal/store", Module: own,
+		Imports: map[string]*packages.Package{"example.com/lib": lib}}
+	root := &packages.Package{PkgPath: "example.com/app/cmd/app", Module: own,
+		Imports: map[string]*packages.Package{
+			"fmt":                            {PkgPath: "fmt"},
+			"example.com/app/internal/store": internalPkg,
+		}}
+
+	if got := depPaths(selectDependencies([]*packages.Package{root}, false)); !slices.Equal(got, []string{"example.com/lib"}) {
+		t.Errorf("direct = %v; want [example.com/lib]", got)
+	}
+	if got := depPaths(selectDependencies([]*packages.Package{root}, true)); !slices.Equal(got, []string{"example.com/lib", "example.com/nested"}) {
+		t.Errorf("transitive = %v; want [example.com/lib example.com/nested]", got)
+	}
+}
+
+// TestSelectDependencies_ModuleIdentityNotPrefix verifies that a dependency
+// whose module path merely shares a prefix with the target's module is still
+// treated as a dependency.
+func TestSelectDependencies_ModuleIdentityNotPrefix(t *testing.T) {
+	dep := &packages.Package{PkgPath: "github.com/foo/barbaz", Module: &packages.Module{Path: "github.com/foo/barbaz"}}
+	root := &packages.Package{PkgPath: "github.com/foo/bar", Module: &packages.Module{Path: "github.com/foo/bar"},
+		Imports: map[string]*packages.Package{"github.com/foo/barbaz": dep}}
+
+	if got := depPaths(selectDependencies([]*packages.Package{root}, false)); !slices.Equal(got, []string{"github.com/foo/barbaz"}) {
+		t.Errorf("deps = %v; want [github.com/foo/barbaz]", got)
+	}
+}
+
+// countingScanner records how many functions were submitted for scanning.
+type countingScanner struct{ scanned int }
+
+func (c *countingScanner) ScanTopology(*topology.FunctionTopology, string) ([]detection.ScanResult, error) {
+	c.scanned++
+	return nil, nil
+}
+
+func (c *countingScanner) ScanTopologyExact(*topology.FunctionTopology, string) (*detection.ScanResult, error) {
+	c.scanned++
+	return nil, nil
+}
+
+func (c *countingScanner) Close() error { return nil }
+
+// TestRunScanDeps_ScansDependencyFunctions loads this repository's pkg/api,
+// whose only third-party imports arrive through other packages of this module
+// (pkg/diff imports golang.org/x/tools). Direct mode used to load those
+// imports as type-less placeholders and scan zero functions in them.
+func TestRunScanDeps_ScansDependencyFunctions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("loads and builds SSA for real dependencies")
+	}
+
+	run := func(depth string) ([]string, int, int) {
+		scanner := &countingScanner{}
+		_, funcs, deps, err := RunScanDeps(RealPackageLoader{}, "../../pkg/api",
+			models.ScanOptions{ScanDeps: true, DepsDepth: depth}, scanner)
+		if err != nil {
+			t.Fatalf("RunScanDeps(%s): %v", depth, err)
+		}
+		return deps, funcs, scanner.scanned
+	}
+
+	directDeps, directFuncs, directScanned := run("direct")
+	if !slices.Contains(directDeps, "golang.org/x/tools/go/ssa") {
+		t.Errorf("direct deps = %v; want golang.org/x/tools/go/ssa (imported via pkg/diff)", directDeps)
+	}
+	for _, d := range directDeps {
+		if strings.HasPrefix(d, "github.com/BlackVectorOps/semantic_firewall/") {
+			t.Errorf("own-module package %s reported as a dependency", d)
+		}
+	}
+	if directFuncs == 0 || directScanned != directFuncs {
+		t.Errorf("direct: functions = %d, scanned = %d; want equal and > 0", directFuncs, directScanned)
+	}
+
+	transitiveDeps, transitiveFuncs, _ := run("transitive")
+	if len(transitiveDeps) <= len(directDeps) || transitiveFuncs <= directFuncs {
+		t.Errorf("transitive (%d deps, %d funcs) should exceed direct (%d deps, %d funcs)",
+			len(transitiveDeps), transitiveFuncs, len(directDeps), directFuncs)
 	}
 }
 

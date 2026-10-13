@@ -169,8 +169,8 @@ flowchart LR
       "function": "HandleLogin",
       "status": "modified",
       "added_ops": ["Call <log.Printf>", "Call <net.Dial>"],
-      "risk_score": 15,
-      "topology_delta": "Calls+2, AddedGoroutine"
+      "risk_score": 32,
+      "topology_delta": "Capability+network(net.Dial), Calls+1, AddedGoroutine"
     }
   ],
   "topology_matches": [
@@ -552,8 +552,8 @@ sfw scan . --deps --exact --db signatures.db
 | Flag | Description |
 |------|-------------|
 | `--deps` | Enable dependency scanning |
-| `--deps-depth direct` | Scan only direct imports (default) |
-| `--deps-depth transitive` | Scan all transitive dependencies |
+| `--deps-depth direct` | Scan third-party packages imported by any package of your module (default) |
+| `--deps-depth transitive` | Also scan the dependencies of those packages |
 | `--exact` | O(1) exact topology match only (fastest) |
 
 > **Note:** Dependency scanning requires modules to be downloaded (`go mod download`). Stdlib packages are automatically excluded.
@@ -1197,18 +1197,33 @@ Where weights prioritize:
 
 **Risk-Aware Diff Scoring**
 
-When comparing function versions, structural changes receive risk scores:
+When comparing function versions, each change is scored against the high-risk threshold (`10`). Scoring is driven by what a function newly *reaches*, not by how many calls changed, so swapping `fmt.Println(cmd)` for `net.Dial("tcp", cmd)` is flagged even though the call count is unchanged.
+
+**Escalations** -- each reaches the threshold on its own:
 
 | Change | Risk Points |
 |--------|-------------|
-| New call | +5 each |
-| New loop | +10 each |
-| New goroutine | +15 |
-| New defer | +3 |
-| New panic | +5 |
-| Entropy increase >1.0 | +10 |
+| Newly reached capability: process execution (`os/exec`, `syscall.Exec`, `os.StartProcess`) | +30 |
+| Newly reached capability: raw syscalls (`syscall`, `x/sys/unix`, `x/sys/windows`) or `plugin` | +25 |
+| Newly reached capability: network (`net` dial/listen/lookup, `net/http` client and server calls, `crypto/tls` dial/listen) | +20 |
+| Newly reached capability: reflective invocation (`reflect.Value.Call`) | +15 |
+| Newly reached capability: filesystem mutation (`os.WriteFile`, `os.Remove`, `os.Chmod`, ...) | +10 |
+| Another new sensitive call in a capability class the function already used | +5 each |
+| New goroutine | +10 |
+| String-literal entropy crossing into the HIGH or PACKED band | +10 |
+| Obfuscation profile rising to MODERATE or HIGH | +10 |
 
-High cumulative risk scores flag changes that warrant extra review.
+**Structural churn** -- reported in `topology_delta`, but capped at `9` in total (including the `+5` base for an added function), so churn alone never flags a change:
+
+| Change | Risk Points |
+|--------|-------------|
+| New call target | +2 each |
+| New loop | +5 each |
+| New branch | +1 each |
+| New defer | +2 |
+| New panic | +3 |
+
+Capabilities are matched by import path, include calls made through function values, and count calls inside range-over-func loop bodies toward the enclosing function. Calls to imported packages' `init` functions are ignored, so adding an import is not itself a change. Removing structure is not scored; see [Detection scope](#detection-scope).
 
 
 </details>
