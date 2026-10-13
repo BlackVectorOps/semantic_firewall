@@ -1,0 +1,168 @@
+package diff_test
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/diff"
+)
+
+// fingerprintsOf fingerprints every function in src and returns them keyed by
+// short function name.
+func fingerprintsOf(t *testing.T, src string) map[string]string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "x.go")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	results, err := diff.FingerprintSource(path, src, ir.DefaultLiteralPolicy)
+	if err != nil {
+		t.Fatalf("FingerprintSource: %v", err)
+	}
+	out := make(map[string]string, len(results))
+	for _, r := range results {
+		out[diff.ShortFuncName(r.FunctionName)] = r.Fingerprint
+	}
+	return out
+}
+
+// collisionSrc holds pairs of functions whose behaviour differs in a
+// security-relevant way. SECURITY.md classes a shared fingerprint for any of
+// them as a semantic collision.
+const collisionSrc = `package x
+
+import (
+	"crypto/md5"
+	crand "crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"hash"
+	mrand "math/rand"
+)
+
+func AuthA(user, pass string) bool {
+	if user == "admin" && pass == "hunter2" {
+		return true
+	}
+	return false
+}
+
+func AuthB(user, pass string) bool {
+	if user == "admin" && pass == "hunter2" {
+		return true
+	}
+	return true
+}
+
+func TLSA() *tls.Config { c := &tls.Config{}; c.InsecureSkipVerify = false; return c }
+func TLSB() *tls.Config { c := &tls.Config{}; c.InsecureSkipVerify = true; return c }
+
+func KeyA(b []byte) error { _, err := crand.Read(b); return err }
+func KeyB(b []byte) error { _, err := mrand.Read(b); return err }
+
+func HashA() hash.Hash { return sha256.New() }
+func HashB() hash.Hash { return md5.New() }
+
+type Safe struct{}
+type Unsafe struct{}
+
+func (Safe) Run(s string) string   { return s }
+func (Unsafe) Run(s string) string { return s + s }
+
+func CallA(s string) string { return Safe{}.Run(s) }
+func CallB(s string) string { return Unsafe{}.Run(s) }
+
+func allow() {}
+func deny()  { println() }
+
+func SelA(admin, guest chan int) {
+	select {
+	case <-admin:
+		allow()
+	case <-guest:
+		deny()
+	}
+}
+
+func SelB(admin, guest chan int) {
+	select {
+	case <-guest:
+		allow()
+	case <-admin:
+		deny()
+	}
+}
+
+func useA(x int) {}
+func useB(x int) { println(x) }
+
+func RecvA(a, b chan int) {
+	select {
+	case x := <-a:
+		useA(x)
+	case y := <-b:
+		useB(y)
+	}
+}
+
+func RecvB(a, b chan int) {
+	select {
+	case x := <-b:
+		useA(x)
+	case y := <-a:
+		useB(y)
+	}
+}
+`
+
+func TestFingerprint_NoSemanticCollisions(t *testing.T) {
+	fps := fingerprintsOf(t, collisionSrc)
+	pairs := [][2]string{
+		{"AuthA", "AuthB"},
+		{"TLSA", "TLSB"},
+		{"KeyA", "KeyB"},
+		{"HashA", "HashB"},
+		{"CallA", "CallB"},
+		{"SelA", "SelB"},
+		{"RecvA", "RecvB"},
+	}
+	for _, p := range pairs {
+		a, b := fps[p[0]], fps[p[1]]
+		if a == "" || b == "" {
+			t.Fatalf("missing fingerprint for %s or %s: %v", p[0], p[1], fps)
+		}
+		if a == b {
+			t.Errorf("%s and %s behave differently but share fingerprint %s", p[0], p[1], a[:16])
+		}
+	}
+}
+
+// Renaming locals and parameters must not change the fingerprint; the fixes
+// for the collisions above must not cost this invariance.
+func TestFingerprint_RenameInvariance(t *testing.T) {
+	fps := fingerprintsOf(t, `package x
+
+import "strings"
+
+func A(name string, n int) string {
+	out := ""
+	for i := 0; i < n; i++ {
+		out += strings.ToUpper(name)
+	}
+	return out
+}
+
+func B(s string, count int) string {
+	acc := ""
+	for k := 0; k < count; k++ {
+		acc += strings.ToUpper(s)
+	}
+	return acc
+}
+`)
+	if fps["A"] != fps["B"] {
+		t.Errorf("renamed locals changed the fingerprint: %s vs %s", fps["A"], fps["B"])
+	}
+}

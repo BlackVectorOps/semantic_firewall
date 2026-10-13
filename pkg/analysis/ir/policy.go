@@ -68,6 +68,12 @@ func (p *LiteralPolicy) ShouldAbstract(c *ssa.Const, usageContext ssa.Instructio
 		return false
 	}
 
+	// A boolean has two values; masking it can only hide a flipped flag
+	// (an auth check returning true, InsecureSkipVerify), never a magic number.
+	if c.Value.Kind() == constant.Bool {
+		return false
+	}
+
 	if c.Value.Kind() == constant.String {
 		if p.KeepStringLiterals {
 			return false
