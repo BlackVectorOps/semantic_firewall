@@ -405,12 +405,10 @@ type TreeLoadOptions struct {
 // commits in the pilot (go-cmp 8ebdfab3, x/text c8872a1a, x/text db455d00):
 // in each case the failing sub-package directory EXISTS at the worktree-
 // root-relative path that the real import declares, so a synthesized go.mod
-// declaring the REAL module name placed at the worktree root would resolve
-// the imports correctly. The fix shape — adding a moduleNameHint parameter
-// and loading the target package(s) by module-relative path from the tree
-// root — is mechanism-verified but implementation-deferred. Affected
-// corpus: pre-modules-era multi-package trees (modern commits carry their
-// own go.mod and don't go through this synthesis path).
+// declaring the REAL module name resolves the imports correctly. Pass that
+// name as TreeLoadOptions.ModuleNameHint via FingerprintTreeWithOptions.
+// Affected corpus: pre-modules-era multi-package trees (modern commits carry
+// their own go.mod and don't go through this synthesis path).
 func FingerprintTree(rootDir string, fileFilter func(string) bool, policy ir.LiteralPolicy) ([]FingerprintResult, LoadMeta, error) {
 	return fingerprintTreeInternal(rootDir, fileFilter, policy, false, TreeLoadOptions{})
 }
@@ -566,8 +564,8 @@ func parseModuleLine(data []byte) string {
 // self-contained single-package trees but does not resolve same-module
 // sub-package imports in real multi-package trees, where source imports
 // the real module path and the synthetic "synthetic.local/anonymous"
-// identity cannot satisfy those lookups. The verified-deferred fix is a
-// moduleNameHint parameter on FingerprintTreeAdvanced.
+// identity cannot satisfy those lookups; callers that know the real module
+// path pass it as TreeLoadOptions.ModuleNameHint.
 func syntheticModulePath() string {
 	return "synthetic.local/anonymous"
 }
