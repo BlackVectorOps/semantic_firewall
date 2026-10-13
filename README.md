@@ -38,14 +38,14 @@ The analysis never executes the code under test.
 ## Install
 
 ```bash
-go install github.com/BlackVectorOps/semantic_firewall/v5/cmd/sfw@v5.0.0
+go install github.com/BlackVectorOps/semantic_firewall/v5/cmd/sfw@v5.1.0
 ```
 
 `go.mod` declares `go 1.26.3`. `sfw version` prints the build:
 
 ```
 Semantic Firewall CLI
-Build: v5.0.0 (Pebble/Gob+PackedIdx)
+Build: v5.1.0 (Pebble/Gob+PackedIdx)
 ```
 
 ## Commands
@@ -870,14 +870,14 @@ jobs:
         with:
           fetch-depth: 0        # diff and audit read HEAD~1
       - id: sfw
-        uses: BlackVectorOps/semantic_firewall@v5.0.0
+        uses: BlackVectorOps/semantic_firewall@v5.1.0
         with:
           mode: audit
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
 The Action does the following before running `sfw`:
-- installs `sfw` v5.0.0 with `go install`, or uses an `sfw` already on `PATH`;
+- installs `sfw` v5.1.0 with `go install`, or uses an `sfw` already on `PATH`;
 - installs `runsc` release `20260126.0` and checks its SHA-512;
 - relaxes the AppArmor user-namespace restriction for it.
 
