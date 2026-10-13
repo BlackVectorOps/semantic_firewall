@@ -14,6 +14,7 @@ import (
 	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/diff"
 	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/storage/jsondb"
 	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/storage/pebbledb"
+	"golang.org/x/tools/go/ssa"
 )
 
 func RunIndex(target, name, severity, category, dbPath string) error {
@@ -98,7 +99,7 @@ func RunIndexPebble(target string, results []diff.FingerprintResult, name, sever
 			continue
 		}
 		topo := topology.ExtractTopology(fn)
-		if topo == nil {
+		if topo == nil || isImportOnlyInit(fn, topo) {
 			continue
 		}
 
@@ -151,7 +152,7 @@ func RunIndexJSON(target string, results []diff.FingerprintResult, name, severit
 			continue
 		}
 		topo := topology.ExtractTopology(fn)
-		if topo == nil {
+		if topo == nil || isImportOnlyInit(fn, topo) {
 			continue
 		}
 
@@ -177,4 +178,13 @@ func RunIndexJSON(target string, results []diff.FingerprintResult, name, severit
 		return nil, 0, err
 	}
 	return indexed, len(scanner.GetDatabase().Signatures), nil
+}
+
+// isImportOnlyInit reports whether fn is a package initializer that only runs
+// its imports' initializers. Its topology depends on nothing but the import
+// set, so a signature built from it matches any package that imports the same
+// packages -- an index of a reverse shell would flag every program importing
+// net and os/exec.
+func isImportOnlyInit(fn *ssa.Function, topo *topology.FunctionTopology) bool {
+	return fn.Synthetic == "package initializer" && len(topo.CallTargets) == 0 && len(topo.StringLiterals) == 0
 }
