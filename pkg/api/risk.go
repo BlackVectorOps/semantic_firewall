@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -162,6 +163,10 @@ func assessTopologyDelta(oldT, newT *topology.FunctionTopology) riskAssessment {
 	if newT.HasPanic && !oldT.HasPanic {
 		r.labels = append(r.labels, models.TopoDeltaPanic)
 		r.structural += riskNewPanic
+	}
+
+	if !slices.Equal(oldT.StringLiterals, newT.StringLiterals) {
+		r.labels = append(r.labels, "StringLiterals~")
 	}
 
 	// Entropy drift from ordinary string literals (log and error messages) is
