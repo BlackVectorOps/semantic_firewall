@@ -53,10 +53,10 @@ func TestAddSignatures(t *testing.T) {
 	if s.db.Signatures[0].Name != "Sig1" {
 		t.Errorf("Expected Sig1, got %s", s.db.Signatures[0].Name)
 	}
-    // Verify IDs were generated
-    if s.db.Signatures[0].ID == "" {
-        t.Error("ID should have been generated for Sig1")
-    }
+	// Verify IDs were generated
+	if s.db.Signatures[0].ID == "" {
+		t.Error("ID should have been generated for Sig1")
+	}
 }
 
 func TestAddSignatures_UpdatesSigMap(t *testing.T) {
@@ -119,5 +119,27 @@ func BenchmarkAddSignaturesBatch(b *testing.B) {
 		s := NewScanner()
 		s.db.Signatures = make([]detection.Signature, 0, count)
 		_ = s.AddSignatures(sigs)
+	}
+}
+
+// SaveDatabase applies the same system-directory guard as PebbleDB writes,
+// including through a symlinked parent of a file that does not exist yet.
+func TestSaveDatabase_RefusesSystemDir(t *testing.T) {
+	if _, err := os.Stat("/etc"); err != nil {
+		t.Skip("/etc not present")
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink("/etc", link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	s := NewScanner()
+	for _, p := range []string{"/etc/sfw-test.json", filepath.Join(link, "sfw-test.json")} {
+		if err := s.SaveDatabase(p); err == nil || !strings.Contains(err.Error(), "security violation") {
+			t.Errorf("SaveDatabase(%q) = %v; want a security violation", p, err)
+		}
+	}
+	ok := filepath.Join(t.TempDir(), "sigs.json")
+	if err := s.SaveDatabase(ok); err != nil {
+		t.Errorf("SaveDatabase(%q) = %v; want nil", ok, err)
 	}
 }

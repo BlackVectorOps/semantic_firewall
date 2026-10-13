@@ -19,7 +19,7 @@ type Signature struct {
 	EntropyScore        float64             `json:"entropy_score"`
 	EntropyTolerance    float64             `json:"entropy_tolerance"`
 	NodeCount           int                 `json:"node_count"`
-	LoopDepth           int                 `json:"loop_depth"`
+	LoopDepth           int                 `json:"loop_depth"` // loop count (FunctionTopology.LoopCount), not nesting depth; gob and JSON databases key the field by this name
 	IdentifyingFeatures IdentifyingFeatures `json:"identifying_features"`
 	Metadata            SignatureMetadata   `json:"metadata"`
 

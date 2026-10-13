@@ -340,6 +340,12 @@ runs:
                 AVG_PCT="100.0"
               fi
               echo "semantic-match-pct=${AVG_PCT}" >> "$GITHUB_OUTPUT"
+
+              # A file that could not be analyzed is not a passing file.
+              if [[ $ERROR_COUNT -gt 0 ]]; then
+                echo "::error::sfw diff failed for ${ERROR_COUNT} file(s)"
+                EXIT_CODE=1
+              fi
             fi
             ;;
 
@@ -442,11 +448,13 @@ runs:
                    : > "$OLD_FILE"
                 fi
 
-                AUDIT_ARGS=("$OLD_FILE" "$NEW_FILE" "$COMMIT_MSG")
-                AUDIT_ARGS+=("--model" "${INPUT_MODEL:-claude-opus-5-5}")
+                # Flags must precede the positional arguments: Go's flag
+                # parser stops at the first non-flag argument.
+                AUDIT_ARGS=("--model" "${INPUT_MODEL:-claude-opus-5-5}")
                 if [[ -n "${INPUT_API_BASE:-}" ]]; then
                    AUDIT_ARGS+=("--api-base" "$INPUT_API_BASE")
                 fi
+                AUDIT_ARGS+=("--" "$OLD_FILE" "$NEW_FILE" "$COMMIT_MSG")
 
                 set +e
                 AUDIT_OUT=$(sfw audit "${AUDIT_ARGS[@]}" 2>&1)

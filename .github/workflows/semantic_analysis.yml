@@ -37,7 +37,7 @@ jobs:
           CGO_ENABLED=0 go build -o bin/sfw ./cmd/sfw
           chmod +x bin/sfw
           # Verify binary works
-          ./bin/sfw --version || ./bin/sfw help || true
+          ./bin/sfw version
 
       - name: Determine Mode
         id: mode

@@ -22,11 +22,11 @@ func TestGenerateSpec(t *testing.T) {
 	// Uses t.TempDir() to create a real directory to satisfy os.Stat checks in the manager.
 	mockGoroot := t.TempDir()
 
-	// resolveGoToolchain prefers GOROOT/GOCACHE from the environment over
+	// resolveGoToolchain prefers GOROOT/GOMODCACHE from the environment over
 	// `go env`; clear them so the mock below is what gets resolved. The go
 	// command exports GOROOT to test binaries when it switches toolchains.
 	t.Setenv("GOROOT", "")
-	t.Setenv("GOCACHE", "")
+	t.Setenv("GOMODCACHE", "")
 
 	restoreExec := replaceExecFunc(func(ctx context.Context, cmd string, args ...string) *exec.Cmd {
 		// Intercepts "go env GOROOT"
@@ -93,6 +93,27 @@ func TestGenerateSpec(t *testing.T) {
 	// This confirms resolveSystemGoroot successfully used our mock
 	if !foundGorootMount {
 		t.Errorf("System GOROOT mount %s not found (mock injection failed)", mockGoroot)
+	}
+
+	// Verification 4: Go caches. The module cache is mounted read-only (the
+	// loader runs with GOPROXY=off); the build cache must be writable, so it
+	// lives on the /tmp tmpfs rather than on a read-only host mount.
+	foundModMount := false
+	for _, m := range spec.Mounts {
+		if m.Destination == "/gomodcache" {
+			foundModMount = m.Source == mockGoroot && slices.Contains(m.Options, "ro")
+		}
+		if m.Destination == "/gocache" {
+			t.Errorf("GOCACHE must not be a read-only bind mount: %+v", m)
+		}
+	}
+	if !foundModMount {
+		t.Errorf("read-only /gomodcache mount of %s not found", mockGoroot)
+	}
+	for _, want := range []string{"GOMODCACHE=/gomodcache", "GOCACHE=/tmp/gocache"} {
+		if !slices.Contains(spec.Process.Env, want) {
+			t.Errorf("Process.Env missing %s: %v", want, spec.Process.Env)
+		}
 	}
 }
 

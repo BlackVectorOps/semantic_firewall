@@ -35,12 +35,12 @@ func main() {
 
 A Semantic Malware Scanner for Go source files.
 
-Usage:
+Usage (flags must come before file arguments):
   sfw check [--strict] <file.go|directory>    Fingerprint a file or recursively scan a directory
   sfw diff <old.go> <new.go>                  Semantic diff between two Go files
   sfw audit <old.go> <new.go> "<message>"     Audit a commit for deception using Semantic Analysis + LLM
-  sfw index <file.go> --name <name>           Index a malware sample into the signature database
-  sfw scan <file.go|directory> --db <path>    Scan code against the signature database
+  sfw index --name <name> <file.go>           Index a malware sample into the signature database
+  sfw scan --db <path> <file.go|directory>    Scan code against the signature database
   sfw migrate --from <json> --to <db>         Migrate JSON signatures to PebbleDB
   sfw stats --db <path>                       Show database statistics
 
@@ -68,8 +68,8 @@ Examples:
   sfw check ./cmd/app
   sfw diff old.go new.go
   ANTHROPIC_API_KEY=... sfw audit old.go new.go "fix typo"
-  sfw index malware.go --name "Beacon_v1" --severity CRITICAL
-  sfw scan ./src --db signatures.db
+  sfw index --name "Beacon_v1" --severity CRITICAL malware.go
+  sfw scan --db signatures.db ./src
   sfw version
 `)
 	}

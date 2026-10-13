@@ -62,6 +62,11 @@ type FunctionTopology struct {
 	HasSelect  bool
 	HasRange   bool
 
+	// HasInfiniteLoop reports a `for` statement without a condition
+	// (`for { ... }`) in the function's own body. Such a loop only ends
+	// through break, return, goto or panic.
+	HasInfiniteLoop bool
+
 	// Operator profile
 	BinOpCounts map[string]int
 	UnOpCounts  map[string]int
@@ -160,8 +165,13 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 				}
 			}
 
-			switch n.(type) {
-			case *ast.ForStmt, *ast.RangeStmt:
+			switch s := n.(type) {
+			case *ast.ForStmt:
+				astLoops++
+				if s.Cond == nil {
+					t.HasInfiniteLoop = true
+				}
+			case *ast.RangeStmt:
 				astLoops++
 			}
 			return true
