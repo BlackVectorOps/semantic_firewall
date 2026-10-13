@@ -316,7 +316,12 @@ runs:
                 [[ ! -f "$OLD_FILE" ]] && OLD_FILE="/dev/null"
                 [[ "$NEW_FILE" == "/dev/null" && "$OLD_FILE" == "/dev/null" ]] && continue
 
-                if ! DIFF_OUT=$(sfw diff -- "$OLD_FILE" "$NEW_FILE" 2>&1); then
+                # Keep stderr (warnings such as the runsc fallback notice) out
+                # of DIFF_OUT: it is parsed as JSON below.
+                DIFF_ERR="$LOCAL_TEMP/sfw_diff_stderr.log"
+                if ! DIFF_OUT=$(sfw diff -- "$OLD_FILE" "$NEW_FILE" 2>"$DIFF_ERR"); then
+                   echo "::warning::sfw diff failed for ${new_rel_path}"
+                   sed 's/^/  [sfw] /' "$DIFF_ERR" || true
                    DIFF_OUT='{}'
                    ((ERROR_COUNT++)) || true
                 fi
@@ -350,7 +355,13 @@ runs:
               exit 1
             fi
             
-            readonly TEMP_DB="$LOCAL_TEMP/sfw_sigs_copy.db"
+            # Keep the .json suffix: sfw selects the JSON backend by it and
+            # would otherwise open a JSON signature file as a PebbleDB directory.
+            if [[ "$INPUT_SIGNATURES" == *.json ]]; then
+              readonly TEMP_DB="$LOCAL_TEMP/sfw_sigs_copy.json"
+            else
+              readonly TEMP_DB="$LOCAL_TEMP/sfw_sigs_copy.db"
+            fi
             cp -R "$INPUT_SIGNATURES" "$TEMP_DB"
             
             SCAN_STDERR_FILE="$LOCAL_TEMP/sfw_scan_stderr.log"
