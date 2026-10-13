@@ -35,6 +35,13 @@ type FunctionTopology struct {
 	// Call profile: map of "package.func" or "method" -> count
 	CallSignatures map[string]int
 
+	// CallTargets counts every function called or referenced as a value,
+	// keyed by import-path-qualified name ("os/exec.Command"). Package
+	// initializers are excluded. Capabilities maps the subset of those keys
+	// that are security-sensitive to their capability class (CapExec, ...).
+	CallTargets  map[string]int
+	Capabilities map[string]string
+
 	// Granular instruction tracking
 	InstrCounts map[string]int
 
@@ -108,6 +115,8 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 		ParamCount:     len(fn.Params),
 		BlockCount:     len(fn.Blocks),
 		CallSignatures: make(map[string]int),
+		CallTargets:    make(map[string]int),
+		Capabilities:   make(map[string]string),
 		InstrCounts:    make(map[string]int),
 		BinOpCounts:    make(map[string]int),
 		UnOpCounts:     make(map[string]int),
@@ -220,6 +229,8 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 			}
 		}
 	}
+
+	collectCallTargets(fn, t)
 
 	// Calculate Cyclomatic Complexity: M = E - N + 2P
 	// For a single function, P (connected components) is usually 1.

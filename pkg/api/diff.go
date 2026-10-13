@@ -3,7 +3,6 @@ package api
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/ir"
 	"github.com/BlackVectorOps/semantic_firewall/v4/pkg/analysis/topology"
@@ -74,12 +73,20 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 
 		d := CompareFunctions(oldShort, m.OldResult, m.NewResult)
 
-		if d.Status == models.StatusModified && m.OldTopology != nil && m.NewTopology != nil {
-			delta, riskScore := CalculateTopologyDelta(m.OldTopology, m.NewTopology)
-			d.TopologyDelta = delta
-			d.RiskScore = riskScore
-			if riskScore >= models.RiskScoreHigh {
-				highRisk++
+		if m.OldTopology != nil && m.NewTopology != nil {
+			r := assessTopologyDelta(m.OldTopology, m.NewTopology)
+			// The canonical IR names callees without their package, so a
+			// fingerprint match can still hide a swapped-in capability
+			// (a same-named, same-signature function from another package).
+			if d.Status == models.StatusPreserved && len(r.newCapabilities) > 0 {
+				d.Status = models.StatusModified
+			}
+			if d.Status == models.StatusModified {
+				d.TopologyDelta = r.delta()
+				d.RiskScore = r.score(0)
+				if d.RiskScore >= models.RiskScoreHigh {
+					highRisk++
+				}
 			}
 		}
 
@@ -124,9 +131,11 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 		if fn != nil {
 			topo := topology.ExtractTopology(fn)
 			if topo != nil {
-				d, s := CalculateTopologyDelta(nil, topo)
-				delta = d
-				risk += s
+				a := assessTopologyDelta(nil, topo)
+				if len(a.labels) > 0 {
+					delta = a.delta()
+				}
+				risk = a.score(models.BaseRiskAddedFunc)
 			}
 		}
 
@@ -180,73 +189,6 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 		Functions:       functionDiffs,
 		TopologyMatches: topologyMatches,
 	}, nil
-}
-
-// CalculateTopologyDelta diffs two function topologies and returns a
-// short human label plus a heuristic risk score. Adding goroutines,
-// loops, or external calls weighs the score up; removing structure
-// is neutral.
-func CalculateTopologyDelta(oldT, newT *topology.FunctionTopology) (string, int) {
-	if newT == nil {
-		return models.TopoDeltaUnknown, 0
-	}
-	if oldT == nil {
-		oldT = &topology.FunctionTopology{}
-	}
-
-	var deltas []string
-	riskScore := 0
-
-	callDiff := len(newT.CallSignatures) - len(oldT.CallSignatures)
-	if callDiff > 0 {
-		deltas = append(deltas, fmt.Sprintf("Calls+%d", callDiff))
-		riskScore += callDiff * 5
-	} else if callDiff < 0 {
-		deltas = append(deltas, fmt.Sprintf("Calls%d", callDiff))
-	}
-
-	loopDiff := newT.LoopCount - oldT.LoopCount
-	if loopDiff > 0 {
-		deltas = append(deltas, fmt.Sprintf("Loops+%d", loopDiff))
-		riskScore += loopDiff * 10
-	} else if loopDiff < 0 {
-		deltas = append(deltas, fmt.Sprintf("Loops%d", loopDiff))
-	}
-
-	branchDiff := newT.BranchCount - oldT.BranchCount
-	if branchDiff > 0 {
-		deltas = append(deltas, fmt.Sprintf("Branches+%d", branchDiff))
-		riskScore += branchDiff * 2
-	} else if branchDiff < 0 {
-		deltas = append(deltas, fmt.Sprintf("Branches%d", branchDiff))
-	}
-
-	if newT.HasGo && !oldT.HasGo {
-		deltas = append(deltas, models.TopoDeltaGoroutine)
-		riskScore += 15
-	}
-
-	if newT.HasDefer && !oldT.HasDefer {
-		deltas = append(deltas, models.TopoDeltaDefer)
-		riskScore += 3
-	}
-
-	if newT.HasPanic && !oldT.HasPanic {
-		deltas = append(deltas, models.TopoDeltaPanic)
-		riskScore += 5
-	}
-
-	entropyDiff := newT.EntropyScore - oldT.EntropyScore
-	if entropyDiff > 1.0 {
-		deltas = append(deltas, fmt.Sprintf("Entropy+%.1f", entropyDiff))
-		riskScore += int(entropyDiff * 3)
-	}
-
-	if len(deltas) == 0 {
-		return models.TopoDeltaNone, 0
-	}
-
-	return strings.Join(deltas, ", "), riskScore
 }
 
 // CompareFunctions reduces two FingerprintResult values to a

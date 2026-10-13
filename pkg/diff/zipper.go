@@ -93,7 +93,7 @@ func (z *Zipper) alignAnchors() error {
 
 	for i, pOld := range z.oldFn.Params {
 		pNew := z.newFn.Params[i]
-		if !types.Identical(pOld.Type(), pNew.Type()) {
+		if !z.sameType(pOld.Type(), pNew.Type()) {
 			return fmt.Errorf("parameter %d type mismatch: %s vs %s", i, pOld.Type(), pNew.Type())
 		}
 		z.mapValue(pOld, pNew)
@@ -102,7 +102,7 @@ func (z *Zipper) alignAnchors() error {
 	if len(z.oldFn.FreeVars) == len(z.newFn.FreeVars) {
 		for i, fvOld := range z.oldFn.FreeVars {
 			fvNew := z.newFn.FreeVars[i]
-			if types.Identical(fvOld.Type(), fvNew.Type()) {
+			if z.sameType(fvOld.Type(), fvNew.Type()) {
 				z.mapValue(fvOld, fvNew)
 			}
 		}
@@ -285,7 +285,7 @@ func (z *Zipper) areEquivalent(a, b ssa.Instruction) bool {
 
 	if vA, ok := a.(ssa.Value); ok {
 		vB := b.(ssa.Value)
-		if !types.Identical(vA.Type(), vB.Type()) {
+		if !z.sameType(vA.Type(), vB.Type()) {
 			return false
 		}
 	}
@@ -331,34 +331,34 @@ func (z *Zipper) compareOps(a, b ssa.Instruction) bool {
 		return iA.Blocking == iB.Blocking
 	case *ssa.ChangeType:
 		iB := b.(*ssa.ChangeType)
-		return types.Identical(iA.Type(), iB.Type())
+		return z.sameType(iA.Type(), iB.Type())
 	case *ssa.Convert:
 		iB := b.(*ssa.Convert)
-		return types.Identical(iA.Type(), iB.Type())
+		return z.sameType(iA.Type(), iB.Type())
 	case *ssa.MakeInterface:
 		iB := b.(*ssa.MakeInterface)
-		return types.Identical(iA.Type(), iB.Type())
+		return z.sameType(iA.Type(), iB.Type())
 	case *ssa.TypeAssert:
 		iB := b.(*ssa.TypeAssert)
-		return types.Identical(iA.AssertedType, iB.AssertedType) && iA.CommaOk == iB.CommaOk
+		return z.sameType(iA.AssertedType, iB.AssertedType) && iA.CommaOk == iB.CommaOk
 	case *ssa.MakeSlice:
 		iB := b.(*ssa.MakeSlice)
-		return types.Identical(iA.Type(), iB.Type())
+		return z.sameType(iA.Type(), iB.Type())
 	case *ssa.MakeMap:
 		iB := b.(*ssa.MakeMap)
-		return types.Identical(iA.Type(), iB.Type())
+		return z.sameType(iA.Type(), iB.Type())
 	case *ssa.MakeChan:
 		iB := b.(*ssa.MakeChan)
-		return types.Identical(iA.Type(), iB.Type())
+		return z.sameType(iA.Type(), iB.Type())
 	case *ssa.Slice:
 		iB := b.(*ssa.Slice)
-		return types.Identical(iA.Type(), iB.Type())
+		return z.sameType(iA.Type(), iB.Type())
 	case *ssa.ChangeInterface:
 		iB := b.(*ssa.ChangeInterface)
-		return types.Identical(iA.Type(), iB.Type())
+		return z.sameType(iA.Type(), iB.Type())
 	case *ssa.SliceToArrayPointer:
 		iB := b.(*ssa.SliceToArrayPointer)
-		return types.Identical(iA.Type(), iB.Type())
+		return z.sameType(iA.Type(), iB.Type())
 	}
 	return true
 }
@@ -446,7 +446,7 @@ func (z *Zipper) compareOperands(a, b ssa.Instruction) bool {
 					return false
 				}
 				if valA.Type() != nil && valB.Type() != nil {
-					if !types.Identical(valA.Type(), valB.Type()) {
+					if !z.sameType(valA.Type(), valB.Type()) {
 						return false
 					}
 				}
@@ -635,4 +635,34 @@ func (z *Zipper) getFingerprint(instr ssa.Instruction) string {
 	res := sb.String()
 	z.fpCache[instr] = res
 	return res
+}
+
+// sameType compares types across the old and new programs. They come from
+// separate packages.Load calls, so a package-local named type (a method
+// receiver, a parameter of type *T) is a distinct types.Type object on each
+// side and never types.Identical to its counterpart. Fall back to comparing
+// type strings, rendering each side's own package unqualified so the
+// comparison also holds when the two versions were loaded under different
+// package paths.
+func (z *Zipper) sameType(a, b types.Type) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if types.Identical(a, b) {
+		return true
+	}
+	return types.TypeString(a, localQualifier(z.oldFn)) == types.TypeString(b, localQualifier(z.newFn))
+}
+
+func localQualifier(fn *ssa.Function) types.Qualifier {
+	var own *types.Package
+	if fn.Pkg != nil {
+		own = fn.Pkg.Pkg
+	}
+	return func(p *types.Package) string {
+		if p == own {
+			return ""
+		}
+		return p.Path()
+	}
 }
