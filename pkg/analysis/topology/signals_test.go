@@ -698,6 +698,22 @@ func F(ok, z bool) error {
 	return nil
 }
 func main() {}`, 1},
+		{"a side that jumps to a shared failure block", `package main
+func F(a, b bool) int {
+	if a { println("a"); goto fail }
+	if b { println("b"); goto fail }
+	return 1
+fail:
+	panic("no")
+}
+func main() {}`, 2},
+		{"an error kept in a field is passed through", `package main
+type S struct{ err error }
+func F(s *S, ok bool) error { if !ok { return s.err }; return nil }
+func main() {}`, 0},
+		{"an error from a function value is passed through", `package main
+func F(f func() error, ok bool) error { if !ok { return f() }; return nil }
+func main() {}`, 0},
 		{"a side that never ends is no error exit", `package main
 func F(ok bool) error { if !ok { for {} }; return nil }
 func main() {}`, 0},
