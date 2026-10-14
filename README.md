@@ -435,7 +435,7 @@ These appear in `CallSignatures` but not in `CallTargets`, so they never reach t
 
 `sfw deps diff <old-dir> <new-dir>` compares the third-party code compiled into two trees of a module, such as a pull request's base and head. Each tree is loaded with `./...` and the [loader environment](#fingerprint-pipeline), so every module either build needs must already be in the module cache: run `go mod download` in both trees first.
 
-A module is compared when its version or replacement differs between the trees, or when it is replaced by a local directory in both, since a local directory can change without a version change. A module in only one tree is `added` or `removed`.
+A module is compared when its version or replacement differs between the trees, or when its code can change without either: it is replaced by a local directory in both, or vendored. A tree with `vendor/modules.txt` is loaded with `-mod=vendor`, as the go command builds it, so an edit to a vendored copy is compared like any other change. A module in only one tree is `added` or `removed`. A module both trees use at the same version is still reported, as `updated`, when the new tree builds packages of it the old one did not: those are new code.
 
 Example: `example.com/app` replaces `example.com/codec` with `../codec`. The new `codec` hides a beacon behind its existing exported `Decode` and adds a `//go:linkname` directive:
 
@@ -482,7 +482,7 @@ func report(s string) {
         { "function": "example.com/codec.Decode", "added": ["network"], "targets": ["net.Dial"], "risk_score": 20 }
       ],
       "unanalyzed": [
-        { "file": "time.go: //go:linkname nanotime runtime.nanotime", "kind": "linkname", "change": "added", "risk_score": 10 }
+        { "file": "example.com/codec: //go:linkname nanotime runtime.nanotime", "kind": "linkname", "change": "added", "risk_score": 10 }
       ],
       "risk_score": 26,
       "high_risk_changes": 3
@@ -493,24 +493,26 @@ func report(s string) {
 
 For each compared module:
 - **`packages`:** the changed functions of each package, with the statuses and scores of `sfw diff`, except that calls into the module's own packages are not capabilities (`golang.org/x/sys` calling its own `Syscall6` is its job), and a new goroutine is labelled without points (what it runs is covered by `reach`).
-- **`reach`:** exported functions, exported methods of exported types and package initializers that can reach a capability class they could not reach before. The walk follows static calls, closures and function values through all third-party code, and classifies standard-library functions at the call; it does not follow interface or dynamic calls. The score is that of the most dangerous new class (see [Risk scoring](#risk-scoring)); an initializer, which runs on import, adds 10. A new exported function is not listed: its own entry in `packages` scores it.
+- **`reach`:** exported functions, the exported methods of exported types (promoted methods and methods of a type an exported alias names included) and package initializers that can reach a capability class they could not reach before. The walk follows static calls, closures and function values through all third-party code, and classifies standard-library functions at the call; it does not follow interface or dynamic calls, nor calls into other packages' initializers, which are entry points of their own (importing a package that was already built runs nothing new). The score is that of the most dangerous new class (see [Risk scoring](#risk-scoring)); an initializer, which runs on import, adds 10. A new exported function is not listed: its own entry in `packages` scores it.
 - **`unanalyzed`:** added, modified and removed files the SSA analysis cannot see, compared by SHA-256:
 
   | `kind` | Files | Added or modified |
   |--------|-------|-------------------|
   | `syso`, `object` | `.syso`; `.a`, `.o`, `.so`, `.dylib`, `.dll`, `.lib` | 20 |
-  | `linkname` | each `//go:linkname` directive in compiled Go files | 10 |
+  | `linkname` | each `//go:linkname` directive in a package's Go files, compiled or excluded, keyed by package (renaming its file is no change) | 10 |
   | `assembly`, `c` | `.s`, `.sx`; C, C++, Objective-C, Fortran and SWIG sources and headers | 5 |
   | `cgo`, `excluded-go` | Go files the build leaves out: those that import `"C"`, and those excluded by build constraints (other platforms included) | 5 |
   | `embed` | files embedded with `//go:embed` | 5 |
+  | `other` | in a module with a cgo file, any other non-Go file | 5 |
 
-  Removed files score 0. Files are taken from each built package's directory, tests excluded. In a module with a cgo file, native sources, headers and object files anywhere in the module are included, since `#include` and `#cgo` directives can reach them. `go list` itself omits a cgo package's C files when cgo is disabled.
+  Removed files score 0. Files are taken from each built package's directory, tests excluded, and a symbolic link counts as the regular file it points to. Every file an assembly file `#include`s is included, wherever it is and whatever its name. In a module with a cgo file, every non-Go file anywhere in the module is included, since `#include` and `#cgo LDFLAGS` (`-l:payload.bin`) can reach any file under any name: one that starts like an ELF, Mach-O or PE file or an ar archive is an `object`, others are `other`. `go list` itself omits a cgo package's C files when cgo is disabled. Directives are read from the parsed comments, so one inside a block comment is not one.
 
-A module's `risk_score` is the highest of its changes, and `high_risk_changes` counts those scoring 10 or more. An `added` module lists the capability classes its entry points can reach (`capabilities`), initializers that reach any (`reach`), and its `syso`, `object` and `linkname` files.
+A module's `risk_score` is the highest of its changes, and `high_risk_changes` counts those scoring 10 or more. An `added` module, and the packages the new tree newly builds from a module at an unchanged version, list the capability classes their entry points can reach (`capabilities`), initializers that reach any (`reach`), and their new `syso`, `object` and `linkname` files.
 
 Limits:
 - **cgo:** the loader disables cgo. A dependency package with no Go files left without cgo fails to load, and `sfw deps diff` exits 1. C code is hashed, not analyzed.
 - **Load errors are fatal:** any package error in either tree (a missing module, a type error) fails the command, rather than producing a partial diff.
+- **Workspaces:** the loader sets `GOWORK=off`, so a tree whose build uses a `go.work` file is analyzed as its module alone.
 - **Sandbox mounts:** under the sandbox, only the trees, their module and `.git` roots and the module cache are visible; a local `replace` directory outside them does not load. Use `--no-sandbox` for such a tree.
 
 ## sfw audit

@@ -310,6 +310,9 @@ func TestDepsDiff_UnanalyzedFiles(t *testing.T) {
 		{File: "n/data.txt", Kind: "embed", Change: "modified", RiskScore: 5},
 		{File: "n/excluded.go", Kind: "excluded-go", Change: "modified", RiskScore: 5},
 		{File: "csrc/libx.a", Kind: "object", Change: "added", RiskScore: 20},
+		// In a cgo module any file can be included or linked.
+		{File: "csrc/notes.txt", Kind: "other", Change: "modified", RiskScore: 5},
+		{File: "n/README.md", Kind: "other", Change: "modified", RiskScore: 5},
 		{File: "n/blob.syso", Kind: "syso", Change: "modified", RiskScore: 20},
 		{File: "n/new.syso", Kind: "syso", Change: "added", RiskScore: 20},
 	}
@@ -345,7 +348,7 @@ func TestDepsDiff_AddedModuleUnanalyzedFiles(t *testing.T) {
 	}
 	m := findModule(t, out, "example.com/native")
 	want := []models.FileChange{
-		{File: "n/n.go: //go:linkname nanotime runtime.nanotime", Kind: "linkname", Change: "added", RiskScore: models.RiskScoreHigh},
+		{File: "example.com/native/n: //go:linkname nanotime runtime.nanotime", Kind: "linkname", Change: "added", RiskScore: models.RiskScoreHigh},
 		{File: "lib/z.so", Kind: "object", Change: "added", RiskScore: 20},
 		{File: "n/x.syso", Kind: "syso", Change: "added", RiskScore: 20},
 	}

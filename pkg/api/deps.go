@@ -1,14 +1,17 @@
 package api
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -43,12 +46,15 @@ const (
 // either build needs must already be in the module cache.
 //
 // A module is compared when its version or replacement differs between the
-// trees, or when it is replaced by a local directory in both. For each such
-// module the diff reports changed functions (paired and scored as in Diff),
-// exported functions and package initializers that newly reach a capability
-// class, and changes to files the analysis cannot see. Modules only in the
-// new tree are reported with the capability classes their exported
-// functions and initializers can reach.
+// trees, or when its code can change without either: replaced by a local
+// directory, or vendored (a tree with vendor/modules.txt is loaded from its
+// vendor directory, as the go command builds it). For each such module the
+// diff reports changed functions (paired and scored as in Diff), exported
+// functions and package initializers that newly reach a capability class,
+// and changes to files the analysis cannot see. Modules only in the new
+// tree, and packages the new tree newly builds from an unchanged module,
+// are reported with the capability classes their exported functions and
+// initializers can reach.
 func DepsDiff(oldDir, newDir string) (*models.DepsDiffOutput, error) {
 	oldSide, err := loadDepsSide(oldDir)
 	if err != nil {
@@ -78,13 +84,21 @@ func DepsDiff(oldDir, newDir string) (*models.DepsDiffOutput, error) {
 		var md models.ModuleDiff
 		switch {
 		case om == nil:
-			md = newSide.describeAdded(nm)
+			md = newSide.describe(nm, nm.pkgs, models.ModuleAdded, nil)
 			out.Summary.ModulesAdded++
 		case nm == nil:
-			md = models.ModuleDiff{Path: path, Status: models.ModuleRemoved, OldVersion: om.version}
+			md = models.ModuleDiff{Path: path, Status: models.ModuleRemoved, OldVersion: om.identity}
 			out.Summary.ModulesRemoved++
-		case om.identity == nm.identity && !om.localReplace:
-			continue
+		case om.identity == nm.identity && !om.localReplace && !om.vendored && !nm.vendored:
+			// The same release, from the module cache: only packages the new
+			// tree newly builds are new code.
+			added := newPackages(om, nm)
+			if len(added) == 0 {
+				continue
+			}
+			md = newSide.describe(nm, added, models.ModuleUpdated, om)
+			md.OldVersion = om.identity
+			out.Summary.ModulesUpdated++
 		default:
 			md = diffModule(oldSide, newSide, om, nm)
 			if len(md.Packages) == 0 && len(md.Reach) == 0 && len(md.Unanalyzed) == 0 && om.identity == nm.identity {
@@ -108,27 +122,41 @@ type depsSide struct {
 	modules map[string]*depModule
 
 	// callees and direct cache, per function, the functions it references
-	// and the capability call targets it references directly.
+	// and the capability call targets it references directly; reached
+	// caches reach.
 	callees map[*ssa.Function][]*ssa.Function
 	direct  map[*ssa.Function]map[string]string
+	reached map[*ssa.Function]map[string]string
+	scc     sccState
 }
 
 type depModule struct {
-	path, version string
+	path string
 	// identity is the version, or the replacement, the build uses.
 	identity     string
 	localReplace bool
-	dir          string
-	pkgs         []*packages.Package
+	// vendored is set when the tree builds the module from its vendor
+	// directory, whose content can change without a version change.
+	vendored bool
+	dir      string
+	pkgs     []*packages.Package
 }
 
 func loadDepsSide(dir string) (*depsSide, error) {
+	env := diff.GetHardenedEnv()
+	// The go command builds a module with a consistent vendor directory from
+	// it, not from the module cache; so does the analysis.
+	_, statErr := os.Stat(filepath.Join(dir, "vendor", "modules.txt"))
+	vendored := statErr == nil
+	if vendored {
+		env = append(env, "GOFLAGS=-mod=vendor") // the last value of a variable wins
+	}
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports |
 			packages.NeedDeps | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo |
 			packages.NeedModule | packages.NeedEmbedFiles,
 		Dir:  dir,
-		Env:  diff.GetHardenedEnv(),
+		Env:  env,
 		Fset: token.NewFileSet(),
 	}
 	roots, err := packages.Load(cfg, "./...")
@@ -158,6 +186,7 @@ func loadDepsSide(dir string) (*depsSide, error) {
 		modules: make(map[string]*depModule),
 		callees: make(map[*ssa.Function][]*ssa.Function),
 		direct:  make(map[*ssa.Function]map[string]string),
+		reached: make(map[*ssa.Function]map[string]string),
 	}
 	var thirdParty []*packages.Package
 	packages.Visit(roots, nil, func(p *packages.Package) {
@@ -167,7 +196,7 @@ func loadDepsSide(dir string) (*depsSide, error) {
 		thirdParty = append(thirdParty, p)
 		m := side.modules[p.Module.Path]
 		if m == nil {
-			m = &depModule{path: p.Module.Path, version: p.Module.Version, identity: p.Module.Version, dir: p.Module.Dir}
+			m = &depModule{path: p.Module.Path, identity: p.Module.Version, dir: p.Module.Dir}
 			if r := p.Module.Replace; r != nil {
 				if r.Version != "" {
 					m.identity = r.Path + "@" + r.Version
@@ -177,6 +206,9 @@ func loadDepsSide(dir string) (*depsSide, error) {
 				if r.Dir != "" {
 					m.dir = r.Dir
 				}
+			}
+			if vendored {
+				m.vendored, m.dir = true, filepath.Join(dir, "vendor", filepath.FromSlash(p.Module.Path))
 			}
 			side.modules[p.Module.Path] = m
 		}
@@ -230,11 +262,11 @@ func diffModule(oldSide, newSide *depsSide, om, nm *depModule) models.ModuleDiff
 		}
 	}
 
-	oldEntries, newEntries := oldSide.entryPoints(om), newSide.entryPoints(nm)
+	oldEntries, newEntries := oldSide.entryPoints(om.pkgs), newSide.entryPoints(nm.pkgs)
 	for _, name := range sortedEntryNames(newEntries) {
 		newFn := newEntries[name]
 		oldFn, existed := oldEntries[name]
-		isInit := newFn.Name() == "init" && newFn.Signature.Recv() == nil
+		isInit := isPackageInit(newFn)
 		if !existed && !isInit {
 			continue // a new exported function; its own diff entry scores it
 		}
@@ -256,20 +288,24 @@ func diffModule(oldSide, newSide *depsSide, om, nm *depModule) models.ModuleDiff
 	return md
 }
 
-// describeAdded summarizes a module only the new tree compiles: the
-// capability classes its entry points reach, and initializers that reach
-// any capability, which run as soon as the module is imported.
-func (s *depsSide) describeAdded(m *depModule) models.ModuleDiff {
-	md := models.ModuleDiff{Path: m.path, Status: models.ModuleAdded, NewVersion: m.identity}
+// describe summarizes code only the new tree compiles: the packages pkgs
+// of module m, which are all of an added module, or the packages the new
+// tree newly builds from a module it already used. It reports the
+// capability classes their entry points can reach, initializers that reach
+// any capability (they run as soon as the package is imported), and the
+// high-risk files the analysis cannot see that before, when the old tree
+// used the module, did not have.
+func (s *depsSide) describe(m *depModule, pkgs []*packages.Package, status string, before *depModule) models.ModuleDiff {
+	md := models.ModuleDiff{Path: m.path, Status: status, NewVersion: m.identity}
 	classes := make(map[string]bool)
-	entries := s.entryPoints(m)
+	entries := s.entryPoints(pkgs)
 	for _, name := range sortedEntryNames(entries) {
 		fn := entries[name]
 		r := s.reach(fn)
 		for _, class := range r {
 			classes[class] = true
 		}
-		if fn.Name() == "init" && fn.Signature.Recv() == nil {
+		if isPackageInit(fn) {
 			if rc, ok := reachChange(name, nil, r, true); ok {
 				md.Reach = append(md.Reach, rc)
 				noteRisk(&md, rc.RiskScore)
@@ -280,13 +316,29 @@ func (s *depsSide) describeAdded(m *depModule) models.ModuleDiff {
 		md.Capabilities = append(md.Capabilities, c)
 	}
 	sort.Strings(md.Capabilities)
-	for _, fc := range diffInventories(nil, inventory(m)) {
+	var old map[string]string
+	if before != nil {
+		old = inventory(before)
+	}
+	for _, fc := range diffInventories(old, inventory(m)) {
 		if fc.Kind == "syso" || fc.Kind == "object" || fc.Kind == "linkname" {
 			md.Unanalyzed = append(md.Unanalyzed, fc)
 			noteRisk(&md, fc.RiskScore)
 		}
 	}
 	return md
+}
+
+// newPackages returns the packages of nm that om does not build.
+func newPackages(om, nm *depModule) []*packages.Package {
+	built := packagesByPath(om)
+	var out []*packages.Package
+	for _, p := range nm.pkgs {
+		if built[p.PkgPath] == nil {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // noteRisk folds one change's risk into its module's score and count.
@@ -339,47 +391,58 @@ func (s *depsSide) fingerprintPackage(p *packages.Package) []diff.FingerprintRes
 	return out
 }
 
-// entryPoints returns a module's exported package-level functions, the
-// exported methods of its exported types, and its package initializers,
-// keyed by "import/path.Name" or "import/path.(*T).M".
-func (s *depsSide) entryPoints(m *depModule) map[string]*ssa.Function {
+// entryPoints returns the API of pkgs: their exported package-level
+// functions; the exported methods, promoted ones included, of their
+// exported types and of their types an exported alias names; and their
+// package initializers. Keys are "import/path.Name", "import/path.(T).M"
+// and "import/path.(*T).M".
+func (s *depsSide) entryPoints(pkgs []*packages.Package) map[string]*ssa.Function {
 	out := make(map[string]*ssa.Function)
-	for _, p := range m.pkgs {
+	for _, p := range pkgs {
 		sp := s.prog.Package(p.Types)
 		if sp == nil {
 			continue
 		}
 		for _, fn := range diff.PackageFunctions(s.prog, sp) {
-			if fn.Parent() != nil {
+			if fn.Parent() != nil || fn.Signature.Recv() != nil {
 				continue
 			}
-			isInit := fn.Name() == "init" && fn.Signature.Recv() == nil
-			if !isInit && !isExportedAPI(fn) {
+			if obj, ok := fn.Object().(*types.Func); isPackageInit(fn) || ok && obj.Exported() {
+				out[p.PkgPath+"."+SSAFunctionName(fn)] = fn
+			}
+		}
+		scope := p.Types.Scope()
+		for _, name := range scope.Names() {
+			tn, ok := scope.Lookup(name).(*types.TypeName)
+			if !ok || !tn.Exported() {
 				continue
 			}
-			out[p.PkgPath+"."+SSAFunctionName(fn)] = fn
+			named, ok := types.Unalias(tn.Type()).(*types.Named)
+			if !ok || named.Obj().Pkg() != p.Types || named.TypeParams().Len() > 0 || types.IsInterface(named) {
+				continue
+			}
+			values := s.prog.MethodSets.MethodSet(named)
+			pointers := s.prog.MethodSets.MethodSet(types.NewPointer(named))
+			for i := 0; i < pointers.Len(); i++ {
+				sel, recv := pointers.At(i), "*"+name
+				if !sel.Obj().Exported() {
+					continue
+				}
+				if v := values.Lookup(sel.Obj().Pkg(), sel.Obj().Name()); v != nil {
+					sel, recv = v, name
+				}
+				if fn := s.prog.MethodValue(sel); fn != nil {
+					out[p.PkgPath+".("+recv+")."+sel.Obj().Name()] = fn
+				}
+			}
 		}
 	}
 	return out
 }
 
-// isExportedAPI reports whether fn is an exported package-level function or
-// an exported method of an exported named type.
-func isExportedAPI(fn *ssa.Function) bool {
-	obj, ok := fn.Object().(*types.Func)
-	if !ok || !obj.Exported() {
-		return false
-	}
-	recv := fn.Signature.Recv()
-	if recv == nil {
-		return true
-	}
-	t := recv.Type()
-	if ptr, ok := t.(*types.Pointer); ok {
-		t = ptr.Elem()
-	}
-	named, ok := types.Unalias(t).(*types.Named)
-	return ok && named.Obj().Exported()
+// isPackageInit reports whether fn is a package initializer.
+func isPackageInit(fn *ssa.Function) bool {
+	return fn.Name() == "init" && fn.Signature.Recv() == nil && fn.Parent() == nil
 }
 
 func sortedEntryNames(m map[string]*ssa.Function) []string {
@@ -395,25 +458,81 @@ func sortedEntryNames(m map[string]*ssa.Function) []string {
 // fn through static calls, closures and function values. It descends into
 // every function with a body; standard-library functions have none, as
 // only third-party packages are built, so the walk stops at them and they
-// are classified at the call. Interface and dynamic calls are not followed.
+// are classified at the call. Interface and dynamic calls are not followed,
+// and neither are calls to other packages' initializers: each package's
+// initializer is an entry point of its own, and importing a package that
+// was already built runs nothing new.
+//
+// The answers for every function the walk passes are computed together,
+// strongly connected component by component, so the cost over all entry
+// points is that of one walk of the graph.
 func (s *depsSide) reach(fn *ssa.Function) map[string]string {
-	out := make(map[string]string)
-	seen := map[*ssa.Function]bool{fn: true}
-	queue := []*ssa.Function{fn}
-	for len(queue) > 0 {
-		f := queue[0]
-		queue = queue[1:]
-		for key, class := range s.directTargets(f) {
-			out[key] = class
+	if _, done := s.reached[fn]; !done {
+		s.strongConnect(fn)
+	}
+	return s.reached[fn]
+}
+
+// sccState is Tarjan's algorithm's bookkeeping for reach.
+type sccState struct {
+	index, low map[*ssa.Function]int
+	onStack    map[*ssa.Function]bool
+	stack      []*ssa.Function
+	next       int
+}
+
+// followed reports whether the reach walk descends into callee c.
+func followed(c *ssa.Function) bool {
+	return len(c.Blocks) > 0 && !isPackageInit(c)
+}
+
+func (s *depsSide) strongConnect(v *ssa.Function) {
+	st := &s.scc
+	if st.index == nil {
+		st.index, st.low, st.onStack = make(map[*ssa.Function]int), make(map[*ssa.Function]int), make(map[*ssa.Function]bool)
+	}
+	st.index[v], st.low[v] = st.next, st.next
+	st.next++
+	st.stack = append(st.stack, v)
+	st.onStack[v] = true
+	for _, w := range s.calleesOf(v) {
+		if !followed(w) {
+			continue
 		}
-		for _, c := range s.calleesOf(f) {
-			if !seen[c] && len(c.Blocks) > 0 {
-				seen[c] = true
-				queue = append(queue, c)
+		if _, visited := st.index[w]; !visited {
+			s.strongConnect(w)
+			st.low[v] = min(st.low[v], st.low[w])
+		} else if st.onStack[w] {
+			st.low[v] = min(st.low[v], st.index[w])
+		}
+	}
+	if st.low[v] != st.index[v] {
+		return
+	}
+	// v roots a component: its members reach what any of them calls
+	// directly, and what the components they call reach.
+	var members []*ssa.Function
+	for {
+		w := st.stack[len(st.stack)-1]
+		st.stack = st.stack[:len(st.stack)-1]
+		st.onStack[w] = false
+		members = append(members, w)
+		if w == v {
+			break
+		}
+	}
+	reached := make(map[string]string)
+	for _, m := range members {
+		maps.Copy(reached, s.directTargets(m))
+		for _, w := range s.calleesOf(m) {
+			if followed(w) {
+				maps.Copy(reached, s.reached[w])
 			}
 		}
 	}
-	return out
+	for _, m := range members {
+		s.reached[m] = reached
+	}
 }
 
 func (s *depsSide) calleesOf(fn *ssa.Function) []*ssa.Function {
@@ -492,12 +611,17 @@ func reachChange(name string, oldReach, newReach map[string]string, isInit bool)
 //     languages cgo compiles, .syso and other object files, and Go files the
 //     build configuration excludes (cgo files among them, as the loader
 //     disables cgo, which also hides the package's C files from go list);
-//   - in a module with a cgo file, native sources, headers and libraries
-//     anywhere in the module, as #include and #cgo directives reach them;
+//   - every file an assembly file #includes, whatever its name or place;
+//   - in a module with a cgo file, every other non-Go file anywhere in the
+//     module, as #include and #cgo directives reach any file under any name
+//     (-l:payload.bin): one that holds machine code is an object, any other
+//     file not listed already is "other";
 //   - every file a built package embeds.
 //
-// It also records each //go:linkname directive in the compiled Go files as
-// "linkname:<path>: <directive>".
+// A symbolic link counts as the regular file it points to.
+//
+// It also records each //go:linkname directive of the packages' Go files,
+// compiled or excluded, as "linkname:<package path>: <directive>".
 func inventory(m *depModule) map[string]string {
 	out := make(map[string]string)
 	rel := func(f string) string {
@@ -506,15 +630,15 @@ func inventory(m *depModule) map[string]string {
 		}
 		return f
 	}
+	listed := make(map[string]bool)
 	hash := func(kind, f string) {
-		data, err := os.ReadFile(f)
-		if err != nil {
-			return
+		if sum, ok := hashFile(f); ok {
+			out[kind+":"+rel(f)] = sum
+			listed[filepath.Clean(f)] = true
 		}
-		sum := sha256.Sum256(data)
-		out[kind+":"+rel(f)] = fmt.Sprintf("%x", sum[:])
 	}
 	usesCgo := false
+	included := make(map[string]bool)
 	for _, p := range m.pkgs {
 		compiled := make(map[string]bool)
 		for _, f := range p.CompiledGoFiles {
@@ -531,12 +655,15 @@ func inventory(m *depModule) map[string]string {
 			}
 			for _, e := range entries {
 				f := filepath.Join(dir, e.Name())
-				if !e.Type().IsRegular() || compiled[f] {
+				if compiled[f] || !isRegular(f, e) {
 					continue
 				}
 				kind := fileKind(f)
-				if kind == "cgo" {
+				switch kind {
+				case "cgo":
 					usesCgo = true
+				case "assembly":
+					hashIncludes(f, included, hash)
 				}
 				if kind != "" {
 					hash(kind, f)
@@ -546,23 +673,142 @@ func inventory(m *depModule) map[string]string {
 		for _, f := range p.EmbedFiles {
 			hash("embed", f)
 		}
-		for _, f := range p.CompiledGoFiles {
-			for _, d := range linknames(f) {
-				out["linkname:"+rel(f)+": "+d] = d
-			}
+		for _, d := range packageLinknames(p) {
+			out["linkname:"+p.PkgPath+": "+d] = d
 		}
 	}
 	if usesCgo {
 		filepath.WalkDir(m.dir, func(f string, e fs.DirEntry, err error) error {
-			if err == nil && e.Type().IsRegular() {
-				if kind := fileKind(f); kind != "" && kind != "cgo" && kind != "excluded-go" {
-					hash(kind, f)
+			if err != nil {
+				return nil
+			}
+			if e.IsDir() {
+				switch e.Name() {
+				case ".git", ".hg", ".svn", ".bzr":
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if strings.EqualFold(filepath.Ext(f), ".go") || listed[f] || !isRegular(f, e) {
+				return nil
+			}
+			kind := fileKind(f)
+			if kind == "" {
+				kind = "other"
+				if isMachineCode(f) {
+					kind = "object"
 				}
 			}
+			hash(kind, f)
 			return nil
 		})
 	}
 	return out
+}
+
+// isRegular reports whether directory entry e, at path f, is a regular file
+// or a symbolic link to one. Other files, a FIFO or a device, are never
+// read.
+func isRegular(f string, e fs.DirEntry) bool {
+	if e.Type().IsRegular() {
+		return true
+	}
+	if e.Type()&fs.ModeSymlink == 0 {
+		return false
+	}
+	info, err := os.Stat(f)
+	return err == nil && info.Mode().IsRegular()
+}
+
+// hashFile returns the SHA-256 of a regular file, read as a stream.
+func hashFile(f string) (string, bool) {
+	file, err := os.Open(f)
+	if err != nil {
+		return "", false
+	}
+	defer file.Close()
+	if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, file); err != nil {
+		return "", false
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), true
+}
+
+// machineCodeMagic are the leading bytes of ELF and Mach-O (32- and 64-bit,
+// both byte orders, and universal) files and of ar archives.
+var machineCodeMagic = [][]byte{
+	[]byte("\x7fELF"), []byte("!<arch>\n"),
+	{0xfe, 0xed, 0xfa, 0xce}, {0xfe, 0xed, 0xfa, 0xcf}, {0xce, 0xfa, 0xed, 0xfe}, {0xcf, 0xfa, 0xed, 0xfe},
+	{0xca, 0xfe, 0xba, 0xbe},
+}
+
+// isMachineCode reports whether a file starts like an object file, a
+// library or an executable: an ELF, Mach-O or PE file or an ar archive.
+func isMachineCode(f string) bool {
+	file, err := os.Open(f)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	head := make([]byte, 0x40)
+	n, _ := io.ReadFull(file, head)
+	head = head[:n]
+	for _, magic := range machineCodeMagic {
+		if bytes.HasPrefix(head, magic) {
+			return true
+		}
+	}
+	// A PE file starts with a DOS header whose last field locates the
+	// "PE\0\0" signature.
+	if n < 0x40 || !bytes.HasPrefix(head, []byte("MZ")) {
+		return false
+	}
+	sig := make([]byte, 4)
+	_, err = file.ReadAt(sig, int64(binary.LittleEndian.Uint32(head[0x3c:])))
+	return err == nil && string(sig) == "PE\x00\x00"
+}
+
+// hashIncludes hashes, as assembly, every file an assembly file includes
+// with #include "file", directly or through other included files. The
+// assembler looks for the file next to the including one first; one found
+// only on its search path (textflag.h) is not the module's.
+func hashIncludes(f string, seen map[string]bool, hash func(kind, f string)) {
+	data, err := os.ReadFile(f)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "#include")
+		if !ok {
+			continue
+		}
+		name, ok := strings.CutPrefix(strings.TrimSpace(rest), `"`)
+		if !ok {
+			continue
+		}
+		name, _, ok = strings.Cut(name, `"`)
+		if !ok || name == "" {
+			continue
+		}
+		target := name
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(f), target)
+		}
+		target = filepath.Clean(target)
+		if seen[target] {
+			continue
+		}
+		info, err := os.Stat(target)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		seen[target] = true
+		hash("assembly", target)
+		hashIncludes(target, seen, hash)
+	}
 }
 
 // fileKind classifies a file the build can use without the SSA analysis
@@ -606,18 +852,32 @@ func importsC(f string) bool {
 	return false
 }
 
-// linknames returns the //go:linkname directives of a Go file.
-func linknames(f string) []string {
-	data, err := os.ReadFile(f)
-	if err != nil {
-		return nil
+// packageLinknames returns the //go:linkname directives of a package's Go
+// files: the compiled ones, read from the loaded syntax, and the ones the
+// build configuration excludes (cgo files, other platforms' files), which a
+// build with cgo or for another platform compiles. Directives are read from
+// the parsed comments, so one inside a block comment is not one, and they
+// are normalized to single spaces.
+func packageLinknames(p *packages.Package) []string {
+	files := append([]*ast.File{}, p.Syntax...)
+	fset := token.NewFileSet()
+	for _, f := range p.IgnoredFiles {
+		if !strings.HasSuffix(f, ".go") || strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		// A file with syntax errors still yields the comments before them.
+		if file, _ := parser.ParseFile(fset, f, nil, parser.ParseComments); file != nil {
+			files = append(files, file)
+		}
 	}
 	var out []string
-	sc := bufio.NewScanner(bytes.NewReader(data))
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		if line := strings.TrimSpace(sc.Text()); strings.HasPrefix(line, "//go:linkname ") {
-			out = append(out, strings.Join(strings.Fields(line), " "))
+	for _, file := range files {
+		for _, group := range file.Comments {
+			for _, c := range group.List {
+				if strings.HasPrefix(c.Text, "//go:linkname ") {
+					out = append(out, strings.Join(strings.Fields(c.Text), " "))
+				}
+			}
 		}
 	}
 	return out

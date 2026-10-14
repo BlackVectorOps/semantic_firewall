@@ -46,8 +46,9 @@ type ModuleDiff struct {
 	// files, and //go:linkname directives.
 	Unanalyzed []FileChange `json:"unanalyzed,omitempty"`
 
-	// Capabilities, for an added module, lists the capability classes its
-	// exported functions and package initializers can reach.
+	// Capabilities, for an added module or for the packages the new tree
+	// newly builds from a module it already used, lists the capability
+	// classes their exported functions and package initializers can reach.
 	Capabilities []string `json:"capabilities,omitempty"`
 
 	RiskScore       int `json:"risk_score"`
