@@ -1232,7 +1232,7 @@ go run ./tools/mutate -base origin/main -pkgs ./pkg/analysis/topology -workers 3
 go run ./tools/mutate -base origin/main -list            # mutants per file
 ```
 
-`-run` limits the tests run per mutant, `-tests` names the packages whose tests judge it (default: the mutated file's package), `-files` limits the files mutated, and `-retest <output>` reruns only the survivors of an earlier run. A surviving mutant is a missing test, or code no test can observe (a cache, a check that cannot fail); each needs one answer or the other.
+`-goflags` passes extra `go test` flags to every mutant run (`-goflags "-race -shuffle=on"`; `-race` turns cgo on for the test binary). `-run` limits the tests run per mutant, `-tests` names the packages whose tests judge it (default: the mutated file's package), `-files` limits the files mutated, and `-retest <output>` reruns only the survivors of an earlier run. A surviving mutant is a missing test, or code no test can observe (a cache, a check that cannot fail); each needs one answer or the other.
 
 ## License
 

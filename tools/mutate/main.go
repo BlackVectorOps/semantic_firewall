@@ -54,6 +54,7 @@ func main() {
 	testPkgs := flag.String("tests", "", "comma-separated packages whose tests judge each mutant (default: the mutated file's package)")
 	retest := flag.String("retest", "", "output of an earlier run: test only the mutants it reported as SURVIVED")
 	list := flag.Bool("list", false, "print the mutants per file and exit")
+	goflags := flag.String("goflags", "", `extra go test flags for every mutant, e.g. "-race -shuffle=on"; -race turns cgo on`)
 	exclude := flag.String("exclude", `(_test\.go|^tools/|^testdata/|/testdata/|^internal/actiontest/)`, "regexp of files not to mutate")
 	flag.Parse()
 
@@ -124,7 +125,7 @@ func main() {
 			defer wg.Done()
 			dir := <-copies
 			defer func() { copies <- dir }()
-			m.status, m.detail = test(dir, m, *run, *testPkgs, *timeout)
+			m.status, m.detail = test(dir, m, *run, *testPkgs, *goflags, *timeout)
 			mu.Lock()
 			done++
 			if m.status == "SURVIVED" {
@@ -157,7 +158,7 @@ func main() {
 }
 
 // test applies m in dir, runs the package's tests, and restores the file.
-func test(dir string, m *mutant, run, testPkgs string, timeout time.Duration) (string, string) {
+func test(dir string, m *mutant, run, testPkgs, goflags string, timeout time.Duration) (string, string) {
 	path := filepath.Join(dir, m.file)
 	orig, err := os.ReadFile(path)
 	check(err)
@@ -170,6 +171,7 @@ func test(dir string, m *mutant, run, testPkgs string, timeout time.Duration) (s
 	// a removed statement) is not caught by a test. -failfast: one failure
 	// is a verdict.
 	args := []string{"test", "-count=1", "-vet=off", "-failfast", "-timeout", timeout.String()}
+	args = append(args, strings.Fields(goflags)...)
 	if run != "" {
 		args = append(args, "-run", run)
 	}
@@ -177,7 +179,7 @@ func test(dir string, m *mutant, run, testPkgs string, timeout time.Duration) (s
 	if testPkgs != "" {
 		pkgs = strings.Split(testPkgs, ",")
 	}
-	out, err := goCmd(dir, timeout, append(args, pkgs...)...)
+	out, err := goCmd(dir, timeout, strings.Contains(" "+goflags+" ", " -race "), append(args, pkgs...)...)
 	switch {
 	case err == context.DeadlineExceeded || bytes.Contains(out, []byte("panic: test timed out")):
 		return "TIMEOUT", ""
@@ -189,13 +191,18 @@ func test(dir string, m *mutant, run, testPkgs string, timeout time.Duration) (s
 	return "SURVIVED", ""
 }
 
-func goCmd(dir string, timeout time.Duration, args ...string) ([]byte, error) {
+func goCmd(dir string, timeout time.Duration, cgo bool, args ...string) ([]byte, error) {
 	// go test enforces the timeout itself; the context is the backstop.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout+time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = dir
+	// The code under test loads with cgo off either way; the race detector
+	// itself needs cgo.
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if cgo {
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
+	}
 	// go test runs the test binary as a child; kill the whole group, so a
 	// mutant that hangs leaves nothing running.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
