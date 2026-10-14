@@ -38,13 +38,14 @@ Done (see commit messages for full lists):
   method-set entry points, init boundary in reach, SCC-memoized reach.
 
 Mutation status: pairs 1 and 2 closed (remaining survivors are the
-equivalent classes below). **`deps.go` mutation not done**: the detached
-run died with the container at 65/666. Rerun (takes ~2-3h; launch
-detached with `nohup setsid` and wait with a background `until` loop):
-`mut -pkgs ./pkg/api -files 'deps\.go$' -run TestDepsDiff -timeout 5m`.
+equivalent classes below). **`deps.go` mutation ran to completion on
+`033d245`**; its result is in `mut-deps.txt` here (deps.go is unchanged
+since, so `-retest mut-deps.txt` matches by line). Survivors are not yet
+triaged. To recheck after adding tests:
+`mut -pkgs ./pkg/api -files 'deps\.go$' -run TestDepsDiff -timeout 5m -retest .claude/handoff/mut-deps.txt`.
 
 Next, in order:
-1. `deps.go` mutation run (above); answer survivors.
+1. Triage the `deps.go` survivors in `mut-deps.txt`.
 2. Pair 4 `api/risk.go`+`api/batch.go`: a hunter was running when the
    session ended; its results are lost. Relaunch it (prompt: scoring vs
    README, withoutModuleTargets key parsing incl. "(.error).Error" and

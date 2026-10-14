@@ -1,0 +1,144 @@
+666 mutants in 1 files
+killed 373, survived 142, not compiling 151, timed out 0, errors 0
+SURVIVED pkg/api/deps.go:71 true to false
+SURVIVED pkg/api/deps.go:74 true to false
+SURVIVED pkg/api/deps.go:101 remove case statement
+SURVIVED pkg/api/deps.go:163 force if false
+SURVIVED pkg/api/deps.go:164 remove ReturnStmt
+SURVIVED pkg/api/deps.go:181 flip != to ==
+SURVIVED pkg/api/deps.go:181 force if true
+SURVIVED pkg/api/deps.go:181 force if false
+SURVIVED pkg/api/deps.go:182 remove AssignStmt
+SURVIVED pkg/api/deps.go:182 true to false
+SURVIVED pkg/api/deps.go:206 force if false
+SURVIVED pkg/api/deps.go:206 remove IfStmt
+SURVIVED pkg/api/deps.go:206 flip != to ==
+SURVIVED pkg/api/deps.go:206 force if true
+SURVIVED pkg/api/deps.go:207 remove AssignStmt
+SURVIVED pkg/api/deps.go:218 boundary < to <=
+SURVIVED pkg/api/deps.go:218 flip < to >=
+SURVIVED pkg/api/deps.go:223 remove DeferStmt
+SURVIVED pkg/api/deps.go:224 remove IfStmt
+SURVIVED pkg/api/deps.go:224 force if false
+SURVIVED pkg/api/deps.go:225 remove AssignStmt
+SURVIVED pkg/api/deps.go:230 force if true
+SURVIVED pkg/api/deps.go:235 force if false
+SURVIVED pkg/api/deps.go:236 remove ReturnStmt
+SURVIVED pkg/api/deps.go:249 true to false
+SURVIVED pkg/api/deps.go:306 true to false
+SURVIVED pkg/api/deps.go:308 force if true
+SURVIVED pkg/api/deps.go:318 remove ExprStmt
+SURVIVED pkg/api/deps.go:320 remove IfStmt
+SURVIVED pkg/api/deps.go:320 force if false
+SURVIVED pkg/api/deps.go:321 remove AssignStmt
+SURVIVED pkg/api/deps.go:346 boundary > to >=
+SURVIVED pkg/api/deps.go:383 remove IfStmt
+SURVIVED pkg/api/deps.go:383 force if false
+SURVIVED pkg/api/deps.go:384 remove ReturnStmt
+SURVIVED pkg/api/deps.go:389 false to true
+SURVIVED pkg/api/deps.go:403 remove IfStmt
+SURVIVED pkg/api/deps.go:403 force if false
+SURVIVED pkg/api/deps.go:404 remove BranchStmt
+SURVIVED pkg/api/deps.go:421 flip || to &&
+SURVIVED pkg/api/deps.go:421 force if false
+SURVIVED pkg/api/deps.go:421 flip || to &&
+SURVIVED pkg/api/deps.go:421 flip || to &&
+SURVIVED pkg/api/deps.go:421 remove IfStmt
+SURVIVED pkg/api/deps.go:422 remove BranchStmt
+SURVIVED pkg/api/deps.go:428 remove IfStmt
+SURVIVED pkg/api/deps.go:428 force if false
+SURVIVED pkg/api/deps.go:429 remove BranchStmt
+SURVIVED pkg/api/deps.go:434 force if true
+SURVIVED pkg/api/deps.go:486 boundary > to >=
+SURVIVED pkg/api/deps.go:495 remove IncDecStmt
+SURVIVED pkg/api/deps.go:497 remove AssignStmt
+SURVIVED pkg/api/deps.go:497 true to false
+SURVIVED pkg/api/deps.go:499 remove IfStmt
+SURVIVED pkg/api/deps.go:499 force if false
+SURVIVED pkg/api/deps.go:500 remove BranchStmt
+SURVIVED pkg/api/deps.go:504 remove AssignStmt
+SURVIVED pkg/api/deps.go:505 force if false
+SURVIVED pkg/api/deps.go:506 remove AssignStmt
+SURVIVED pkg/api/deps.go:509 force if false
+SURVIVED pkg/api/deps.go:509 remove IfStmt
+SURVIVED pkg/api/deps.go:510 remove ReturnStmt
+SURVIVED pkg/api/deps.go:528 force if true
+SURVIVED pkg/api/deps.go:539 remove IfStmt
+SURVIVED pkg/api/deps.go:552 remove AssignStmt
+SURVIVED pkg/api/deps.go:557 remove IfStmt
+SURVIVED pkg/api/deps.go:568 remove AssignStmt
+SURVIVED pkg/api/deps.go:584 true to false
+SURVIVED pkg/api/deps.go:594 boundary > to >=
+SURVIVED pkg/api/deps.go:594 force if true
+SURVIVED pkg/api/deps.go:601 remove ExprStmt
+SURVIVED pkg/api/deps.go:602 remove ExprStmt
+SURVIVED pkg/api/deps.go:645 true to false
+SURVIVED pkg/api/deps.go:649 true to false
+SURVIVED pkg/api/deps.go:654 remove BranchStmt
+SURVIVED pkg/api/deps.go:658 remove IfStmt
+SURVIVED pkg/api/deps.go:658 flip || to &&
+SURVIVED pkg/api/deps.go:658 force if false
+SURVIVED pkg/api/deps.go:659 remove BranchStmt
+SURVIVED pkg/api/deps.go:682 remove IfStmt
+SURVIVED pkg/api/deps.go:682 force if false
+SURVIVED pkg/api/deps.go:683 remove ReturnStmt
+SURVIVED pkg/api/deps.go:685 remove IfStmt
+SURVIVED pkg/api/deps.go:685 force if false
+SURVIVED pkg/api/deps.go:690 remove ReturnStmt
+SURVIVED pkg/api/deps.go:713 force if true
+SURVIVED pkg/api/deps.go:716 remove IfStmt
+SURVIVED pkg/api/deps.go:716 force if false
+SURVIVED pkg/api/deps.go:717 false to true
+SURVIVED pkg/api/deps.go:717 remove ReturnStmt
+SURVIVED pkg/api/deps.go:720 flip && to ||
+SURVIVED pkg/api/deps.go:727 false to true
+SURVIVED pkg/api/deps.go:727 remove ReturnStmt
+SURVIVED pkg/api/deps.go:729 remove DeferStmt
+SURVIVED pkg/api/deps.go:730 remove IfStmt
+SURVIVED pkg/api/deps.go:730 flip || to &&
+SURVIVED pkg/api/deps.go:731 false to true
+SURVIVED pkg/api/deps.go:731 remove ReturnStmt
+SURVIVED pkg/api/deps.go:735 false to true
+SURVIVED pkg/api/deps.go:735 remove ReturnStmt
+SURVIVED pkg/api/deps.go:752 remove IfStmt
+SURVIVED pkg/api/deps.go:752 force if false
+SURVIVED pkg/api/deps.go:753 false to true
+SURVIVED pkg/api/deps.go:753 remove ReturnStmt
+SURVIVED pkg/api/deps.go:755 remove DeferStmt
+SURVIVED pkg/api/deps.go:758 remove AssignStmt
+SURVIVED pkg/api/deps.go:766 force if true
+SURVIVED pkg/api/deps.go:766 flip || to &&
+SURVIVED pkg/api/deps.go:766 flip < to >=
+SURVIVED pkg/api/deps.go:766 boundary < to <=
+SURVIVED pkg/api/deps.go:766 drop !
+SURVIVED pkg/api/deps.go:771 flip == to !=
+SURVIVED pkg/api/deps.go:771 flip && to ||
+SURVIVED pkg/api/deps.go:771 flip == to !=
+SURVIVED pkg/api/deps.go:781 remove ReturnStmt
+SURVIVED pkg/api/deps.go:785 remove IfStmt
+SURVIVED pkg/api/deps.go:785 force if false
+SURVIVED pkg/api/deps.go:786 remove BranchStmt
+SURVIVED pkg/api/deps.go:789 remove IfStmt
+SURVIVED pkg/api/deps.go:789 force if false
+SURVIVED pkg/api/deps.go:790 remove BranchStmt
+SURVIVED pkg/api/deps.go:793 remove IfStmt
+SURVIVED pkg/api/deps.go:793 flip || to &&
+SURVIVED pkg/api/deps.go:793 force if false
+SURVIVED pkg/api/deps.go:794 remove BranchStmt
+SURVIVED pkg/api/deps.go:797 force if true
+SURVIVED pkg/api/deps.go:800 remove AssignStmt
+SURVIVED pkg/api/deps.go:801 force if false
+SURVIVED pkg/api/deps.go:801 remove IfStmt
+SURVIVED pkg/api/deps.go:802 remove BranchStmt
+SURVIVED pkg/api/deps.go:806 remove BranchStmt
+SURVIVED pkg/api/deps.go:808 true to false
+SURVIVED pkg/api/deps.go:808 remove AssignStmt
+SURVIVED pkg/api/deps.go:845 remove ReturnStmt
+SURVIVED pkg/api/deps.go:845 false to true
+SURVIVED pkg/api/deps.go:865 remove IfStmt
+SURVIVED pkg/api/deps.go:865 force if false
+SURVIVED pkg/api/deps.go:865 flip || to &&
+SURVIVED pkg/api/deps.go:866 remove BranchStmt
+SURVIVED pkg/api/deps.go:869 force if true
+SURVIVED pkg/api/deps.go:892 true to false
+SURVIVED pkg/api/deps.go:895 true to false
