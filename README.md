@@ -1022,7 +1022,7 @@ Step 4 keeps a single corroborating signal, such as a higher-order function that
 
 ## Sandbox
 
-`check`, `diff`, `scan` and `audit` re-run `sfw` itself (`internal-worker`) under gVisor `runsc`, which then performs the analysis. `index`, `stats`, `migrate` and library calls are never sandboxed. `--no-sandbox`, or the `SFW_SANDBOX_ID` environment variable, skips it.
+`check`, `diff` (single and batch), `deps diff`, `scan` and `audit` re-run `sfw` itself (`internal-worker`) under gVisor `runsc`, which then performs the analysis. `index`, `stats`, `migrate` and library calls are never sandboxed. `--no-sandbox`, or the `SFW_SANDBOX_ID` environment variable, skips it.
 
 The invocation (`internal/sandbox/manager.go`) is:
 
