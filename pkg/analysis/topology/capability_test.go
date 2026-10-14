@@ -87,6 +87,15 @@ func TestClassifyCallTarget(t *testing.T) {
 		{"os", "Root", "Chtimes", topology.CapFilesystem},
 		{"os", "Root", "Mkdir", topology.CapFilesystem},
 	}
+	// Conversion helpers make no system call.
+	for _, name := range []string{"BytePtrFromString", "ByteSliceFromString", "StringBytePtr", "StringByteSlice",
+		"BytePtrToString", "ByteSliceToString", "UTF16FromString", "UTF16PtrFromString", "UTF16ToString",
+		"UTF16PtrToString", "StringToUTF16", "StringToUTF16Ptr", "NsecToTimespec", "NsecToTimeval",
+		"TimespecToNsec", "TimevalToNsec", "NsecToFiletime", "Getpagesize", "CmsgLen", "CmsgSpace"} {
+		for _, pkg := range []string{"syscall", "golang.org/x/sys/unix", "golang.org/x/sys/windows"} {
+			cases = append(cases, struct{ pkg, recv, name, want string }{pkg, "", name, ""})
+		}
+	}
 	for _, name := range []string{"Create", "CreateTemp", "OpenFile", "Remove", "RemoveAll", "Rename",
 		"Chmod", "Chown", "Lchown", "Chtimes", "Truncate", "Symlink", "Link", "Mkdir", "MkdirAll", "MkdirTemp"} {
 		cases = append(cases, struct{ pkg, recv, name, want string }{"os", "", name, topology.CapFilesystem})

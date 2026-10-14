@@ -596,6 +596,12 @@ type S = Server
 func (s *S) authorize(u string) bool { return u == "admin" }
 func F(s *Server, u string) int { if !s.authorize(u) { return 0 }; return 1 }
 func main() {}`, []string{"(testmod.Server).authorize"}},
+		{"a value method declared on an alias", `package main
+type Server struct{}
+type S = Server
+func (s S) authorize(u string) bool { return u == "admin" }
+func F(s Server, u string) int { if !s.authorize(u) { return 0 }; return 1 }
+func main() {}`, []string{"(testmod.Server).authorize"}},
 		{"getters returned are no checks", `package main
 type Commit struct{ author, token, role string }
 func (c *Commit) Author() string { return c.author }
@@ -802,6 +808,14 @@ func h2(v string) *http.Cookie { return h3(v) }
 func h1(v string) *http.Cookie { return h2(v) }
 func F(v string) *http.Cookie { return h1(v) }
 func main() {}`, nil, nil},
+		{"a function value's cookie is not followed", `package main
+import "net/http"
+func F(mk func() *http.Cookie) *http.Cookie { return mk() }
+func main() {}`, nil, nil},
+		{"a closure's cookie belongs to the closure", `package main
+import "net/http"
+func F() *http.Cookie { mk := func() *http.Cookie { return &http.Cookie{Secure: true} }; return mk() }
+func main() {}`, nil, nil},
 		{"a helper in another package is not followed", `package main
 import ("net/http";"testmod/helper")
 func F(v string) *http.Cookie { return helper.Cookie(v) }
@@ -877,6 +891,14 @@ import "net/http"
 type doer interface{ Do(*http.Request) (*http.Response, error) }
 func F(req *http.Request) (*http.Response, error) { var d doer = http.DefaultClient; return d.Do(req) }
 func main() {}`, map[string]int{"(net/http.Client).Do": 1}, map[string]string{"(net/http.Client).Do": "network"}},
+		{"calls through an unnamed interface and through error", `package main
+func F(r interface{ RoundTrip() }, err error) string { r.RoundTrip(); return err.Error() }
+func main() {}`, map[string]int{}, map[string]string{}},
+		{"an interface passed for a type parameter", `package main
+import "net/http"
+func run[T interface{ RoundTrip(*http.Request) (*http.Response, error) }](t T, r *http.Request) { t.RoundTrip(r) }
+func F(r *http.Request) { run[http.RoundTripper](http.DefaultTransport, r) }
+func main() {}`, map[string]int{"testmod.run": 1}, map[string]string{}},
 		{"another interface's method of the same name", `package main
 type RoundTripper interface{ RoundTrip(int) int }
 func F(r RoundTripper) int { return r.RoundTrip(1) }

@@ -58,9 +58,9 @@ func collectCallTargets(fn *ssa.Function, t *FunctionTopology) {
 						recordCapabilityTarget(t, named.Obj().Pkg().Path(), named.Obj().Name(), common.Method.Name())
 					}
 				} else if callee := common.StaticCallee(); callee != nil {
-					params, args := callee.TypeParams(), callee.TypeArgs()
-					for i := 0; i < params.Len() && i < len(args); i++ {
-						recordInterfaceTargets(fn.Prog, t, args[i], params.At(i).Constraint())
+					params := callee.TypeParams()
+					for i, arg := range callee.TypeArgs() {
+						recordInterfaceTargets(fn.Prog, t, arg, params.At(i).Constraint())
 					}
 				}
 			}
@@ -72,17 +72,17 @@ func collectCallTargets(fn *ssa.Function, t *FunctionTopology) {
 // iface declares: once a value is converted to iface, or passed for a type
 // parameter iface constrains, the code can call them through it.
 func recordInterfaceTargets(prog *ssa.Program, t *FunctionTopology, concrete, iface types.Type) {
-	it, ok := iface.Underlying().(*types.Interface)
-	if !ok || it.NumMethods() == 0 || types.IsInterface(concrete) {
+	// A conversion's target and a constraint are interfaces, and concrete
+	// has the methods they declare.
+	it := iface.Underlying().(*types.Interface)
+	if it.NumMethods() == 0 || types.IsInterface(concrete) {
 		return
 	}
 	mset := prog.MethodSets.MethodSet(concrete)
 	for i := 0; i < it.NumMethods(); i++ {
 		m := it.Method(i)
-		if sel := mset.Lookup(m.Pkg(), m.Name()); sel != nil {
-			pkgPath, recv, name := funcIdentity(sel.Obj().(*types.Func))
-			recordCapabilityTarget(t, pkgPath, recv, name)
-		}
+		pkgPath, recv, name := funcIdentity(mset.Lookup(m.Pkg(), m.Name()).Obj().(*types.Func))
+		recordCapabilityTarget(t, pkgPath, recv, name)
 	}
 }
 

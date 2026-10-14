@@ -40,7 +40,7 @@ var tlsVersionNames = map[int64]string{0x0300: "SSL3.0", 0x0301: "TLS1.0", 0x030
 // A non-constant value records nothing. The fields are those of the
 // declared types, also when reached through a defined type over them.
 func collectSecuritySettings(fn *ssa.Function, t *FunctionTopology) {
-	m := &settingsMemo{secure: make(map[reachKey]map[string]bool), scans: make(map[*ssa.Function]*settingsScan)}
+	m := &settingsMemo{secure: make(map[reachKey]map[string]struct{}), scans: make(map[*ssa.Function]*settingsScan)}
 	for k := range m.scan(fn).weak {
 		if t.WeakSettings == nil {
 			t.WeakSettings = make(map[string]bool)
@@ -60,7 +60,7 @@ const maxSettingsHelperDepth = 3
 
 // settingsMemo holds what one function's settings search has learned.
 type settingsMemo struct {
-	secure map[reachKey]map[string]bool
+	secure map[reachKey]map[string]struct{}
 	scans  map[*ssa.Function]*settingsScan
 }
 
@@ -75,7 +75,7 @@ func (m *settingsMemo) scan(fn *ssa.Function) *settingsScan {
 
 // settingsScan is what one function body does to security settings.
 type settingsScan struct {
-	weak     map[string]bool
+	weak     map[string]struct{}
 	stored   map[ssa.Value]map[string]bool  // secure settings stored, by struct pointer
 	weakened map[string]bool                // secure settings some store writes weaker
 	allocs   map[string][]*ssa.Alloc        // allocated cookies and configs, by owner type
@@ -85,7 +85,7 @@ type settingsScan struct {
 
 func scanSettings(fn *ssa.Function) *settingsScan {
 	s := &settingsScan{
-		weak:     make(map[string]bool),
+		weak:     make(map[string]struct{}),
 		stored:   make(map[ssa.Value]map[string]bool),
 		weakened: make(map[string]bool),
 		allocs:   make(map[string][]*ssa.Alloc),
@@ -99,7 +99,7 @@ func scanSettings(fn *ssa.Function) *settingsScan {
 			for _, op := range ops {
 				if callee, ok := (*op).(*ssa.Function); ok {
 					if pkgPath, recv, name, _ := calleeIdentity(callee); pkgPath == "golang.org/x/crypto/ssh" && recv == "" && name == "InsecureIgnoreHostKey" {
-						s.weak[settingInsecureIgnoreHosts] = true
+						s.weak[settingInsecureIgnoreHosts] = struct{}{}
 					}
 				}
 			}
@@ -138,21 +138,21 @@ func (s *settingsScan) store(addr *ssa.FieldAddr, c *ssa.Const) {
 	owner, field := structField(addr)
 	key := owner + "." + field
 	secure := func(setting string, set bool) {
-		if !set {
+		if set {
+			if s.stored[addr.X] == nil {
+				s.stored[addr.X] = make(map[string]bool)
+			}
+			s.stored[addr.X][setting] = true
+		} else {
 			s.weakened[setting] = true
-			return
 		}
-		if s.stored[addr.X] == nil {
-			s.stored[addr.X] = make(map[string]bool)
-		}
-		s.stored[addr.X][setting] = true
 	}
 	switch owner {
 	case "crypto/tls.Config":
 		switch field {
 		case "InsecureSkipVerify":
 			if c.Value.Kind() == constant.Bool && constant.BoolVal(c.Value) {
-				s.weak[key+"=true"] = true
+				s.weak[key+"=true"] = struct{}{}
 			}
 		case "MinVersion", "MaxVersion":
 			if v := intConst(c); v != 0 && v < tlsVersion12 {
@@ -160,7 +160,7 @@ func (s *settingsScan) store(addr *ssa.FieldAddr, c *ssa.Const) {
 				if name == "" {
 					name = c.Value.ExactString()
 				}
-				s.weak[key+"="+name] = true
+				s.weak[key+"="+name] = struct{}{}
 			}
 		case "ClientAuth":
 			secure(key+"=RequireAndVerifyClientCert", intConst(c) == tlsRequireAndVerifyCert)
@@ -171,7 +171,7 @@ func (s *settingsScan) store(addr *ssa.FieldAddr, c *ssa.Const) {
 			secure(key+"=true", c.Value.Kind() == constant.Bool && constant.BoolVal(c.Value))
 		case "SameSite":
 			if intConst(c) == httpSameSiteNoneMode {
-				s.weak[key+"=SameSiteNoneMode"] = true
+				s.weak[key+"=SameSiteNoneMode"] = struct{}{}
 			}
 		}
 	}
@@ -179,13 +179,13 @@ func (s *settingsScan) store(addr *ssa.FieldAddr, c *ssa.Const) {
 
 // secureSettings returns the secure settings of fn (see
 // collectSecuritySettings), following helpers depth calls deep.
-func (m *settingsMemo) secureSettings(fn *ssa.Function, depth int) map[string]bool {
+func (m *settingsMemo) secureSettings(fn *ssa.Function, depth int) map[string]struct{} {
 	key := reachKey{fn, depth}
 	if settings, ok := m.secure[key]; ok {
 		return settings
 	}
 	s := m.scan(fn)
-	helperSettings := func(h *ssa.Function) map[string]bool {
+	helperSettings := func(h *ssa.Function) map[string]struct{} {
 		if depth <= 0 {
 			return nil
 		}
@@ -201,24 +201,24 @@ func (m *settingsMemo) secureSettings(fn *ssa.Function, depth int) map[string]bo
 			if s.stored[a][setting] {
 				continue
 			}
-			if !slices.ContainsFunc(s.passed[a], func(h *ssa.Function) bool { return helperSettings(h)[setting] }) {
+			if !slices.ContainsFunc(s.passed[a], func(h *ssa.Function) bool { _, ok := helperSettings(h)[setting]; return ok }) {
 				return false
 			}
 		}
 		return true
 	}
-	settings := make(map[string]bool)
+	settings := make(map[string]struct{})
 	for _, stored := range s.stored {
 		for setting := range stored {
 			if keeps(setting) {
-				settings[setting] = true
+				settings[setting] = struct{}{}
 			}
 		}
 	}
 	for _, h := range s.helpers {
 		for setting := range helperSettings(h) {
 			if keeps(setting) {
-				settings[setting] = true
+				settings[setting] = struct{}{}
 			}
 		}
 	}
