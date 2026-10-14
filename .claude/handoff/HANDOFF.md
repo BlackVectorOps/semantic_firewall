@@ -1,18 +1,65 @@
-# Handoff: semantic_firewall, branch `ccr-33d08e80-zi15zu`
+# Handoff: semantic_firewall, branch `ccr-33d08e80-zi15zu` (PR #39)
 
 Written at the end of a long session for the next agent. Read all of it
 before touching anything. **Delete `.claude/handoff/` before PR #39 merges.**
 
-## Where things stand (head `7a051aa`)
+## Where things stand (session 2, head `bc91411`)
 
 - Repo `BlackVectorOps/semantic_firewall`, Go module `.../v5`, Go 1.26.3.
-- Work branch `ccr-33d08e80-zi15zu`; **push only there**. Draft **PR #39**
-  (title still says WIP). Base `main` at `9924ffc` = v5.2.0, merged as PR #38.
-- CI (`.github/workflows/test.yml`: vet + `go test ./...` with
-  `CGO_ENABLED=0`, plus a `-race` job over `pkg/diff`, `pkg/api`,
-  `internal/actiontest`) is green on every commit through `b675a1f`;
-  `7a051aa` only adds two purge test cases (pass locally).
-- Working tree clean; nothing unpushed.
+- Work branch `ccr-33d08e80-zi15zu`, draft **PR #39** (title still says WIP).
+  Session 2 worked on `ccr-2e562674-eku5cl` first, opened PR #40, then the
+  user said to move to #39: #39's branch was fast-forwarded and #40 closed.
+  If your session is assigned another branch, ask before pushing to #39's.
+- CI green on every commit through `bc91411`. Working tree clean.
+- `.Jules/` deleted at the user's request (main deleted it too).
+
+### Session 2: hardening pass, two files at a time
+
+The user's process: one hunter sub-agent per pair of files (worktree
+isolation, reproducers required, no verifier agents); you judge every
+claim by running its reproducer, fix, add tests that fail on the old code
+(prove it by stashing the production files), run `tools/mutate` on the
+pair, answer every survivor, commit, push.
+
+Done (see commit messages for full lists):
+- Pair 1 `guards.go`+`checks.go` (`4332ce1`, `ba8cf93`, `d413a3c`): crash on
+  WriteHeader(nil); Unguarded evasions (constant branches, call in both
+  arms, `for {}` header, never-returning functions); defer result slots;
+  helper/getter/os.IsPermission noise; extracted hmac.Equal; die() helpers.
+- Pair 2 `settings.go`+`capability.go` (`4a83b21`, `bc91411`): primitives
+  must decide; capabilities via interface conversion / type args /
+  RoundTripper; cookie and ClientAuth clearing and decoys; defined types;
+  helper-built settings; TLS version raise; LookPath, syscall helpers;
+  new filesystem and reflection entries; table tests for every class row.
+- Pair 3 `api/deps.go`+`models/deps.go` (`033d245`): vendoring
+  (-mod=vendor), newly built packages of unchanged modules, symlinks, asm
+  #include, cgo files under any name (magic-byte object detection),
+  linknames from parsed comments of all package files keyed by package,
+  method-set entry points, init boundary in reach, SCC-memoized reach.
+
+Mutation status: pairs 1 and 2 closed (remaining survivors are the
+equivalent classes below). **`deps.go` mutation not done**: the detached
+run died with the container at 65/666. Rerun (takes ~2-3h; launch
+detached with `nohup setsid` and wait with a background `until` loop):
+`mut -pkgs ./pkg/api -files 'deps\.go$' -run TestDepsDiff -timeout 5m`.
+
+Next, in order:
+1. `deps.go` mutation run (above); answer survivors.
+2. Pair 4 `api/risk.go`+`api/batch.go`: a hunter was running when the
+   session ended; its results are lost. Relaunch it (prompt: scoring vs
+   README, withoutModuleTargets key parsing incl. "(.error).Error" and
+   module-prefix paths, batch == separate diffs, races with -race,
+   panics; CalculateTopologyDelta has no caller and 0% coverage). Also
+   mutate `raisesTLSVersion` (added in pair 2).
+3. Pair 5 `diff/loader.go`+`purge.go`, pair 6 `api/diff.go`+
+   `cli/diff_logic.go` (readDiffInput error paths), pair 7 the rest
+   (fingerprinter, package_functions, cli/deps, cmd/sfw/main).
+4. Open question for the user: a tree with `go.work` is analyzed with
+   GOWORK=off (documented as a limit). Fail instead, or honor it?
+5. Deferred, reported to the user: share the check-helper search across
+   functions (needs a per-package cache, outside one pair); settings set
+   through a field's address (`flag.BoolVar(&cfg.InsecureSkipVerify..)`);
+   func-typed fields (`Transport.DialContext`); a generic function alone.
 
 ## The user and how they work
 
@@ -104,11 +151,15 @@ Results on the current code, from this container (no `-race`):
   mutants; risk/batch/diff), `pkg/diff` (loader, fingerprinter,
   package_functions), `internal/cli` + `cmd/sfw`.
 
-Known equivalent survivors (accepted; don't chase): memo/cache lines in
-`checks.go` (lookup, `memo[key] = false`) and `guards.go` (`counts`);
-`n < prev` boundary in guard minimum; defensive checks in
-`settings.go: structField` (SSA FieldAddr invariants); the 4-hop bound in
-`isErrorExit`; purge `ellipsis = false` on `;` and `top < 0`.
+Known equivalent survivors (accepted; don't chase): memo/cache reads and
+writes (`checks.go` reached/bodies memo, `guards.go` counts and noReturns,
+`settings.go` scans/secure memo); de-duplication guards (`slices.Contains`
+before appends, `sites` last-block check, settings `helpers`); scratch
+buffer reuse (`g.stack`); early `break`s that only save work; the
+`owner != ""` guard on allocations; defensive checks in `structField` and
+`declaringType` (SSA FieldAddr invariants, nil field package) and its
+same-package fast path; the 4-hop bound in `isErrorExit`; purge
+`ellipsis = false` on `;` and `top < 0`.
 
 Coverage (user's phone, `-coverpkg=./...`): 68.9% total; branch files
 mostly 90–100%. Real gaps to test:
