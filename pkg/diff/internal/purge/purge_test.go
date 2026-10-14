@@ -95,6 +95,17 @@ func TestPurgeFuncBodiesCases(t *testing.T) {
 			in:   "package p\nvar X = [...]int{1}\nvar Y = T{2}\n",
 			want: "package p\nvar X = [...]int{1}\nvar Y = T{}\n",
 		},
+		{
+			name: "auto-sized array then literal in the same statement",
+			in:   "package p\nvar X, Y = [...]int{1}, T{2}\n",
+			want: "package p\nvar X, Y = [...]int{1}, T{}\n",
+		},
+		// An unbalanced "}" is ignored rather than crashing the scanner.
+		{
+			name: "stray closing brace",
+			in:   "package p\n}\nfunc F() { x() }\n",
+			want: "package p\n}\nfunc F() {}\n",
+		},
 		// Other composite literals are purged: their contents don't
 		// affect the type of the enclosing declaration.
 		{
