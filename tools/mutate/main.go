@@ -116,6 +116,25 @@ func main() {
 		copies <- dir
 	}
 
+	// Every test command must pass on the unmutated code; otherwise each
+	// mutant would "fail" for a reason of its own (a flag the platform does
+	// not support, a broken test) and count as caught.
+	cfg := testConfig{run: *run, testPkgs: *testPkgs, goflags: *goflags, timeout: *timeout}
+	baseline := <-copies
+	seen := map[string]bool{}
+	for _, m := range mutants {
+		pkgs := cfg.packages(m)
+		key := strings.Join(pkgs, ",")
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if out, err := cfg.goTest(baseline, pkgs); err != nil {
+			fail("the tests fail without any mutation (%s); fix them or the flags first:\n%s", key, out)
+		}
+	}
+	copies <- baseline
+
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	done := 0
@@ -125,11 +144,11 @@ func main() {
 			defer wg.Done()
 			dir := <-copies
 			defer func() { copies <- dir }()
-			m.status, m.detail = test(dir, m, *run, *testPkgs, *goflags, *timeout)
+			m.status, m.detail = cfg.test(dir, m)
 			mu.Lock()
 			done++
-			if m.status == "SURVIVED" {
-				fmt.Printf("[%d/%d] SURVIVED %s:%d %s\n", done, len(mutants), m.file, m.line, m.kind)
+			if m.status == "SURVIVED" || m.status == "ERROR" {
+				fmt.Printf("[%d/%d] %s %s:%d %s\n", done, len(mutants), m.status, m.file, m.line, m.kind)
 			}
 			mu.Unlock()
 		}(m)
@@ -140,7 +159,8 @@ func main() {
 	for _, m := range mutants {
 		counts[m.status]++
 	}
-	fmt.Printf("\nkilled %d, survived %d, not compiling %d, timed out %d\n", counts["KILLED"], counts["SURVIVED"], counts["NOCOMPILE"], counts["TIMEOUT"])
+	fmt.Printf("\nkilled %d, survived %d, not compiling %d, timed out %d, errors %d\n",
+		counts["KILLED"], counts["SURVIVED"], counts["NOCOMPILE"], counts["TIMEOUT"], counts["ERROR"])
 	sort.Slice(mutants, func(i, j int) bool {
 		if mutants[i].file != mutants[j].file {
 			return mutants[i].file < mutants[j].file
@@ -152,13 +172,50 @@ func main() {
 			fmt.Printf("SURVIVED %s:%d %s\n", m.file, m.line, m.kind)
 		}
 	}
-	if counts["SURVIVED"] > 0 {
+	for _, m := range mutants {
+		if m.status == "ERROR" {
+			fmt.Printf("ERROR %s:%d %s\n%s\n", m.file, m.line, m.kind, m.detail)
+		}
+	}
+	if counts["SURVIVED"] > 0 || counts["ERROR"] > 0 {
 		os.Exit(1)
 	}
 }
 
-// test applies m in dir, runs the package's tests, and restores the file.
-func test(dir string, m *mutant, run, testPkgs, goflags string, timeout time.Duration) (string, string) {
+// testConfig is how every mutant, and the baseline, is tested.
+type testConfig struct {
+	run, testPkgs, goflags string
+	timeout                time.Duration
+}
+
+// packages returns the packages whose tests judge m.
+func (c testConfig) packages(m *mutant) []string {
+	if c.testPkgs != "" {
+		return strings.Split(c.testPkgs, ",")
+	}
+	return []string{"./" + filepath.Dir(m.file)}
+}
+
+// goTest runs the tests of pkgs in dir.
+func (c testConfig) goTest(dir string, pkgs []string) ([]byte, error) {
+	// -vet=off: a mutant that only trips a vet check (unreachable code after
+	// a removed statement) is not caught by a test. -failfast: one failure
+	// is a verdict.
+	args := []string{"test", "-count=1", "-vet=off", "-failfast", "-timeout", c.timeout.String()}
+	args = append(args, strings.Fields(c.goflags)...)
+	if c.run != "" {
+		args = append(args, "-run", c.run)
+	}
+	return goCmd(dir, c.timeout, strings.Contains(" "+c.goflags+" ", " -race "), append(args, pkgs...)...)
+}
+
+// testFailed matches go test output that reports a failing or crashing test.
+var testFailed = regexp.MustCompile(`(?m)^(--- FAIL|FAIL\s|panic: )`)
+
+// test applies m in dir, runs the tests, and restores the file. A mutant
+// is KILLED only when a test reports a failure; a go command that fails for
+// another reason is an ERROR, not a catch.
+func (c testConfig) test(dir string, m *mutant) (string, string) {
 	path := filepath.Join(dir, m.file)
 	orig, err := os.ReadFile(path)
 	check(err)
@@ -166,27 +223,16 @@ func test(dir string, m *mutant, run, testPkgs, goflags string, timeout time.Dur
 	mutated := append(append(append([]byte{}, orig[:m.start]...), m.repl...), orig[m.end:]...)
 	check(os.WriteFile(path, mutated, 0o644))
 
-	pkg := "./" + filepath.Dir(m.file)
-	// -vet=off: a mutant that only trips a vet check (unreachable code after
-	// a removed statement) is not caught by a test. -failfast: one failure
-	// is a verdict.
-	args := []string{"test", "-count=1", "-vet=off", "-failfast", "-timeout", timeout.String()}
-	args = append(args, strings.Fields(goflags)...)
-	if run != "" {
-		args = append(args, "-run", run)
-	}
-	pkgs := []string{pkg}
-	if testPkgs != "" {
-		pkgs = strings.Split(testPkgs, ",")
-	}
-	out, err := goCmd(dir, timeout, strings.Contains(" "+goflags+" ", " -race "), append(args, pkgs...)...)
+	out, err := c.goTest(dir, c.packages(m))
 	switch {
 	case err == context.DeadlineExceeded || bytes.Contains(out, []byte("panic: test timed out")):
 		return "TIMEOUT", ""
 	case err != nil && (bytes.Contains(out, []byte("[build failed]")) || bytes.Contains(out, []byte("[setup failed]"))):
 		return "NOCOMPILE", string(out)
-	case err != nil:
+	case err != nil && testFailed.Match(out):
 		return "KILLED", ""
+	case err != nil:
+		return "ERROR", string(out)
 	}
 	return "SURVIVED", ""
 }
