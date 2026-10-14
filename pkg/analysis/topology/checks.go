@@ -42,17 +42,14 @@ func collectCheckHelpers(fn *ssa.Function, t *FunctionTopology) {
 				if isVerificationName(m.Name()) && resultDecides(call) {
 					t.Checks["("+types.TypeString(call.Call.Value.Type(), nil)+")."+m.Name()] = true
 				}
-				continue
 			}
+			// An interface call has no static callee.
 			callee := call.Call.StaticCallee()
 			if callee == nil || callee.Parent() != nil {
 				continue
 			}
 			// A primitive is already recorded under the same key.
-			pkgPath, recv, name, ok := calleeIdentity(callee)
-			if !ok {
-				continue
-			}
+			pkgPath, recv, name, _ := calleeIdentity(callee)
 			key := callTargetKey(pkgPath, recv, name)
 			decides := resultDecides(call)
 			if decides && isVerificationName(name) && !notChecks[key] {
@@ -108,7 +105,7 @@ func newReachMemo() *reachMemo {
 }
 
 // bodyRefs is what a function body references, once each: the
-// verification primitives, and the functions of its own package.
+// verification primitives, and the other functions.
 type bodyRefs struct {
 	primitives []string
 	callees    []*ssa.Function
@@ -119,7 +116,6 @@ func (m *reachMemo) refs(fn *ssa.Function) *bodyRefs {
 		return r
 	}
 	r := &bodyRefs{}
-	pkg := pkgOf(fn)
 	var ops []*ssa.Value
 	for _, b := range fn.Blocks {
 		for _, instr := range b.Instrs {
@@ -134,7 +130,7 @@ func (m *reachMemo) refs(fn *ssa.Function) *bodyRefs {
 					if k := callTargetKey(pkgPath, recv, name); !slices.Contains(r.primitives, k) {
 						r.primitives = append(r.primitives, k)
 					}
-				} else if pkgOf(callee) == pkg && len(callee.Blocks) > 0 && !slices.Contains(r.callees, callee) {
+				} else if !slices.Contains(r.callees, callee) {
 					r.callees = append(r.callees, callee)
 				}
 			}
@@ -198,7 +194,7 @@ func resultDecides(call *ssa.Call) bool {
 			case *ssa.Store:
 				// A local the value is stored in, such as the result a
 				// function with a defer returns: follow its loads.
-				if local, ok := r.Addr.(*ssa.Alloc); ok && r.Val == v {
+				if local, ok := r.Addr.(*ssa.Alloc); ok {
 					for _, use := range *local.Referrers() {
 						if load, ok := use.(*ssa.UnOp); ok && load.Op == token.MUL && decides(load, depth+1) {
 							return true

@@ -40,7 +40,7 @@ func (Config) InsecureIgnoreHostKey() HostKeyCallback { return nil }
 		"xcrypto/go.mod":     "module golang.org/x/crypto\n\ngo 1.23\n",
 		"xcrypto/ssh/ssh.go": sshStub,
 		"fake/ssh/ssh.go":    sshStub,
-		"helper/helper.go":   "package helper\n\nimport \"crypto/hmac\"\n\nfunc Same(a, b []byte) bool { return hmac.Equal(a, b) }\n",
+		"helper/helper.go":   "package helper\n\nimport (\"crypto/hmac\"; \"os\")\n\nfunc Same(a, b []byte) bool { return hmac.Equal(a, b) }\n\nfunc Die() { os.Exit(1) }\n",
 	}
 	// helper is a root, so its functions have SSA bodies.
 	patterns := []string{"./helper"}
@@ -328,6 +328,23 @@ import "os"
 func die(msg string) { println(msg); os.Exit(1) }
 func F(p string, ok bool) { if !ok { die("forbidden") }; os.Remove(p) }
 func main() {}`, map[string]int{"os.Remove": 1}},
+		{"two guarded targets", `package main
+import ("net";"os")
+func F(p string, a, b bool) { if a { net.Dial("tcp", p) }; if b { os.Remove(p) } }
+func main() {}`, map[string]int{"net.Dial": 1, "os.Remove": 1}},
+		{"a loop that ends before an unconditional call", `package main
+import "os"
+func F(p string, ok bool) { if ok { for i := 0; i < 3; i++ { println(i) } }; os.Remove(p) }
+func main() {}`, map[string]int{"os.Remove": 0}},
+		{"a constant false alternative adds no way out", `package main
+import "os"
+const bypass = false
+func F(p string, a bool) { if a || bypass { return }; os.Remove(p) }
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"a helper of another package that always exits is not followed", `package main
+import ("os";"testmod/helper")
+func F(p string, ok bool) { if !ok { helper.Die() }; os.Remove(p) }
+func main() {}`, map[string]int{"os.Remove": 0}},
 		{"a helper of the package that may return", `package main
 import "os"
 func warn(msg string, fatal bool) { if fatal { os.Exit(1) }; println(msg) }
@@ -507,6 +524,22 @@ func main() {}`, []string{"testmod.authorize"}},
 		{"verification stored in a named result", `package main
 func authorize(u string) bool { return u == "admin" }
 func F(u string) (ok bool) { defer println(); ok = authorize(u); return }
+func main() {}`, []string{"testmod.authorize"}},
+		{"a helper taking a method value", `package main
+import "crypto/hmac"
+type T struct{ key []byte }
+func (t T) Key() []byte { return t.key }
+func h(t T, mac []byte) bool { k := t.Key; return hmac.Equal(k(), mac) }
+func F(t T, mac []byte) bool { return h(t, mac) }
+func main() {}`, []string{"testmod.h", "crypto/hmac.Equal"}},
+		{"a verification result stored in a global", `package main
+var last bool
+func authorize(u string) bool { return u == "admin" }
+func F(u string) { last = authorize(u) }
+func main() {}`, nil},
+		{"a verification result in a named result changed in a loop", `package main
+func authorize(u string) bool { return u == "admin" }
+func F(u string, n int) (ok bool) { defer println(); ok = authorize(u); for i := 0; i < n; i++ { ok = !ok }; return }
 func main() {}`, []string{"testmod.authorize"}},
 		{"getters returned are no checks", `package main
 type Commit struct{ author, token, role string }
@@ -847,6 +880,10 @@ func main() {}`, 2},
 		{"a named result set before a bare return", `package main
 import "errors"
 func F(p string) (err error) { defer println(); if p == "" { err = errors.New("x"); return }; return nil }
+func main() {}`, 1},
+		{"a named error result set before another result", `package main
+import "errors"
+func F(p string) (n int, err error) { defer println(); if p == "" { err = errors.New("empty"); n = -1; return }; return len(p), nil }
 func main() {}`, 1},
 		{"a constant condition is no check", `package main
 import "errors"
