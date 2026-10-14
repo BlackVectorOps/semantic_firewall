@@ -9,18 +9,18 @@ import (
 	"testing"
 
 	"golang.org/x/tools/go/packages"
+	"golang.org/x/tools/go/ssa"
 
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/topology"
 )
 
-// topologies compiles each source as its own package of one module, in a
-// single load, and returns the topology of the function F in each. Package
-// paths in call target keys read "testmod", as if each were the only one.
+// functions compiles each source as its own package of one module, in a
+// single load, and returns the function F of each.
 //
 // The sources can import a stub golang.org/x/crypto/ssh, and testmod/fake/ssh,
 // a package of the same name that is not it.
-func topologies(t *testing.T, srcs ...string) []*topology.FunctionTopology {
+func functions(t *testing.T, srcs ...string) []*ssa.Function {
 	t.Helper()
 	dir := t.TempDir()
 	const sshStub = `package ssh
@@ -40,11 +40,13 @@ func (Config) InsecureIgnoreHostKey() HostKeyCallback { return nil }
 		"xcrypto/go.mod":     "module golang.org/x/crypto\n\ngo 1.23\n",
 		"xcrypto/ssh/ssh.go": sshStub,
 		"fake/ssh/ssh.go":    sshStub,
+		"helper/helper.go":   "package helper\n\nimport \"crypto/hmac\"\n\nfunc Same(a, b []byte) bool { return hmac.Equal(a, b) }\n",
 	}
-	patterns := make([]string, len(srcs))
+	// helper is a root, so its functions have SSA bodies.
+	patterns := []string{"./helper"}
 	for i, src := range srcs {
 		files[fmt.Sprintf("c%d/main.go", i)] = src
-		patterns[i] = fmt.Sprintf("./c%d", i)
+		patterns = append(patterns, fmt.Sprintf("./c%d", i))
 	}
 	for name, content := range files {
 		path := filepath.Join(dir, name)
@@ -71,29 +73,37 @@ func (Config) InsecureIgnoreHostKey() HostKeyCallback { return nil }
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := make([]*topology.FunctionTopology, len(srcs))
+	fns := make([]*ssa.Function, len(srcs))
 	for _, pkg := range pkgs {
+		if pkg.PkgPath == "testmod/helper" {
+			continue
+		}
 		var i int
 		if _, err := fmt.Sscanf(pkg.PkgPath, "testmod/c%d", &i); err != nil || i < 0 || i >= len(srcs) {
 			t.Fatalf("unexpected package %s", pkg.PkgPath)
 		}
-		fn := prog.Package(pkg.Types).Func("F")
-		if fn == nil {
+		fns[i] = prog.Package(pkg.Types).Func("F")
+		if fns[i] == nil {
 			t.Fatalf("no function F in case %d", i)
 		}
+	}
+	return fns
+}
+
+// topologies is functions followed by ExtractTopology. Package paths in
+// call target keys read "testmod", as if each case were the only one.
+func topologies(t *testing.T, srcs ...string) []*topology.FunctionTopology {
+	t.Helper()
+	out := make([]*topology.FunctionTopology, len(srcs))
+	for i, fn := range functions(t, srcs...) {
 		tp := topology.ExtractTopology(fn)
 		if tp == nil {
 			t.Fatalf("no topology for F in case %d", i)
 		}
-		out[i] = tp
-		pkgPath := pkg.PkgPath
+		pkgPath := fn.Pkg.Pkg.Path()
 		tp.CapabilityGuards = rekey(tp.CapabilityGuards, pkgPath)
 		tp.Checks = rekey(tp.Checks, pkgPath)
-	}
-	for i, tp := range out {
-		if tp == nil {
-			t.Fatalf("case %d was not loaded", i)
-		}
+		out[i] = tp
 	}
 	return out
 }
@@ -283,6 +293,24 @@ func h3(a, b []byte) bool { return h4(a, b) }
 func h4(a, b []byte) bool { return hmac.Equal(a, b) }
 func F(a, b []byte) { h1(a, b) }
 func main() {}`, nil},
+		{"a helper within reach after one out of reach", `package main
+import "crypto/hmac"
+func h1(a, b []byte) bool { return h2(a, b) }
+func h2(a, b []byte) bool { return h3(a, b) }
+func h3(a, b []byte) bool { return h4(a, b) }
+func h4(a, b []byte) bool { return hmac.Equal(a, b) }
+func F(a, b []byte) { h1(a, b); h3(a, b) }
+func main() {}`, []string{"testmod.h3"}},
+		{"mutually recursive helpers reaching a primitive", `package main
+import "crypto/hmac"
+func even(a, b []byte, n int) bool { if n == 0 { return hmac.Equal(a, b) }; return odd(a, b, n-1) }
+func odd(a, b []byte, n int) bool { return even(a, b, n-1) }
+func F(a, b []byte) { odd(a, b, 3) }
+func main() {}`, []string{"testmod.odd"}},
+		{"a helper in another package is not followed", `package main
+import "testmod/helper"
+func F(a, b []byte) { helper.Same(a, b) }
+func main() {}`, nil},
 		{"recursive helper terminates", `package main
 func loop(n int) bool { if n == 0 { return false }; return loop(n - 1) }
 func F() { loop(3) }
@@ -300,6 +328,37 @@ func main() {}`, []string{"testmod.validate"}},
 func isAdmin(u string) bool { return u == "admin" }
 func F(u string) bool { return isAdmin(u) }
 func main() {}`, []string{"testmod.isAdmin"}},
+		{"verification result only accumulated in a loop", `package main
+func authorize(u string) bool { return u == "admin" }
+func F(us []string) { var acc bool; for _, u := range us { acc = acc != authorize(u) }; println(acc) }
+func main() {}`, nil},
+		{"verification result four operations from a branch", `package main
+func authorize(u string) bool { return u == "admin" }
+func F(u string) int { ok := !!!!authorize(u); if ok { return 1 }; return 0 }
+func main() {}`, []string{"testmod.authorize"}},
+		{"verification result five operations from a branch", `package main
+func authorize(u string) bool { return u == "admin" }
+func F(u string) int { ok := !!!!!authorize(u); if ok { return 1 }; return 0 }
+func main() {}`, nil},
+		{"verification result through a tuple", `package main
+func validate(u string) (int, error) { return len(u), nil }
+func F(u string) int { if _, err := validate(u); err != nil { return 0 }; return 1 }
+func main() {}`, []string{"testmod.validate"}},
+		{"verification result through a short-circuit phi", `package main
+func authorize(u string) bool { return u == "admin" }
+func F(u string) int { ok := u == "" || authorize(u); if ok { return 1 }; return 0 }
+func main() {}`, []string{"testmod.authorize"}},
+		{"verification result through conversions", `package main
+type Decision bool
+type Level int32
+func authorize(u string) Decision { return u == "admin" }
+func accessLevel(u string) Level { return Level(len(u)) }
+func F(u string) int { if bool(authorize(u)) && int64(accessLevel(u)) > 2 { return 1 }; return 0 }
+func main() {}`, []string{"testmod.accessLevel", "testmod.authorize"}},
+		{"verification result through a dereference", `package main
+func allowed(u string) *bool { b := u == "admin"; return &b }
+func F(u string) int { if *allowed(u) { return 1 }; return 0 }
+func main() {}`, []string{"testmod.allowed"}},
 		{"verification name with the result unused", `package main
 func authorize(u string) bool { return u == "admin" }
 func F(u string) { authorize(u) }
@@ -389,6 +448,13 @@ func main() {}`, nil, nil},
 import "crypto/tls"
 func F() *tls.Config { c := &tls.Config{}; c.InsecureSkipVerify = true; return c }
 func main() {}`, []string{"crypto/tls.Config.InsecureSkipVerify=true"}, nil},
+		{"constant stores that are not to a field", `package main
+var g bool
+func F(p *int) { g = true; *p = 1 }
+func main() {}`, nil, nil},
+		{"store to an unnamed struct", `package main
+func F() any { p := &struct{ InsecureSkipVerify bool }{}; p.InsecureSkipVerify = true; return p }
+func main() {}`, nil, nil},
 		{"ssh host key checking disabled", `package main
 import "golang.org/x/crypto/ssh"
 func F() ssh.HostKeyCallback { return ssh.InsecureIgnoreHostKey() }
@@ -533,9 +599,30 @@ func main() {}`, 1},
 import "net/http"
 func F(w http.ResponseWriter, code int, ok bool) { if !ok { w.WriteHeader(code); return }; w.Write(nil) }
 func main() {}`, 0},
+		{"WriteHeader of another interface, with a string", `package main
+type W interface{ WriteHeader(s string) }
+func F(w W, ok bool) { if !ok { w.WriteHeader("x"); return }; w.WriteHeader("y") }
+func main() {}`, 0},
 		{"a redirect is not an error response", `package main
 import "net/http"
 func F(w http.ResponseWriter, r *http.Request, ok bool) { if !ok { http.Redirect(w, r, "/", 302); return }; w.Write(nil) }
+func main() {}`, 0},
+		{"errors.Unwrap is not a new error", `package main
+import "errors"
+func F(err error, ok bool) error { if !ok { return errors.Unwrap(err) }; return nil }
+func main() {}`, 0},
+		{"a local New is not errors.New", `package main
+func New(s string) error { return nil }
+func F(ok bool) error { if !ok { return New("no") }; return nil }
+func main() {}`, 0},
+		{"a local Errorf is not fmt.Errorf", `package main
+func Errorf(s string) error { return nil }
+func F(ok bool) error { if !ok { return Errorf("no") }; return nil }
+func main() {}`, 0},
+		{"an error method named New is not errors.New", `package main
+type B struct{}
+func (B) New(s string) error { return nil }
+func F(b B, ok bool) error { if !ok { return b.New("no") }; return nil }
 func main() {}`, 0},
 		{"a net/http method named Error", `package main
 import "net/http"
@@ -562,5 +649,63 @@ func main() {}`, 2},
 				t.Errorf("ErrorExits = %d; want %d", got, c.want)
 			}
 		})
+	}
+}
+
+func TestCalleeCapability(t *testing.T) {
+	fn := functions(t, `package main
+import (
+	"fmt"
+	"net/http"
+	"os"
+	"slices"
+)
+func F(c *http.Client, r *http.Request, p string, s []int) {
+	os.Remove(p)
+	c.Do(r)
+	do := c.Do
+	do(r)
+	fmt.Println(p, slices.Contains(s, 1))
+}
+func main() {}`)[0]
+	got := map[string]string{}
+	for _, b := range fn.Blocks {
+		for _, instr := range b.Instrs {
+			if call, ok := instr.(*ssa.Call); ok {
+				if callee := call.Call.StaticCallee(); callee != nil {
+					key, class, ok := topology.CalleeCapability(callee)
+					if !ok {
+						t.Errorf("CalleeCapability(%s) not ok", callee)
+					}
+					got[key] = class
+				}
+			}
+		}
+	}
+	want := map[string]string{
+		"os.Remove":            topology.CapFilesystem,
+		"(net/http.Client).Do": topology.CapNetwork, // the call and the bound method value
+		"fmt.Println":          "",
+		"slices.Contains":      "", // an instantiation is keyed by its generic function
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("CalleeCapability keys and classes = %v; want %v", got, want)
+	}
+
+	inits := 0
+	for _, b := range fn.Pkg.Func("init").Blocks {
+		for _, instr := range b.Instrs {
+			if call, ok := instr.(*ssa.Call); ok {
+				if callee := call.Call.StaticCallee(); callee != nil && callee.Name() == "init" {
+					inits++
+					if key, class, ok := topology.CalleeCapability(callee); ok || key != "" || class != "" {
+						t.Errorf("CalleeCapability(%s) = %q, %q, %v; want a package initializer to be no call target", callee, key, class, ok)
+					}
+				}
+			}
+		}
+	}
+	if inits < 4 {
+		t.Errorf("found %d imported package initializers; want 4", inits)
 	}
 }

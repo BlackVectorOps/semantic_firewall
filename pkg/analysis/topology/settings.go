@@ -63,9 +63,6 @@ func collectSecuritySettings(fn *ssa.Function, t *FunctionTopology) {
 					continue
 				}
 				owner, field := structField(addr)
-				if owner == "" {
-					continue
-				}
 				key := owner + "." + field
 				switch owner {
 				case "crypto/tls.Config":

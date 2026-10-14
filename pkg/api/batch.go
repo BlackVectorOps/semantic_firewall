@@ -38,9 +38,9 @@ var (
 // The files of each side are loaded together: all files under one module
 // root take one go/packages call, so a package and its import graph are
 // loaded once however many of its files are diffed. A file outside any
-// module, a file the module's default build leaves out, and every file of a
-// group whose load or SSA build fails are loaded on their own, exactly as
-// Diff loads them.
+// module, a file the module's default build leaves out, a file of a package
+// that does not type-check, and every file of a group whose load or SSA
+// build fails are loaded on their own, exactly as Diff loads them.
 func DiffBatch(pairs []DiffPair) []*models.DiffOutput {
 	return DiffBatchWithFS(RealFileSystem{}, pairs)
 }

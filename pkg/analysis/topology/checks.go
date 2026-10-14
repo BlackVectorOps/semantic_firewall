@@ -24,7 +24,7 @@ const maxCheckHelperDepth = 3
 // Static calls are keyed like CallTargets; interface calls are keyed by the
 // interface type and method, "(example.com/p.Verifier).Verify".
 func collectCheckHelpers(fn *ssa.Function, t *FunctionTopology) {
-	memo := make(map[*ssa.Function]bool)
+	memo := make(map[reachKey]bool)
 	for _, b := range fn.Blocks {
 		for _, instr := range b.Instrs {
 			call, ok := instr.(*ssa.Call)
@@ -36,43 +36,43 @@ func collectCheckHelpers(fn *ssa.Function, t *FunctionTopology) {
 				if isVerificationName(m.Name()) && resultDecides(call) {
 					t.Checks["("+types.TypeString(call.Call.Value.Type(), nil)+")."+m.Name()] = true
 				}
-				continue
-			}
-			callee := call.Call.StaticCallee()
-			if callee == nil || callee.Parent() != nil {
-				continue
-			}
-			pkgPath, recv, name, ok := calleeIdentity(callee)
-			if !ok || IsVerificationCall(pkgPath, recv, name) {
-				continue
-			}
-			if (isVerificationName(name) && resultDecides(call)) || reachesVerification(callee, fn.Pkg, maxCheckHelperDepth, memo) {
-				t.Checks[callTargetKey(pkgPath, recv, name)] = true
+			} else if callee := call.Call.StaticCallee(); callee != nil && callee.Parent() == nil {
+				// A primitive is already recorded under the same key.
+				pkgPath, recv, name, ok := calleeIdentity(callee)
+				if ok && ((isVerificationName(name) && resultDecides(call)) || reachesVerification(callee, fn.Pkg, maxCheckHelperDepth, memo)) {
+					t.Checks[callTargetKey(pkgPath, recv, name)] = true
+				}
 			}
 		}
 	}
+}
+
+// reachKey memoizes reachesVerification: the answer depends on the depth
+// left, as a helper reached at the end of a long chain may be within reach
+// when called directly.
+type reachKey struct {
+	fn    *ssa.Function
+	depth int
 }
 
 // reachesVerification reports whether fn, a function of package pkg, calls
 // a verification primitive, directly or through static calls to other
 // functions of pkg, at most depth calls deep. The search never leaves pkg:
 // whether another package's functions have SSA bodies depends on which
-// packages happened to be built, and the result must not.
-func reachesVerification(fn *ssa.Function, pkg *ssa.Package, depth int, memo map[*ssa.Function]bool) bool {
+// packages happened to be built, and the result must not. Every recursive
+// call has less depth, so recursion in the code ends the search.
+func reachesVerification(fn *ssa.Function, pkg *ssa.Package, depth int, memo map[reachKey]bool) bool {
 	if depth <= 0 || pkg == nil || fn.Pkg != pkg || len(fn.Blocks) == 0 {
 		return false
 	}
-	if found, ok := memo[fn]; ok {
+	key := reachKey{fn, depth}
+	if found, ok := memo[key]; ok {
 		return found
 	}
-	memo[fn] = false // cycle guard
 	found := false
 	for _, b := range fn.Blocks {
 		for _, instr := range b.Instrs {
 			for _, op := range instr.Operands(nil) {
-				if op == nil || *op == nil {
-					continue
-				}
 				callee, ok := (*op).(*ssa.Function)
 				if !ok {
 					continue
@@ -83,23 +83,25 @@ func reachesVerification(fn *ssa.Function, pkg *ssa.Package, depth int, memo map
 					found = true
 				}
 				if found {
-					memo[fn] = true
+					memo[key] = true
 					return true
 				}
 			}
 		}
 	}
+	memo[key] = false
 	return false
 }
 
-// resultDecides reports whether a call's result, possibly after negation, a
-// comparison, a tuple extract or a phi, is the condition of a branch or is
-// returned to the caller (which then decides on it).
+// resultDecides reports whether a call's result, possibly through up to
+// four unary or binary operations, conversions, tuple extracts and phis, is
+// the condition of a branch or is returned to the caller (which then
+// decides on it).
 func resultDecides(call *ssa.Call) bool {
 	seen := make(map[ssa.Value]bool)
 	var decides func(v ssa.Value, depth int) bool
 	decides = func(v ssa.Value, depth int) bool {
-		if depth > 4 || seen[v] || v.Referrers() == nil {
+		if depth > 4 || seen[v] {
 			return false
 		}
 		seen[v] = true
@@ -107,11 +109,7 @@ func resultDecides(call *ssa.Call) bool {
 			switch r := ref.(type) {
 			case *ssa.If, *ssa.Return:
 				return true
-			case *ssa.UnOp:
-				if r.Op.String() == "!" && decides(r, depth+1) {
-					return true
-				}
-			case *ssa.BinOp, *ssa.Extract, *ssa.Phi, *ssa.ChangeType:
+			case *ssa.UnOp, *ssa.BinOp, *ssa.ChangeType, *ssa.Convert, *ssa.Extract, *ssa.Phi:
 				if decides(r.(ssa.Value), depth+1) {
 					return true
 				}

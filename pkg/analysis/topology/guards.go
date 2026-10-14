@@ -73,9 +73,6 @@ func collectCapabilityGuards(fn *ssa.Function, t *FunctionTopology, loops *loop.
 	for _, b := range fn.Blocks {
 		for _, instr := range b.Instrs {
 			for _, op := range instr.Operands(nil) {
-				if op == nil || *op == nil {
-					continue
-				}
 				callee, ok := (*op).(*ssa.Function)
 				if !ok || callee.Parent() != nil {
 					continue

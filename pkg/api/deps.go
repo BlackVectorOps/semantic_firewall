@@ -424,10 +424,8 @@ func (s *depsSide) calleesOf(fn *ssa.Function) []*ssa.Function {
 	for _, b := range fn.Blocks {
 		for _, instr := range b.Instrs {
 			for _, op := range instr.Operands(nil) {
-				if op != nil && *op != nil {
-					if c, ok := (*op).(*ssa.Function); ok {
-						cs = append(cs, c)
-					}
+				if c, ok := (*op).(*ssa.Function); ok {
+					cs = append(cs, c)
 				}
 			}
 		}
