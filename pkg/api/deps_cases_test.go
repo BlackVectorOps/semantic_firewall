@@ -452,3 +452,54 @@ func TestDepsDiff_PackagesAndMovedReplacement(t *testing.T) {
 		t.Errorf("summary = %+v; want 2 updated modules, 4 changed functions", out.Summary)
 	}
 }
+
+// The load error lists five package errors and counts the rest.
+func TestDepsDiff_LoadErrorList(t *testing.T) {
+	tree := func(missing int, typeError bool) string {
+		imports := ""
+		for i := 1; i <= missing; i++ {
+			imports += fmt.Sprintf("\t_ \"example.com/missing%d/p\"\n", i)
+		}
+		files := map[string]string{"go.mod": "module example.com/app\n\ngo 1.22\n"}
+		if typeError {
+			imports += "\t_ \"example.com/app/q\"\n"
+			files["q/q.go"] = "package q\n\nvar X int = \"s\"\n"
+		}
+		files["main.go"] = "package main\n\nimport (\n" + imports + ")\n\nfunc main() {}\n"
+		dir := t.TempDir()
+		writeFilesIn(t, dir, files)
+		return dir
+	}
+	good := appTree(t, "", nil, nil)
+	for _, c := range []struct {
+		name      string
+		dir       string
+		lines     int
+		remainder string
+	}{
+		// Each missing import is reported by go list and by the type checker.
+		{"five errors", tree(2, true), 5, ""},
+		{"six errors", tree(3, false), 5, "  ... and 1 more"},
+		{"fourteen errors", tree(7, false), 5, "  ... and 9 more"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := api.DepsDiff(c.dir, good)
+			if err == nil {
+				t.Fatal("DepsDiff succeeded; want a load error")
+			}
+			lines := strings.Split(err.Error(), "\n")[1:]
+			last := lines[len(lines)-1]
+			if c.remainder != "" {
+				if last != c.remainder {
+					t.Errorf("last line %q; want %q", last, c.remainder)
+				}
+				lines = lines[:len(lines)-1]
+			} else if strings.Contains(last, "more") {
+				t.Errorf("last line %q; want no remainder", last)
+			}
+			if len(lines) != c.lines {
+				t.Errorf("%d errors listed; want %d:\n%s", len(lines), c.lines, err)
+			}
+		})
+	}
+}
