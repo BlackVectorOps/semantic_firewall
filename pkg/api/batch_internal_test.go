@@ -103,3 +103,69 @@ func TestDiffBatch_LoadsEachModuleOnce(t *testing.T) {
 		}
 	}
 }
+
+// A group whose load fails, or whose fingerprinting panics, sends every
+// one of its files to the single-file loader, and the results are those of
+// separate diffs.
+func TestDiffBatch_GroupFailuresFallBack(t *testing.T) {
+	root := t.TempDir()
+	for name, src := range map[string]string{
+		"m/go.mod":   "module example.com/m\n\ngo 1.22\n",
+		"m/p/one.go": "package p\n\nfunc One() int { return 1 }\n",
+		"m/q/q.go":   "package q\n\nimport \"os\"\n\nfunc Q(p string) { os.Remove(p) }\n",
+	} {
+		p := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	one, q := filepath.Join(root, "m/p/one.go"), filepath.Join(root, "m/q/q.go")
+	pairs := []DiffPair{{Old: one, New: one}, {Old: "", New: q}}
+	want := DiffBatch(pairs)
+	for i, w := range want {
+		if w.ErrorMessage != "" || len(w.Functions) == 0 {
+			t.Fatalf("baseline pair %d: error %q, %d functions", i, w.ErrorMessage, len(w.Functions))
+		}
+	}
+
+	origLoad, origPkgs, origSingle := loadFiles, fingerprintPackages, fingerprintSource
+	t.Cleanup(func() { loadFiles, fingerprintPackages, fingerprintSource = origLoad, origPkgs, origSingle })
+	for _, c := range []struct {
+		name  string
+		setup func()
+	}{
+		{"load error", func() {
+			loadFiles = func(string, map[string][]byte) ([]*packages.Package, error) { return nil, os.ErrPermission }
+		}},
+		{"fingerprinting panics", func() {
+			fingerprintPackages = func([]*packages.Package, ir.LiteralPolicy, bool) ([]diff.FingerprintResult, error) {
+				panic("boom")
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			loadFiles, fingerprintPackages = origLoad, origPkgs
+			var mu sync.Mutex
+			singles := 0
+			fingerprintSource = func(f, src string, policy ir.LiteralPolicy) ([]diff.FingerprintResult, error) {
+				mu.Lock()
+				singles++
+				mu.Unlock()
+				return origSingle(f, src, policy)
+			}
+			c.setup()
+			got := DiffBatch(pairs)
+			if singles != 3 {
+				t.Errorf("%d single-file loads; want 3 (one.go on both sides, q.go on the new side)", singles)
+			}
+			for i := range want {
+				if got[i].ErrorMessage != "" || got[i].Summary != want[i].Summary || len(got[i].Functions) != len(want[i].Functions) {
+					t.Errorf("pair %d: %+v; want %+v", i, got[i].Summary, want[i].Summary)
+				}
+			}
+		})
+	}
+}

@@ -24,11 +24,13 @@ type DiffPair struct {
 	New string
 }
 
-// loadFiles and fingerprintSource are the group and single-file loaders;
-// tests replace them to count how files were loaded.
+// loadFiles, fingerprintPackages and fingerprintSource load and fingerprint
+// a group and a single file; tests replace them to count how files were
+// loaded and to make a group fail.
 var (
-	loadFiles         = diff.LoadFiles
-	fingerprintSource = diff.FingerprintSource
+	loadFiles           = diff.LoadFiles
+	fingerprintPackages = diff.FingerprintPackages
+	fingerprintSource   = diff.FingerprintSource
 )
 
 // DiffBatch diffs every pair and returns one result per pair, in order.
@@ -205,21 +207,11 @@ func fingerprintGroup(root string, files []pendingFile) map[string]fileResult {
 		results, err = fingerprintPackagesSafely(wellTyped)
 	}
 	for _, f := range files {
-		if err != nil || !diff.PackagesContain(wellTyped, f.abs) || diff.PackagesContain(illTyped(pkgs), f.abs) {
+		if err != nil || !diff.PackagesContain(wellTyped, f.abs) {
 			out[f.path] = fingerprintOne(f)
 			continue
 		}
 		out[f.path] = fileResult{results: inFileOf(results, f.abs, packagesOf(wellTyped, f.abs))}
-	}
-	return out
-}
-
-func illTyped(pkgs []*packages.Package) []*packages.Package {
-	var out []*packages.Package
-	for _, p := range pkgs {
-		if p.IllTyped {
-			out = append(out, p)
-		}
 	}
 	return out
 }
@@ -230,7 +222,7 @@ func fingerprintPackagesSafely(pkgs []*packages.Package) (results []diff.Fingerp
 			err = fmt.Errorf("panic while fingerprinting: %v", r)
 		}
 	}()
-	return diff.FingerprintPackages(pkgs, ir.DefaultLiteralPolicy, false)
+	return fingerprintPackages(pkgs, ir.DefaultLiteralPolicy, false)
 }
 
 // fingerprintOne loads and fingerprints one file on its own, as Diff does.
