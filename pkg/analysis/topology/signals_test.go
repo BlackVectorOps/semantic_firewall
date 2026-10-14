@@ -336,6 +336,19 @@ func even(a, b []byte, n int) bool { if n == 0 { return hmac.Equal(a, b) }; retu
 func odd(a, b []byte, n int) bool { return even(a, b, n-1) }
 func F(a, b []byte) { odd(a, b, 3) }
 func main() {}`, []string{"testmod.odd"}},
+		{"two helpers sharing a verifier", `package main
+import "crypto/hmac"
+func valid(a, b []byte) bool { return hmac.Equal(a, b) }
+func h1(a, b []byte) bool { return valid(a, b) }
+func h2(a, b []byte) bool { return valid(a, b) }
+func F(a, b []byte) { h1(a, b); h2(a, b) }
+func main() {}`, []string{"testmod.h1", "testmod.h2"}},
+		{"two helpers sharing a function that verifies nothing", `package main
+func plain(a, b []byte) bool { return len(a) == len(b) }
+func h1(a, b []byte) bool { return plain(a, b) }
+func h2(a, b []byte) bool { return plain(a, b) }
+func F(a, b []byte) { h1(a, b); h2(a, b) }
+func main() {}`, nil},
 		{"a helper in another package is not followed", `package main
 import "testmod/helper"
 func F(a, b []byte) { helper.Same(a, b) }

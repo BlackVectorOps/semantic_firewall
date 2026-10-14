@@ -93,13 +93,12 @@ func reachesVerification(fn *ssa.Function, pkg *ssa.Package, depth int, memo map
 // the condition of a branch or is returned to the caller (which then
 // decides on it).
 func resultDecides(call *ssa.Call) bool {
-	seen := make(map[ssa.Value]bool)
 	var decides func(v ssa.Value, depth int) bool
 	decides = func(v ssa.Value, depth int) bool {
-		if depth > 4 || seen[v] {
+		// The depth bound also ends a cycle through phis.
+		if depth > 4 {
 			return false
 		}
-		seen[v] = true
 		for _, ref := range *v.Referrers() {
 			switch r := ref.(type) {
 			case *ssa.If, *ssa.Return:
