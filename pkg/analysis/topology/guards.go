@@ -172,7 +172,7 @@ func countErrorExits(fn *ssa.Function) int {
 // (http.Error, http.NotFound, or WriteHeader with a constant status of 400
 // or more) or the return of a failure error (see isFailureError).
 func isErrorExit(b *ssa.BasicBlock, cond *ssa.If, succ int) bool {
-	for hops := 0; b != nil && hops < 4; hops++ {
+	for hops := 0; hops < 4; hops++ {
 		if callsNoReturn(b) || writesHTTPError(b) {
 			return true
 		}
