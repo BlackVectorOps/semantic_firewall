@@ -541,6 +541,29 @@ func main() {}`, nil},
 func authorize(u string) bool { return u == "admin" }
 func F(u string, n int) (ok bool) { defer println(); ok = authorize(u); for i := 0; i < n; i++ { ok = !ok }; return }
 func main() {}`, []string{"testmod.authorize"}},
+		{"a verification result four locals from a branch", `package main
+func authorize(u string) bool { return u == "admin" }
+func F(u string) int {
+	a := authorize(u); println(&a)
+	b := a; println(&b)
+	c := b; println(&c)
+	d := c; println(&d)
+	if d { return 1 }
+	return 0
+}
+func main() {}`, []string{"testmod.authorize"}},
+		{"a verification result five locals from a branch", `package main
+func authorize(u string) bool { return u == "admin" }
+func F(u string) int {
+	a := authorize(u); println(&a)
+	b := a; println(&b)
+	c := b; println(&c)
+	d := c; println(&d)
+	e := d; println(&e)
+	if e { return 1 }
+	return 0
+}
+func main() {}`, nil},
 		{"getters returned are no checks", `package main
 type Commit struct{ author, token, role string }
 func (c *Commit) Author() string { return c.author }
