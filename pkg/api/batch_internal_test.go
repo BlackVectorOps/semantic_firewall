@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"testing"
 
 	"golang.org/x/tools/go/packages"
@@ -38,6 +39,7 @@ func TestDiffBatch_LoadsEachModuleOnce(t *testing.T) {
 	}
 	path := func(name string) string { return filepath.Join(root, name) }
 
+	var mu sync.Mutex
 	var groupLoads [][]string
 	var singles []string
 	origLoad, origSingle := loadFiles, fingerprintSource
@@ -49,12 +51,16 @@ func TestDiffBatch_LoadsEachModuleOnce(t *testing.T) {
 			names = append(names, rel)
 		}
 		sort.Strings(names)
+		mu.Lock()
 		groupLoads = append(groupLoads, names)
+		mu.Unlock()
 		return origLoad(dir, overlay)
 	}
 	fingerprintSource = func(f, src string, policy ir.LiteralPolicy) ([]diff.FingerprintResult, error) {
 		rel, _ := filepath.Rel(root, f)
+		mu.Lock()
 		singles = append(singles, rel)
+		mu.Unlock()
 		return origSingle(f, src, policy)
 	}
 

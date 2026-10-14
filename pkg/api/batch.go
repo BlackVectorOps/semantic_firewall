@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"golang.org/x/tools/go/packages"
 
@@ -51,8 +52,14 @@ func DiffBatchWithFS(fsys FileSystem, pairs []DiffPair) []*models.DiffOutput {
 	for i, p := range pairs {
 		oldPaths[i], newPaths[i] = p.Old, p.New
 	}
-	oldSide := fingerprintFiles(fsys, oldPaths)
-	newSide := fingerprintFiles(fsys, newPaths)
+	// The two trees are independent; load them at the same time. They
+	// share the loader's cache of standard-library and pinned-module types.
+	var oldSide, newSide map[string]fileResult
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); oldSide = fingerprintFiles(fsys, oldPaths) }()
+	go func() { defer wg.Done(); newSide = fingerprintFiles(fsys, newPaths) }()
+	wg.Wait()
 
 	out := make([]*models.DiffOutput, len(pairs))
 	for i, p := range pairs {

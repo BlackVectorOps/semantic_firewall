@@ -249,7 +249,7 @@ func loadPackagesFromSource(filename string, src string) ([]*packages.Package, e
 
 	cfg := sourceLoaderConfig(sourceDir, map[string][]byte{absFilename: []byte(src)})
 
-	initialPkgs, err := packages.Load(cfg, "file="+absFilename)
+	initialPkgs, err := loadSource(cfg, "file="+absFilename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute loader: %w", err)
 	}
@@ -260,7 +260,7 @@ func loadPackagesFromSource(filename string, src string) ([]*packages.Package, e
 	// includes it.
 	if !packagesContain(initialPkgs, absFilename) && strings.HasSuffix(absFilename, "_test.go") {
 		cfg.Tests = true
-		if initialPkgs, err = packages.Load(cfg, "file="+absFilename); err != nil {
+		if initialPkgs, err = loadSource(cfg, "file="+absFilename); err != nil {
 			return nil, fmt.Errorf("failed to execute loader: %w", err)
 		}
 	}
@@ -273,7 +273,7 @@ func loadPackagesFromSource(filename string, src string) ([]*packages.Package, e
 		if len(tags) > 0 {
 			cfg.BuildFlags = []string{"-tags=" + strings.Join(tags, ",")}
 		}
-		if initialPkgs, err = packages.Load(cfg, "file="+absFilename); err != nil {
+		if initialPkgs, err = loadSource(cfg, "file="+absFilename); err != nil {
 			return nil, fmt.Errorf("failed to execute loader: %w", err)
 		}
 	}
@@ -336,7 +336,7 @@ func LoadFiles(dir string, files map[string][]byte) ([]*packages.Package, error)
 		patterns = append(patterns, "file="+f)
 	}
 	sort.Strings(patterns)
-	pkgs, err := packages.Load(sourceLoaderConfig(dir, files), patterns...)
+	pkgs, err := loadSource(sourceLoaderConfig(dir, files), patterns...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute loader: %w", err)
 	}

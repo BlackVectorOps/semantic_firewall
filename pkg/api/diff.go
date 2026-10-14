@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/topology"
@@ -63,13 +64,20 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 		return inFile(results, absPath), nil
 	}
 
-	oldResults, err := processFile(oldPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to process old file: %w", err)
+	// Load the two versions at the same time; report the old side's error
+	// first when both fail.
+	var oldResults, newResults []diff.FingerprintResult
+	var oldErr, newErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); oldResults, oldErr = processFile(oldPath) }()
+	go func() { defer wg.Done(); newResults, newErr = processFile(newPath) }()
+	wg.Wait()
+	if oldErr != nil {
+		return nil, fmt.Errorf("failed to process old file: %w", oldErr)
 	}
-	newResults, err := processFile(newPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to process new file: %w", err)
+	if newErr != nil {
+		return nil, fmt.Errorf("failed to process new file: %w", newErr)
 	}
 	return diffResults(oldPath, newPath, oldResults, newResults, riskProfile{}), nil
 }
