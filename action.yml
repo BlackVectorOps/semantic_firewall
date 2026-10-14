@@ -305,10 +305,11 @@ runs:
               OUTPUT="[]"
               echo "semantic-match-pct=100.0" >> "$GITHUB_OUTPUT"
             else
-              readonly STREAM_FILE="$LOCAL_TEMP/sfw_stream.jsonl"
-              TOTAL_MATCH_PCT=0
-              FILE_COUNT=0
-              ERROR_COUNT=0
+              # Collect every changed file as an old/new pair and diff them in
+              # one sfw run, which loads each tree's packages once.
+              readonly PAIRS_FILE="$LOCAL_TEMP/sfw_pairs.bin"
+              : > "$PAIRS_FILE"
+              PAIR_COUNT=0
 
               while IFS= read -r -d '' status; do
                 case "$status" in
@@ -328,35 +329,41 @@ runs:
                 [[ ! -f "$OLD_FILE" ]] && OLD_FILE="/dev/null"
                 [[ "$NEW_FILE" == "/dev/null" && "$OLD_FILE" == "/dev/null" ]] && continue
 
-                # Keep stderr (warnings such as the runsc fallback notice) out
-                # of DIFF_OUT: it is parsed as JSON below.
-                DIFF_ERR="$LOCAL_TEMP/sfw_diff_stderr.log"
-                if ! DIFF_OUT=$(sfw diff -- "$OLD_FILE" "$NEW_FILE" 2>"$DIFF_ERR"); then
-                   echo "::warning::sfw diff failed for ${new_rel_path}"
-                   sed 's/^/  [sfw] /' "$DIFF_ERR" || true
-                   DIFF_OUT='{}'
-                   ((ERROR_COUNT++)) || true
-                fi
-                echo "$DIFF_OUT" >> "$STREAM_FILE"
-                
-                PCT=$(echo "$DIFF_OUT" | jq -r '.summary.semantic_match_pct // 0')
-                TOTAL_MATCH_PCT=$(echo "$TOTAL_MATCH_PCT + $PCT" | bc)
-                ((FILE_COUNT++)) || true
+                printf '%s\0%s\0' "$OLD_FILE" "$NEW_FILE" >> "$PAIRS_FILE"
+                ((PAIR_COUNT++)) || true
               done < "$DIFF_STREAM_FILE"
 
-              if [[ -f "$STREAM_FILE" ]]; then OUTPUT=$(jq -s '.' "$STREAM_FILE"); else OUTPUT="[]"; fi
-              
-              if [[ $FILE_COUNT -gt 0 ]]; then
-                AVG_PCT=$(echo "scale=1; $TOTAL_MATCH_PCT / $FILE_COUNT" | bc)
+              if [[ $PAIR_COUNT -eq 0 ]]; then
+                OUTPUT="[]"
+                echo "semantic-match-pct=100.0" >> "$GITHUB_OUTPUT"
               else
-                AVG_PCT="100.0"
-              fi
-              echo "semantic-match-pct=${AVG_PCT}" >> "$GITHUB_OUTPUT"
+                # sfw prints one result per pair and exits non-zero after
+                # printing when a pair could not be diffed; that pair's entry
+                # carries the reason in "error". Keep stderr (warnings such as
+                # the runsc fallback notice) out of OUTPUT, which is parsed.
+                DIFF_ERR="$LOCAL_TEMP/sfw_diff_stderr.log"
+                set +e
+                OUTPUT=$(sfw diff --batch "$PAIRS_FILE" 2>"$DIFF_ERR")
+                set -e
+                if ! echo "$OUTPUT" | jq -e 'type == "array" and length == '"$PAIR_COUNT" >/dev/null 2>&1; then
+                  echo "::error::sfw diff produced no result for the ${PAIR_COUNT} changed file(s)"
+                  sed 's/^/  [sfw] /' "$DIFF_ERR" || true
+                  OUTPUT="[]"
+                  echo "semantic-match-pct=0.0" >> "$GITHUB_OUTPUT"
+                  EXIT_CODE=1
+                else
+                  echo "$OUTPUT" | jq -r '.[] | select((.error // "") != "") | "::warning::sfw diff failed for \(.new_file): \(.error)"'
+                  ERROR_COUNT=$(echo "$OUTPUT" | jq '[.[] | select((.error // "") != "")] | length')
+                  TOTAL_MATCH_PCT=$(echo "$OUTPUT" | jq '[.[] | .summary.semantic_match_pct // 0] | add')
+                  AVG_PCT=$(echo "scale=1; $TOTAL_MATCH_PCT / $PAIR_COUNT" | bc)
+                  echo "semantic-match-pct=${AVG_PCT}" >> "$GITHUB_OUTPUT"
 
-              # A file that could not be analyzed is not a passing file.
-              if [[ $ERROR_COUNT -gt 0 ]]; then
-                echo "::error::sfw diff failed for ${ERROR_COUNT} file(s)"
-                EXIT_CODE=1
+                  # A file that could not be analyzed is not a passing file.
+                  if [[ $ERROR_COUNT -gt 0 ]]; then
+                    echo "::error::sfw diff failed for ${ERROR_COUNT} file(s)"
+                    EXIT_CODE=1
+                  fi
+                fi
               fi
             fi
             ;;

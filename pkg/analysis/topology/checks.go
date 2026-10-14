@@ -14,8 +14,9 @@ const maxCheckHelperDepth = 3
 
 // collectCheckHelpers adds to t.Checks the calls that act as verifications
 // without being one of the primitives IsVerificationCall lists:
-//   - a static call to a function whose body, following static calls up to
-//     maxCheckHelperDepth deep, calls a verification primitive;
+//   - a static call to a function of the same package whose body, following
+//     static calls within that package up to maxCheckHelperDepth deep, calls
+//     a verification primitive;
 //   - a call, static or through an interface, whose name contains a
 //     verification word (authorize, verify, validate, ...; see
 //     isVerificationName) and whose result decides a branch or is returned.
@@ -45,19 +46,20 @@ func collectCheckHelpers(fn *ssa.Function, t *FunctionTopology) {
 			if !ok || IsVerificationCall(pkgPath, recv, name) {
 				continue
 			}
-			if (isVerificationName(name) && resultDecides(call)) || reachesVerification(callee, maxCheckHelperDepth, memo) {
+			if (isVerificationName(name) && resultDecides(call)) || reachesVerification(callee, fn.Pkg, maxCheckHelperDepth, memo) {
 				t.Checks[callTargetKey(pkgPath, recv, name)] = true
 			}
 		}
 	}
 }
 
-// reachesVerification reports whether fn's body calls a verification
-// primitive, directly or through static calls to functions with bodies, at
-// most depth calls deep. Functions of packages that were loaded but not
-// built have no body and end the search.
-func reachesVerification(fn *ssa.Function, depth int, memo map[*ssa.Function]bool) bool {
-	if depth <= 0 || len(fn.Blocks) == 0 {
+// reachesVerification reports whether fn, a function of package pkg, calls
+// a verification primitive, directly or through static calls to other
+// functions of pkg, at most depth calls deep. The search never leaves pkg:
+// whether another package's functions have SSA bodies depends on which
+// packages happened to be built, and the result must not.
+func reachesVerification(fn *ssa.Function, pkg *ssa.Package, depth int, memo map[*ssa.Function]bool) bool {
+	if depth <= 0 || pkg == nil || fn.Pkg != pkg || len(fn.Blocks) == 0 {
 		return false
 	}
 	if found, ok := memo[fn]; ok {
@@ -77,7 +79,7 @@ func reachesVerification(fn *ssa.Function, depth int, memo map[*ssa.Function]boo
 				}
 				if pkgPath, recv, name, ok := calleeIdentity(callee); ok && IsVerificationCall(pkgPath, recv, name) {
 					found = true
-				} else if reachesVerification(callee, depth-1, memo) {
+				} else if reachesVerification(callee, pkg, depth-1, memo) {
 					found = true
 				}
 				if found {

@@ -247,18 +247,7 @@ func loadPackagesFromSource(filename string, src string) ([]*packages.Package, e
 		return nil, fmt.Errorf("failed to resolve absolute path for %s: %w", filename, err)
 	}
 
-	fset := token.NewFileSet()
-
-	cfg := &packages.Config{
-		Dir:  sourceDir,
-		Mode: packages.LoadAllSyntax,
-		Fset: fset,
-		Overlay: map[string][]byte{
-			absFilename: []byte(src),
-		},
-		Tests: false,
-		Env:   GetHardenedEnv(),
-	}
+	cfg := sourceLoaderConfig(sourceDir, map[string][]byte{absFilename: []byte(src)})
 
 	initialPkgs, err := packages.Load(cfg, "file="+absFilename)
 	if err != nil {
@@ -312,6 +301,51 @@ func loadPackagesFromSource(filename string, src string) ([]*packages.Package, e
 	}
 
 	return initialPkgs, nil
+}
+
+// sourceLoaderConfig is the go/packages configuration every source load
+// uses: full syntax and types for the whole import graph, the hardened
+// environment (CGO_ENABLED=0, GOPROXY=off, GOFLAGS=-mod=readonly,
+// GOWORK=off, GOTOOLCHAIN=local), no test variants, and the given file
+// contents as overlays.
+func sourceLoaderConfig(dir string, overlay map[string][]byte) *packages.Config {
+	return &packages.Config{
+		Dir:     dir,
+		Mode:    packages.LoadAllSyntax,
+		Fset:    token.NewFileSet(),
+		Overlay: overlay,
+		Tests:   false,
+		Env:     GetHardenedEnv(),
+	}
+}
+
+// LoadFiles loads, with one go/packages call run from dir, the packages
+// that compile the given files: absolute paths mapped to their contents,
+// which are used as overlays. It uses the same configuration as the
+// single-file loader behind FingerprintSource, so a package loads the same
+// way either way. Unlike FingerprintSource it does not retry a file the
+// default build leaves out (a _test.go file, a GOOS suffix, a //go:build
+// line): such a file is in none of the returned packages, and
+// PackagesContain reports it.
+func LoadFiles(dir string, files map[string][]byte) ([]*packages.Package, error) {
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no files to load")
+	}
+	patterns := make([]string, 0, len(files))
+	for f := range files {
+		patterns = append(patterns, "file="+f)
+	}
+	sort.Strings(patterns)
+	pkgs, err := packages.Load(sourceLoaderConfig(dir, files), patterns...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute loader: %w", err)
+	}
+	return pkgs, nil
+}
+
+// PackagesContain reports whether any of pkgs compiles the file at absPath.
+func PackagesContain(pkgs []*packages.Package, absPath string) bool {
+	return packagesContain(pkgs, filepath.Clean(absPath))
 }
 
 // packagesContain reports whether any of pkgs compiles the file at absPath.

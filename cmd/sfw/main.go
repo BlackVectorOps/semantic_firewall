@@ -38,6 +38,7 @@ A Semantic Malware Scanner for Go source files.
 Usage (flags must come before file arguments):
   sfw check [--strict] <file.go|directory>    Fingerprint a file or recursively scan a directory
   sfw diff <old.go> <new.go>                  Semantic diff between two Go files
+  sfw diff --batch <pairs-file>               Diff many file pairs, loading each tree once
   sfw deps diff <old-dir> <new-dir>           Diff the dependencies two module trees compile in
   sfw audit <old.go> <new.go> "<message>"     Audit a commit for deception using Semantic Analysis + LLM
   sfw index --name <name> <file.go>           Index a malware sample into the signature database
@@ -95,6 +96,7 @@ Examples:
 
 	diffCmd := flag.NewFlagSet("diff", flag.ExitOnError)
 	diffNoSandbox := diffCmd.Bool("no-sandbox", false, "Disable gVisor/Namespace isolation")
+	diffBatch := diffCmd.String("batch", "", "File of NUL-terminated old/new path pairs to diff in one run")
 
 	depsDiffCmd := flag.NewFlagSet("deps diff", flag.ExitOnError)
 	depsDiffNoSandbox := depsDiffCmd.Bool("no-sandbox", false, "Disable gVisor/Namespace isolation")
@@ -144,6 +146,16 @@ Examples:
 	case "diff":
 		if err := diffCmd.Parse(os.Args[2:]); err != nil {
 			cli.ExitError(err)
+		}
+		if *diffBatch != "" {
+			if diffCmd.NArg() != 0 {
+				fmt.Fprintln(os.Stderr, "Usage: sfw diff --batch <pairs-file> (no positional arguments)")
+				os.Exit(1)
+			}
+			if err := cli.RunDiffBatch(*diffBatch, *diffNoSandbox); err != nil {
+				cli.ExitError(err)
+			}
+			break
 		}
 		if diffCmd.NArg() < 2 {
 			diffCmd.Usage()
@@ -296,6 +308,13 @@ func runWorker(args []string) error {
 			return fmt.Errorf("diff worker requires arguments (old <path> new <path>); got %d", len(args)-1)
 		}
 		return cli.RunDiffLogic(fsys, os.Stdout, args[1], args[2])
+
+	case "diff-batch":
+		// sfw internal-worker diff-batch <pairs-file>
+		if len(args) != 2 {
+			return fmt.Errorf("diff-batch worker requires a pairs file; got %d arguments", len(args)-1)
+		}
+		return cli.RunDiffBatchLogic(fsys, os.Stdout, args[1])
 
 	case "deps-diff":
 		// sfw internal-worker deps-diff <old-dir> <new-dir>
