@@ -42,10 +42,31 @@ type FunctionTopology struct {
 	CallTargets  map[string]int
 	Capabilities map[string]string
 
-	// Checks holds the CallTargets keys that are verification primitives
-	// (MAC and signature checks, certificate verification, password hash
-	// comparison). Losing one is how a guard gets deleted.
+	// Checks holds the verifications this function performs: calls to a
+	// verification primitive (MAC and signature checks, certificate
+	// verification, password hash comparison; see IsVerificationCall), to a
+	// helper that reaches one, and to a function or interface method named
+	// like a verification whose result decides a branch (see
+	// collectCheckHelpers). Losing one is how a guard gets deleted.
 	Checks map[string]bool
+
+	// CapabilityGuards maps each Capabilities key to the fewest conditional
+	// branches, loop conditions excluded, that any of its references in this
+	// function is control-dependent on. 0 means some reference runs
+	// unconditionally. Nil when the function has more than 2000 blocks.
+	CapabilityGuards map[string]int
+
+	// WeakSettings and SecureSettings hold constant stores to security
+	// configuration fields, written "crypto/tls.Config.InsecureSkipVerify=true".
+	// A weak setting weakens security on its own; a secure setting weakens it
+	// by its removal. See collectSecuritySettings.
+	WeakSettings   map[string]bool
+	SecureSettings map[string]bool
+
+	// ErrorExits counts the two-way branches with exactly one side that ends
+	// the function with a failure: a non-nil error return, a panic, a call
+	// that never returns, or an HTTP 4xx/5xx response.
+	ErrorExits int
 
 	// Granular instruction tracking
 	InstrCounts map[string]int
@@ -247,6 +268,10 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 	}
 
 	collectCallTargets(fn, t)
+	collectCheckHelpers(fn, t)
+	collectSecuritySettings(fn, t)
+	collectCapabilityGuards(fn, t, loopInfo)
+	t.ErrorExits = countErrorExits(fn)
 
 	// Calculate Cyclomatic Complexity: M = E - N + 2P
 	// For a single function, P (connected components) is usually 1.

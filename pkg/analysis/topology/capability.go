@@ -46,22 +46,37 @@ func collectCallTargets(fn *ssa.Function, t *FunctionTopology) {
 }
 
 func recordCallTarget(t *FunctionTopology, callee *ssa.Function) {
-	// Package initializers are import side effects, not behaviour of the
-	// function that triggers them; counting them turns every new import into
-	// a "new call".
-	if callee.Name() == "init" && callee.Signature.Recv() == nil {
+	pkgPath, recv, name, ok := calleeIdentity(callee)
+	if !ok {
 		return
 	}
+	key := callTargetKey(pkgPath, recv, name)
+	t.CallTargets[key]++
+	if class := ClassifyCallTarget(pkgPath, recv, name); class != "" {
+		t.Capabilities[key] = class
+	}
+	if IsVerificationCall(pkgPath, recv, name) {
+		t.Checks[key] = true
+	}
+}
 
-	var pkgPath, recv, name string
+// calleeIdentity returns the import path, receiver type name ("" for a
+// package-level function) and name a call target is classified by. ok is
+// false for a package initializer: those are import side effects, not
+// behaviour of the function that triggers them, and counting them would turn
+// every new import into a "new call".
+func calleeIdentity(callee *ssa.Function) (pkgPath, recv, name string, ok bool) {
+	if callee.Name() == "init" && callee.Signature.Recv() == nil {
+		return "", "", "", false
+	}
 	// Object() resolves generic instantiations and bound/thunk wrappers back
 	// to the declared function, so "(*T).M$bound" is recorded as "(T).M".
-	if obj, ok := callee.Object().(*types.Func); ok {
+	if obj, isFunc := callee.Object().(*types.Func); isFunc {
 		name = obj.Name()
 		if obj.Pkg() != nil {
 			pkgPath = obj.Pkg().Path()
 		}
-		if sig, ok := obj.Type().(*types.Signature); ok && sig.Recv() != nil {
+		if sig, isSig := obj.Type().(*types.Signature); isSig && sig.Recv() != nil {
 			recv = receiverTypeName(sig.Recv().Type())
 		}
 	} else {
@@ -70,18 +85,16 @@ func recordCallTarget(t *FunctionTopology, callee *ssa.Function) {
 			pkgPath = callee.Pkg.Pkg.Path()
 		}
 	}
+	return pkgPath, recv, name, true
+}
 
-	key := pkgPath + "." + name
+// callTargetKey is the CallTargets key of a callee: "os/exec.Command",
+// "(net/http.Client).Do".
+func callTargetKey(pkgPath, recv, name string) string {
 	if recv != "" {
-		key = "(" + pkgPath + "." + recv + ")." + name
+		return "(" + pkgPath + "." + recv + ")." + name
 	}
-	t.CallTargets[key]++
-	if class := ClassifyCallTarget(pkgPath, recv, name); class != "" {
-		t.Capabilities[key] = class
-	}
-	if IsVerificationCall(pkgPath, recv, name) {
-		t.Checks[key] = true
-	}
+	return pkgPath + "." + name
 }
 
 // IsVerificationCall reports whether a callee, identified like
@@ -217,4 +230,15 @@ func hasAnyPrefix(s string, prefixes ...string) bool {
 		}
 	}
 	return false
+}
+
+// CalleeCapability returns the CallTargets key of a callee and its
+// capability class ("" when it has none). ok is false for a package
+// initializer, which is not a call target.
+func CalleeCapability(callee *ssa.Function) (key, class string, ok bool) {
+	pkgPath, recv, name, ok := calleeIdentity(callee)
+	if !ok {
+		return "", "", false
+	}
+	return callTargetKey(pkgPath, recv, name), ClassifyCallTarget(pkgPath, recv, name), true
 }

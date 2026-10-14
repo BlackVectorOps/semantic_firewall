@@ -13,7 +13,7 @@ inputs:
     required: false
     default: '.'
   mode:
-    description: 'Operation mode: check, diff, scan, or audit'
+    description: 'Operation mode: check, diff, deps, scan, or audit'
     required: false
     default: 'check'
   go-version:
@@ -33,7 +33,7 @@ inputs:
     required: false
     default: 'false'
   fail-on-alert:
-    description: 'Fail workflow if malware detected (scan mode only)'
+    description: 'Fail workflow if malware is detected (scan mode) or a dependency change is high-risk (deps mode)'
     required: false
     default: 'true'
   scan-deps:
@@ -71,6 +71,9 @@ outputs:
   audit-verdict:
     description: 'Final audit verdict (audit mode): PASS or FAIL'
     value: ${{ steps.run-sfw.outputs.audit-verdict }}
+  high-risk-changes:
+    description: 'Number of high-risk dependency changes (deps mode)'
+    value: ${{ steps.run-sfw.outputs.high-risk-changes }}
 
 runs:
   using: 'composite'
@@ -80,14 +83,14 @@ runs:
       with:
         go-version: ${{ inputs.go-version }}
 
-    # IMPORTANT: Caller must use actions/checkout with fetch-depth: 0 for diff/audit modes
+    # IMPORTANT: Caller must use actions/checkout with fetch-depth: 0 for diff/audit/deps modes
     - name: Validate Checkout Depth
-      if: ${{ inputs.mode == 'diff' || inputs.mode == 'audit' }}
+      if: ${{ inputs.mode == 'diff' || inputs.mode == 'audit' || inputs.mode == 'deps' }}
       shell: bash
       run: |
         set -euo pipefail
         if ! git rev-parse HEAD~1 >/dev/null 2>&1; then
-          echo "::error::Insufficient git history. Please use 'actions/checkout' with 'fetch-depth: 0' for diff/audit modes."
+          echo "::error::Insufficient git history. Please use 'actions/checkout' with 'fetch-depth: 0' for diff/audit/deps modes."
           exit 1
         fi
 
@@ -136,7 +139,7 @@ runs:
       run: |
         set -euo pipefail
         
-        if [[ "$INPUT_MODE" != "diff" ]] && [[ "$INPUT_MODE" != "audit" ]]; then
+        if [[ "$INPUT_MODE" != "diff" ]] && [[ "$INPUT_MODE" != "audit" ]] && [[ "$INPUT_MODE" != "deps" ]]; then
           echo "mode_needs_prep=false" >> "$GITHUB_OUTPUT"
           exit 0
         fi
@@ -189,7 +192,15 @@ runs:
           : > "$DIFF_STREAM_FILE"
         fi
         
-        GO_FILE_COUNT=$(git diff --name-only "$BASE_REF" "$HEAD_REF" 2>/dev/null | grep -c '\.go$' || echo "0")
+        # grep -c prints 0 and exits 1 when nothing matches; `|| true` keeps
+        # that single 0 instead of appending a second one.
+        GO_FILE_COUNT=$(git diff --name-only "$BASE_REF" "$HEAD_REF" 2>/dev/null | grep -c '\.go$' || true)
+        MOD_FILE_COUNT=$(git diff --name-only "$BASE_REF" "$HEAD_REF" 2>/dev/null | grep -cE '(^|/)go\.(mod|sum)$' || true)
+        if [[ "$MOD_FILE_COUNT" -gt 0 ]]; then
+          echo "has_mod_changes=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "has_mod_changes=false" >> "$GITHUB_OUTPUT"
+        fi
         if [[ "$GO_FILE_COUNT" -gt 0 ]]; then
           echo "has_go_files=true" >> "$GITHUB_OUTPUT"
         else
@@ -251,6 +262,7 @@ runs:
         PR_BODY: ${{ github.event.pull_request.body }}
         PREP_WORKTREE_DIR: ${{ steps.prep.outputs.worktree_dir }}
         PREP_HAS_GO_FILES: ${{ steps.prep.outputs.has_go_files }}
+        PREP_HAS_MOD_CHANGES: ${{ steps.prep.outputs.has_mod_changes }}
       run: |
         set -euo pipefail
         
@@ -345,6 +357,44 @@ runs:
               if [[ $ERROR_COUNT -gt 0 ]]; then
                 echo "::error::sfw diff failed for ${ERROR_COUNT} file(s)"
                 EXIT_CODE=1
+              fi
+            fi
+            ;;
+
+          deps)
+            readonly WORKTREE_DIR="${PREP_WORKTREE_DIR:-.sfw_base_worktree}"
+            if [[ "${PREP_HAS_MOD_CHANGES:-false}" != "true" ]]; then
+              OUTPUT='{}'
+              echo "high-risk-changes=0" >> "$GITHUB_OUTPUT"
+            else
+              readonly OLD_ROOT="$WORKTREE_DIR/$REL_PATH"
+              if [[ ! -f "$TARGET_PATH/go.mod" ]] || [[ ! -f "$OLD_ROOT/go.mod" ]]; then
+                echo "::error::deps mode needs 'path' to be a module root (a directory with go.mod) in both revisions."
+                exit 1
+              fi
+              # sfw loads with GOPROXY=off, so fetch both build lists first.
+              # Downloading only fetches and verifies module zips against
+              # go.sum; it runs no code.
+              for root in "$OLD_ROOT" "$TARGET_PATH"; do
+                if ! (cd "$root" && go mod download); then
+                  echo "::error::go mod download failed in ${root}"
+                  exit 1
+                fi
+              done
+              DEPS_ERR="$LOCAL_TEMP/sfw_deps_stderr.log"
+              if ! OUTPUT=$(sfw deps diff -- "$OLD_ROOT" "$TARGET_PATH" 2>"$DEPS_ERR"); then
+                sed 's/^/  [sfw] /' "$DEPS_ERR" || true
+                echo "::error::sfw deps diff failed"
+                exit 1
+              fi
+              echo "$OUTPUT"
+              HIGH_RISK=$(echo "$OUTPUT" | jq -r '.summary.high_risk_changes // 0')
+              echo "high-risk-changes=${HIGH_RISK}" >> "$GITHUB_OUTPUT"
+              if [[ "$HIGH_RISK" -gt 0 ]]; then
+                echo "::warning::${HIGH_RISK} high-risk dependency change(s)"
+                if [[ "${INPUT_FAIL_ON_ALERT:-true}" == "true" ]]; then
+                  EXIT_CODE=1
+                fi
               fi
             fi
             ;;

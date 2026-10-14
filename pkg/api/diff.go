@@ -71,7 +71,13 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to process new file: %w", err)
 	}
+	return diffResults(oldPath, newPath, oldResults, newResults, riskProfile{}), nil
+}
 
+// diffResults pairs two sets of fingerprinted functions, compares each pair,
+// scores the changes and summarizes them. It is the part of a diff that does
+// not depend on where the functions came from.
+func diffResults(oldPath, newPath string, oldResults, newResults []diff.FingerprintResult, profile riskProfile) *models.DiffOutput {
 	matched, addedFuncs, removedFuncs := diff.MatchFunctionsByTopology(
 		oldResults, newResults, models.DefaultTopologyMatchThreshold,
 	)
@@ -87,7 +93,7 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 		d := CompareFunctions(oldShort, m.OldResult, m.NewResult)
 
 		if m.OldTopology != nil && m.NewTopology != nil {
-			r := assessTopologyDelta(m.OldTopology, m.NewTopology)
+			r := assessTopologyDeltaFor(m.OldTopology, m.NewTopology, profile)
 			// The canonical IR names callees without their package, so a
 			// fingerprint match can still hide a swapped-in capability
 			// (a same-named, same-signature function from another package).
@@ -149,7 +155,7 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 		if fn != nil {
 			topo := topology.ExtractTopology(fn)
 			if topo != nil {
-				a := assessTopologyDelta(nil, topo)
+				a := assessTopologyDeltaFor(nil, topo, profile)
 				if len(a.labels) > 0 {
 					delta = a.delta()
 				}
@@ -222,7 +228,7 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 		},
 		Functions:       functionDiffs,
 		TopologyMatches: topologyMatches,
-	}, nil
+	}
 }
 
 // CompareFunctions reduces two FingerprintResult values to a

@@ -1,0 +1,243 @@
+package api_test
+
+import (
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/models"
+)
+
+// deletionCase is one old/new pair for a single function and the label its
+// diff must (or must not) carry.
+type deletionCase struct {
+	name, fn, oldSrc, newSrc, label string
+	high                            bool
+}
+
+func runDeletionCases(t *testing.T, cases []deletionCase) {
+	t.Helper()
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := findFunc(t, diffSources(t, c.oldSrc, c.newSrc), c.fn)
+			has := strings.Contains(f.TopologyDelta, c.label)
+			if c.high && (!has || f.RiskScore < models.RiskScoreHigh) {
+				t.Errorf("%s: risk %d, delta %q; want %s with risk >= %d", c.fn, f.RiskScore, f.TopologyDelta, c.label, models.RiskScoreHigh)
+			}
+			if !c.high && (has || f.RiskScore >= models.RiskScoreHigh) {
+				t.Errorf("%s: risk %d, delta %q; want no %s and risk < %d", c.fn, f.RiskScore, f.TopologyDelta, c.label, models.RiskScoreHigh)
+			}
+		})
+	}
+}
+
+const guardedPurge = `package p
+import ("errors";"os")
+func Purge(dir string, isAdmin bool) error {
+	if !isAdmin { return errors.New("forbidden") }
+	return os.RemoveAll(dir)
+}
+`
+
+// A capability call whose every old reference ran under a condition gains a
+// reference that runs unconditionally.
+func TestDiffRisk_Unguarded(t *testing.T) {
+	runDeletionCases(t, []deletionCase{
+		{name: "guard deleted", fn: "Purge", label: "Unguarded(os.RemoveAll)", high: true,
+			oldSrc: guardedPurge,
+			newSrc: `package p
+import ("errors";"os")
+var _ = errors.New
+func Purge(dir string, isAdmin bool) error { return os.RemoveAll(dir) }
+`},
+		{name: "call hoisted out of its guard", fn: "Cleanup", label: "Unguarded(os.RemoveAll)", high: true,
+			oldSrc: `package p
+import "os"
+func Cleanup(path string, confirmed bool) error {
+	if confirmed { return os.RemoveAll(path) }
+	return nil
+}
+`,
+			newSrc: `package p
+import "os"
+func Cleanup(path string, confirmed bool) error {
+	err := os.RemoveAll(path)
+	if confirmed { return err }
+	return nil
+}
+`},
+		{name: "log.Fatal guard deleted", fn: "Purge", label: "Unguarded(os.RemoveAll)", high: true,
+			oldSrc: `package p
+import ("log";"os")
+func Purge(dir string, ok bool) error {
+	if !ok { log.Fatal("no") }
+	return os.RemoveAll(dir)
+}
+`,
+			newSrc: `package p
+import ("log";"os")
+var _ = log.Fatal
+func Purge(dir string, ok bool) error { return os.RemoveAll(dir) }
+`},
+		{name: "unguarded call added beside a guarded one", fn: "Purge", label: "Unguarded(os.RemoveAll)", high: true,
+			oldSrc: guardedPurge,
+			newSrc: `package p
+import ("errors";"os")
+func Purge(dir string, isAdmin bool) error {
+	os.RemoveAll(dir + ".tmp")
+	if !isAdmin { return errors.New("forbidden") }
+	return os.RemoveAll(dir)
+}
+`},
+		{name: "guard kept", fn: "Purge", label: "Unguarded",
+			oldSrc: guardedPurge,
+			newSrc: `package p
+import ("errors";"fmt";"os")
+func Purge(dir string, isAdmin bool) error {
+	if !isAdmin { return errors.New("forbidden") }
+	fmt.Println("purging", dir)
+	return os.RemoveAll(dir)
+}
+`},
+		{name: "loop condition is not a guard", fn: "Clean", label: "Unguarded",
+			oldSrc: `package p
+import "os"
+func Clean(fs []string) { for _, f := range fs { os.Remove(f) } }
+`,
+			newSrc: `package p
+import "os"
+func Clean(fs []string) { os.Remove(fs[0]) }
+`},
+		{name: "switch cases removed before the guarded case", fn: "Do", label: "Unguarded",
+			oldSrc: `package p
+import "os"
+func Do(cmd, p string) error {
+	switch cmd {
+	case "a": return nil
+	case "b": return nil
+	case "rm": return os.RemoveAll(p)
+	}
+	return nil
+}
+`,
+			newSrc: `package p
+import "os"
+func Do(cmd, p string) error {
+	switch cmd {
+	case "rm": return os.RemoveAll(p)
+	}
+	return nil
+}
+`},
+	})
+}
+
+// Calls to the code's own verification helpers are checks too.
+func TestDiffRisk_RemovedCheckHelper(t *testing.T) {
+	runDeletionCases(t, []deletionCase{
+		{name: "authorize helper call removed", fn: "(*S).Admin", label: "RemovedCheck((command-line-arguments.S).authorize)", high: true,
+			oldSrc: `package p
+import ("net/http";"strings")
+type S struct{ token string }
+func (s *S) authorize(r *http.Request) bool { return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") == s.token }
+func (s *S) Admin(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(r) { http.Error(w, "no", 403); return }
+	w.Write([]byte("secrets"))
+}
+`,
+			newSrc: `package p
+import ("net/http";"strings")
+type S struct{ token string }
+func (s *S) authorize(r *http.Request) bool { return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") == s.token }
+func (s *S) Admin(w http.ResponseWriter, r *http.Request) { w.Write([]byte("secrets")) }
+`},
+		{name: "interface verifier call removed", fn: "Accept", label: "RemovedCheck((command-line-arguments.Verifier).Verify)", high: true,
+			oldSrc: `package p
+type Verifier interface{ Verify(msg, sig []byte) error }
+func Accept(v Verifier, msg, sig []byte) ([]byte, error) {
+	if err := v.Verify(msg, sig); err != nil { return nil, err }
+	return msg, nil
+}
+`,
+			newSrc: `package p
+type Verifier interface{ Verify(msg, sig []byte) error }
+func Accept(v Verifier, msg, sig []byte) ([]byte, error) { return msg, nil }
+`},
+		{name: "helper that reaches hmac.Equal removed", fn: "Handle", label: "RemovedCheck(command-line-arguments.tokenOK)", high: true,
+			oldSrc: `package p
+import ("crypto/hmac";"crypto/sha256")
+func tokenOK(key, msg, mac []byte) bool { m := hmac.New(sha256.New, key); m.Write(msg); return hmac.Equal(m.Sum(nil), mac) }
+func Handle(key, msg, mac []byte) string {
+	if !tokenOK(key, msg, mac) { return "denied" }
+	return string(msg)
+}
+`,
+			newSrc: `package p
+import ("crypto/hmac";"crypto/sha256")
+func tokenOK(key, msg, mac []byte) bool { m := hmac.New(sha256.New, key); m.Write(msg); return hmac.Equal(m.Sum(nil), mac) }
+func Handle(key, msg, mac []byte) string { return string(msg) }
+`},
+		{name: "unrelated helpers removed", fn: "Get", label: "RemovedCheck",
+			oldSrc: `package p
+import "fmt"
+func checkCache(k string) bool { return len(k) > 3 }
+func formatRole(r string) string { return "<" + r + ">" }
+func Get(k string) string {
+	if checkCache(k) { return "hit" }
+	fmt.Println(formatRole(k))
+	return k
+}
+`,
+			newSrc: `package p
+func checkCache(k string) bool { return len(k) > 3 }
+func formatRole(r string) string { return "<" + r + ">" }
+func Get(k string) string { return k }
+`},
+	})
+}
+
+// Security settings that weaken on their own appear, or settings whose
+// removal weakens disappear.
+func TestDiffRisk_WeakenedSecurity(t *testing.T) {
+	runDeletionCases(t, []deletionCase{
+		{name: "InsecureSkipVerify set", fn: "Cfg", label: "WeakenedSecurity(crypto/tls.Config.InsecureSkipVerify=true)", high: true,
+			oldSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }\n",
+			newSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { return &tls.Config{InsecureSkipVerify: true} }\n"},
+		{name: "MinVersion lowered", fn: "Cfg", label: "WeakenedSecurity(crypto/tls.Config.MinVersion=TLS1.0)", high: true,
+			oldSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { c := &tls.Config{}; c.MinVersion = tls.VersionTLS12; return c }\n",
+			newSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { c := &tls.Config{}; c.MinVersion = tls.VersionTLS10; return c }\n"},
+		{name: "client certificate verification dropped", fn: "Cfg", label: "WeakenedSecurity(-crypto/tls.Config.ClientAuth=RequireAndVerifyClientCert)", high: true,
+			oldSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { return &tls.Config{ClientAuth: tls.RequireAndVerifyClientCert} }\n",
+			newSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { return &tls.Config{ClientAuth: tls.RequestClientCert} }\n"},
+		{name: "cookie loses Secure, gains SameSite=None", fn: "Set", label: "WeakenedSecurity(-net/http.Cookie.Secure=true,net/http.Cookie.SameSite=SameSiteNoneMode)", high: true,
+			oldSrc: "package p\nimport \"net/http\"\nfunc Set(w http.ResponseWriter, v string) { http.SetCookie(w, &http.Cookie{Name: \"s\", Value: v, Secure: true, HttpOnly: true}) }\n",
+			newSrc: "package p\nimport \"net/http\"\nfunc Set(w http.ResponseWriter, v string) { http.SetCookie(w, &http.Cookie{Name: \"s\", Value: v, HttpOnly: true, SameSite: http.SameSiteNoneMode}) }\n"},
+		{name: "TLS minimum raised", fn: "Cfg", label: "WeakenedSecurity",
+			oldSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg(n string) *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }\n",
+			newSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg(n string) *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS13, ServerName: n} }\n"},
+	})
+}
+
+// ssh.InsecureIgnoreHostKey disables host key verification. The test stubs
+// golang.org/x/crypto/ssh with a local replacement module.
+func TestDiffRisk_InsecureIgnoreHostKey(t *testing.T) {
+	shared := map[string]string{
+		"go.mod":         "module example.com/m\n\ngo 1.22\n\nrequire golang.org/x/crypto v0.0.0\n\nreplace golang.org/x/crypto => ./xcrypto\n",
+		"xcrypto/go.mod": "module golang.org/x/crypto\n\ngo 1.22\n",
+		"xcrypto/ssh/ssh.go": "package ssh\n\ntype HostKeyCallback func(string) error\n\ntype ClientConfig struct{ HostKeyCallback HostKeyCallback }\n\n" +
+			"func InsecureIgnoreHostKey() HostKeyCallback { return func(string) error { return nil } }\n\n" +
+			"func FixedHostKey(k string) HostKeyCallback { return func(h string) error { return nil } }\n",
+	}
+	oldDir, newDir := writeModule(t, shared,
+		map[string]string{"a.go": "package m\n\nimport \"golang.org/x/crypto/ssh\"\n\nfunc Client(k string) *ssh.ClientConfig { return &ssh.ClientConfig{HostKeyCallback: ssh.FixedHostKey(k)} }\n"},
+		map[string]string{"a.go": "package m\n\nimport \"golang.org/x/crypto/ssh\"\n\nfunc Client(k string) *ssh.ClientConfig { return &ssh.ClientConfig{HostKeyCallback: ssh.InsecureIgnoreHostKey()} }\n"})
+	out, err := api.Diff(filepath.Join(oldDir, "a.go"), filepath.Join(newDir, "a.go"))
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	f := findFunc(t, out, "Client")
+	if !strings.Contains(f.TopologyDelta, "WeakenedSecurity(golang.org/x/crypto/ssh.InsecureIgnoreHostKey())") || f.RiskScore < models.RiskScoreHigh {
+		t.Errorf("Client: risk %d, delta %q; want WeakenedSecurity for InsecureIgnoreHostKey", f.RiskScore, f.TopologyDelta)
+	}
+}
