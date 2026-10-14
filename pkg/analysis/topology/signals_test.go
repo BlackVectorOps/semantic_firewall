@@ -228,6 +228,26 @@ func main() {}`, map[string]int{"os.Remove": 1}},
 import ("os";"runtime")
 func F(p string, ok bool) { if !ok { runtime.Goexit() }; os.Remove(p) }
 func main() {}`, map[string]int{"os.Remove": 1}},
+		{"other os and runtime calls return", `package main
+import ("os";"runtime")
+func F(p string, ok bool) {
+	if !ok { os.Getpid() }
+	if ok { runtime.GC() }
+	os.Remove(p)
+}
+func main() {}`, map[string]int{"os.Remove": 0}},
+		{"t.Fatal ends the function", `package main
+import ("os";"testing")
+func F(t *testing.T, p string, ok bool) { if !ok { t.Fatal("no") }; os.Remove(p) }
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"t.Log returns", `package main
+import ("os";"testing")
+func F(t *testing.T, p string, ok bool) { if !ok { t.Log("no") }; os.Remove(p) }
+func main() {}`, map[string]int{"os.Remove": 0}},
+		{"Logger.Printf returns", `package main
+import ("log";"os")
+func F(l *log.Logger, p string, ok bool) { if !ok { l.Printf("no") }; os.Remove(p) }
+func main() {}`, map[string]int{"os.Remove": 0}},
 		{"an ordinary call does not end the function", `package main
 import ("fmt";"os")
 func F(p string, ok bool) { if !ok { fmt.Println("no") }; os.Remove(p) }

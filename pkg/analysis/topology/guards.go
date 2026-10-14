@@ -134,11 +134,10 @@ func isNoReturn(pkgPath, recv, name string) bool {
 	case "runtime":
 		return recv == "" && name == "Goexit"
 	case "log":
-		if recv == "" || recv == "Logger" {
-			switch name {
-			case "Fatal", "Fatalf", "Fatalln", "Panic", "Panicf", "Panicln":
-				return true
-			}
+		// The package functions and *log.Logger, its only type, alike.
+		switch name {
+		case "Fatal", "Fatalf", "Fatalln", "Panic", "Panicf", "Panicln":
+			return true
 		}
 	case "testing":
 		switch name {
