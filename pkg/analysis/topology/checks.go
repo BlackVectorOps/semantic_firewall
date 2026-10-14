@@ -14,14 +14,15 @@ import (
 // calls when deciding whether a helper performs a verification.
 const maxCheckHelperDepth = 3
 
-// collectCheckHelpers adds to t.Checks the calls that act as verifications
-// without being one of the primitives IsVerificationCall lists:
+// collectCheckHelpers records in t.Checks the calls that verify something:
+//   - a call of a primitive IsVerificationCall lists, when its result
+//     decides a branch or is returned;
 //   - a static call to a function of the same package whose body, following
-//     static calls within that package up to maxCheckHelperDepth deep, calls
-//     a verification primitive, when the call's result decides a branch or
-//     is returned, or the helper has no result (it panics or exits on
-//     failure). The primitives it reaches are recorded too, so moving a
-//     check into a helper does not read as removing it;
+//     static calls within that package up to maxCheckHelperDepth deep, makes
+//     such a call, when the call's result decides a branch or is returned,
+//     or the helper has no result (it panics or exits on failure). The
+//     primitives it reaches are recorded too, so moving a check into a
+//     helper does not read as removing it;
 //   - a call, static or through an interface, whose name contains a
 //     verification word (authorize, verify, validate, ...; see
 //     isVerificationName) and whose result decides a branch or is returned.
@@ -39,7 +40,7 @@ func collectCheckHelpers(fn *ssa.Function, t *FunctionTopology) {
 			}
 			if call.Call.IsInvoke() {
 				m := call.Call.Method
-				if isVerificationName(m.Name()) && resultDecides(call) {
+				if isVerificationName(m.Name()) && resultDecides(call, false) {
 					t.Checks["("+types.TypeString(call.Call.Value.Type(), nil)+")."+m.Name()] = true
 				}
 			}
@@ -48,14 +49,18 @@ func collectCheckHelpers(fn *ssa.Function, t *FunctionTopology) {
 			if callee == nil || callee.Parent() != nil {
 				continue
 			}
-			// A primitive is already recorded under the same key.
 			pkgPath, recv, name, _ := calleeIdentity(callee)
 			key := callTargetKey(pkgPath, recv, name)
-			decides := resultDecides(call)
-			if decides && isVerificationName(name) && !notChecks[key] {
+			if IsVerificationCall(pkgPath, recv, name) {
+				if resultDecides(call, true) {
+					t.Checks[key] = true
+				}
+				continue
+			}
+			if isVerificationName(name) && !notChecks[key] && resultDecides(call, false) {
 				t.Checks[key] = true
 			}
-			if decides || call.Call.Signature().Results().Len() == 0 {
+			if call.Call.Signature().Results().Len() == 0 || resultDecides(call, true) {
 				if reached := verificationsReached(callee, pkgOf(fn), maxCheckHelperDepth, memo); len(reached) > 0 {
 					t.Checks[key] = true
 					for _, k := range reached {
@@ -105,7 +110,8 @@ func newReachMemo() *reachMemo {
 }
 
 // bodyRefs is what a function body references, once each: the
-// verification primitives, and the other functions.
+// verification primitives it calls and decides on, and the other
+// functions.
 type bodyRefs struct {
 	primitives []string
 	callees    []*ssa.Function
@@ -126,13 +132,12 @@ func (m *reachMemo) refs(fn *ssa.Function) *bodyRefs {
 					continue
 				}
 				pkgPath, recv, name, _ := calleeIdentity(callee)
-				if IsVerificationCall(pkgPath, recv, name) {
-					if k := callTargetKey(pkgPath, recv, name); !slices.Contains(r.primitives, k) {
-						r.primitives = append(r.primitives, k)
-					}
-				} else if !slices.Contains(r.callees, callee) {
+				if !IsVerificationCall(pkgPath, recv, name) && !slices.Contains(r.callees, callee) {
 					r.callees = append(r.callees, callee)
 				}
+			}
+			if k, ok := decidedPrimitive(instr); ok && !slices.Contains(r.primitives, k) {
+				r.primitives = append(r.primitives, k)
 			}
 		}
 	}
@@ -167,12 +172,30 @@ func verificationsReached(fn *ssa.Function, pkg *ssa.Package, depth int, m *reac
 	return reached
 }
 
+// decidedPrimitive returns the key of the verification primitive instr
+// calls, when the call's result decides (see resultDecides).
+func decidedPrimitive(instr ssa.Instruction) (string, bool) {
+	call, ok := instr.(*ssa.Call)
+	if !ok {
+		return "", false
+	}
+	callee := call.Call.StaticCallee()
+	if callee == nil {
+		return "", false
+	}
+	pkgPath, recv, name, _ := calleeIdentity(callee)
+	if !IsVerificationCall(pkgPath, recv, name) || !resultDecides(call, true) {
+		return "", false
+	}
+	return callTargetKey(pkgPath, recv, name), true
+}
+
 // resultDecides reports whether a call's result, possibly through up to
 // four unary or binary operations, conversions, tuple extracts, phis and
-// locals, is the condition of a branch or a boolean or error the function
-// returns (its caller then decides on it). Returning any other value, as a
-// getter does, decides nothing.
-func resultDecides(call *ssa.Call) bool {
+// locals, is the condition of a branch or is returned (its caller then
+// decides on it). Unless anyReturn is set, only a returned boolean or error
+// counts: a getter returning another value decides nothing.
+func resultDecides(call *ssa.Call, anyReturn bool) bool {
 	var decides func(v ssa.Value, depth int) bool
 	decides = func(v ssa.Value, depth int) bool {
 		// The depth bound also ends a cycle through phis.
@@ -184,7 +207,7 @@ func resultDecides(call *ssa.Call) bool {
 			case *ssa.If:
 				return true
 			case *ssa.Return:
-				if isBoolOrError(v.Type()) {
+				if anyReturn || isBoolOrError(v.Type()) {
 					return true
 				}
 			case *ssa.UnOp, *ssa.BinOp, *ssa.ChangeType, *ssa.Convert, *ssa.Extract, *ssa.Phi:

@@ -40,7 +40,7 @@ func (Config) InsecureIgnoreHostKey() HostKeyCallback { return nil }
 		"xcrypto/go.mod":     "module golang.org/x/crypto\n\ngo 1.23\n",
 		"xcrypto/ssh/ssh.go": sshStub,
 		"fake/ssh/ssh.go":    sshStub,
-		"helper/helper.go":   "package helper\n\nimport (\"crypto/hmac\"; \"os\")\n\nfunc Same(a, b []byte) bool { return hmac.Equal(a, b) }\n\nfunc Die() { os.Exit(1) }\n",
+		"helper/helper.go":   "package helper\n\nimport (\"crypto/hmac\"; \"net/http\"; \"os\")\n\nfunc Same(a, b []byte) bool { return hmac.Equal(a, b) }\n\nfunc Die() { os.Exit(1) }\n\nfunc Cookie(v string) *http.Cookie { return &http.Cookie{Name: \"s\", Value: v, Secure: true} }\n",
 	}
 	// helper is a root, so its functions have SSA bodies.
 	patterns := []string{"./helper"}
@@ -564,6 +564,38 @@ func F(u string) int {
 	return 0
 }
 func main() {}`, nil},
+		{"a primitive whose result is unused", `package main
+import "crypto/hmac"
+func F(a, b []byte) { ok := hmac.Equal(a, b); println(ok) }
+func main() {}`, nil},
+		{"a primitive whose result is dropped", `package main
+import "crypto/hmac"
+func F(a, b []byte) { hmac.Equal(a, b) }
+func main() {}`, nil},
+		{"a primitive's int result returned", `package main
+import "crypto/subtle"
+func F(a, b []byte) int { return subtle.ConstantTimeCompare(a, b) }
+func main() {}`, []string{"crypto/subtle.ConstantTimeCompare"}},
+		{"a helper returning a primitive's int result", `package main
+import "crypto/subtle"
+func same(a, b []byte) int { return subtle.ConstantTimeCompare(a, b) }
+func F(a, b []byte) bool { return same(a, b) == 1 }
+func main() {}`, []string{"testmod.same", "crypto/subtle.ConstantTimeCompare"}},
+		{"a helper that ignores its primitive", `package main
+import "crypto/hmac"
+func macOK(a, b []byte) bool { hmac.Equal(a, b); return true }
+func F(a, b []byte) int { if !macOK(a, b) { return 0 }; return 1 }
+func main() {}`, nil},
+		{"constant-time copy and select compare nothing", `package main
+import "crypto/subtle"
+func F(dst, src []byte, v int) int { subtle.ConstantTimeCopy(v, dst, src); return subtle.ConstantTimeSelect(v, 1, 2) }
+func main() {}`, nil},
+		{"a method declared on an alias", `package main
+type Server struct{}
+type S = Server
+func (s *S) authorize(u string) bool { return u == "admin" }
+func F(s *Server, u string) int { if !s.authorize(u) { return 0 }; return 1 }
+func main() {}`, []string{"(testmod.Server).authorize"}},
 		{"getters returned are no checks", `package main
 type Commit struct{ author, token, role string }
 func (c *Commit) Author() string { return c.author }
@@ -691,6 +723,89 @@ func main() {}`, nil, nil},
 import "testmod/fake/ssh"
 func F() ssh.HostKeyCallback { return ssh.InsecureIgnoreHostKey() }
 func main() {}`, nil, nil},
+		{"ssh host key checking disabled through a function value", `package main
+import "golang.org/x/crypto/ssh"
+func F() ssh.HostKeyCallback { cbs := []func() ssh.HostKeyCallback{ssh.InsecureIgnoreHostKey}; return cbs[0]() }
+func main() {}`, []string{"golang.org/x/crypto/ssh.InsecureIgnoreHostKey()"}, nil},
+		{"a defined type over tls.Config", `package main
+import "crypto/tls"
+type cfg tls.Config
+func F() *tls.Config { return (*tls.Config)(&cfg{InsecureSkipVerify: true, ClientAuth: tls.RequireAndVerifyClientCert}) }
+func main() {}`, []string{"crypto/tls.Config.InsecureSkipVerify=true"}, []string{"crypto/tls.Config.ClientAuth=RequireAndVerifyClientCert"}},
+		{"a defined type over http.Cookie", `package main
+import "net/http"
+type cookie http.Cookie
+func F() *http.Cookie { return (*http.Cookie)(&cookie{Secure: true, SameSite: http.SameSiteNoneMode}) }
+func main() {}`, []string{"net/http.Cookie.SameSite=SameSiteNoneMode"}, []string{"net/http.Cookie.Secure=true"}},
+		{"a struct embedding tls.Config", `package main
+import "crypto/tls"
+type wrapped struct{ tls.Config }
+func F() *wrapped { w := &wrapped{}; w.InsecureSkipVerify = true; return w }
+func main() {}`, []string{"crypto/tls.Config.InsecureSkipVerify=true"}, nil},
+		{"MinVersion reset to the default", `package main
+import "crypto/tls"
+func F(c *tls.Config) { c.MinVersion = 0 }
+func main() {}`, nil, nil},
+		{"Secure set, then cleared", `package main
+import "net/http"
+func F() *http.Cookie { c := &http.Cookie{Secure: true, HttpOnly: true}; c.Secure = false; return c }
+func main() {}`, nil, []string{"net/http.Cookie.HttpOnly=true"}},
+		{"ClientAuth set, then lowered", `package main
+import "crypto/tls"
+func F() *tls.Config { c := &tls.Config{ClientAuth: tls.RequireAndVerifyClientCert}; c.ClientAuth = tls.NoClientCert; return c }
+func main() {}`, nil, nil},
+		{"a second cookie without the settings", `package main
+import "net/http"
+func F(w http.ResponseWriter, v string) {
+	http.SetCookie(w, &http.Cookie{Name: "pref", Value: "1", Secure: true, HttpOnly: true})
+	http.SetCookie(w, &http.Cookie{Name: "session", Value: v})
+}
+func main() {}`, nil, nil},
+		{"two cookies with the settings", `package main
+import "net/http"
+func F(w http.ResponseWriter, v string) {
+	http.SetCookie(w, &http.Cookie{Name: "pref", Value: "1", Secure: true})
+	http.SetCookie(w, &http.Cookie{Name: "session", Value: v, Secure: true})
+}
+func main() {}`, nil, []string{"net/http.Cookie.Secure=true"}},
+		{"settings on a cookie passed in", `package main
+import "net/http"
+func F(c *http.Cookie) { c.Secure = true }
+func main() {}`, nil, []string{"net/http.Cookie.Secure=true"}},
+		{"a helper returning a secure cookie", `package main
+import "net/http"
+func session(v string) *http.Cookie { return &http.Cookie{Name: "s", Value: v, Secure: true, HttpOnly: true} }
+func F(w http.ResponseWriter, v string) { http.SetCookie(w, session(v)) }
+func main() {}`, nil, []string{"net/http.Cookie.HttpOnly=true", "net/http.Cookie.Secure=true"}},
+		{"a helper that secures the caller's cookie", `package main
+import "net/http"
+func harden(c *http.Cookie) { c.Secure = true }
+func F(w http.ResponseWriter, v string) { c := &http.Cookie{Name: "s", Value: v}; harden(c); http.SetCookie(w, c) }
+func main() {}`, nil, []string{"net/http.Cookie.Secure=true"}},
+		{"a helper's cookie beside one without the setting", `package main
+import "net/http"
+func session(v string) *http.Cookie { return &http.Cookie{Name: "s", Value: v, Secure: true} }
+func F(w http.ResponseWriter, v string) { http.SetCookie(w, session(v)); http.SetCookie(w, &http.Cookie{Name: "t", Value: v}) }
+func main() {}`, nil, nil},
+		{"a helper three calls deep", `package main
+import "net/http"
+func h3(v string) *http.Cookie { return &http.Cookie{Name: "s", Value: v, Secure: true} }
+func h2(v string) *http.Cookie { return h3(v) }
+func h1(v string) *http.Cookie { return h2(v) }
+func F(v string) *http.Cookie { return h1(v) }
+func main() {}`, nil, []string{"net/http.Cookie.Secure=true"}},
+		{"a helper four calls deep is too far", `package main
+import "net/http"
+func h4(v string) *http.Cookie { return &http.Cookie{Name: "s", Value: v, Secure: true} }
+func h3(v string) *http.Cookie { return h4(v) }
+func h2(v string) *http.Cookie { return h3(v) }
+func h1(v string) *http.Cookie { return h2(v) }
+func F(v string) *http.Cookie { return h1(v) }
+func main() {}`, nil, nil},
+		{"a helper in another package is not followed", `package main
+import ("net/http";"testmod/helper")
+func F(v string) *http.Cookie { return helper.Cookie(v) }
+func main() {}`, nil, nil},
 	}
 	srcs := make([]string, len(cases))
 	for i, c := range cases {
@@ -712,6 +827,74 @@ func main() {}`, nil, nil},
 			}
 			if !reflect.DeepEqual(tp.WeakSettings, set(c.weak)) || !reflect.DeepEqual(tp.SecureSettings, set(c.secure)) {
 				t.Errorf("weak %v, secure %v; want %v, %v", tp.WeakSettings, tp.SecureSettings, c.weak, c.secure)
+			}
+		})
+	}
+}
+
+func TestCallTargets(t *testing.T) {
+	cases := []struct {
+		name, src    string
+		targets      map[string]int
+		capabilities map[string]string
+	}{
+		{"each call counts", `package main
+import "os"
+func F(p string) { os.Remove(p); os.Remove(p + "~") }
+func main() {}`, map[string]int{"os.Remove": 2}, map[string]string{"os.Remove": "filesystem"}},
+		{"a method named init", `package main
+type T struct{}
+func (T) init() {}
+func F(t T) { t.init() }
+func main() {}`, map[string]int{"(testmod.T).init": 1}, map[string]string{}},
+		{"error.Error as a method value", `package main
+func F(err error) func() string { return err.Error }
+func main() {}`, map[string]int{"(.error).Error": 1}, map[string]string{}},
+		{"a closure is not a target", `package main
+func F() int { f := func() int { return 1 }; return f() }
+func main() {}`, map[string]int{}, map[string]string{}},
+		{"exec.Cmd run through an interface", `package main
+import "os/exec"
+type runner interface{ Run() error }
+func F(x string) error { var r runner = &exec.Cmd{Path: "/bin/sh", Args: []string{"sh", "-c", x}}; return r.Run() }
+func main() {}`, map[string]int{"(os/exec.Cmd).Run": 1}, map[string]string{"(os/exec.Cmd).Run": "exec"}},
+		{"an error conversion adds nothing", `package main
+type E struct{}
+func (*E) Error() string { return "e" }
+func F() error { return &E{} }
+func main() {}`, map[string]int{}, map[string]string{}},
+		{"exec.Cmd passed for a constrained type parameter", `package main
+import "os/exec"
+func run[T interface{ Run() error }](c T) error { return c.Run() }
+func F(x string) error { return run(&exec.Cmd{Path: x}) }
+func main() {}`, map[string]int{"testmod.run": 1, "(os/exec.Cmd).Run": 1}, map[string]string{"(os/exec.Cmd).Run": "exec"}},
+		{"a request sent through http.RoundTripper", `package main
+import "net/http"
+func F(req *http.Request) (*http.Response, error) { return http.DefaultTransport.RoundTrip(req) }
+func main() {}`, map[string]int{"(net/http.RoundTripper).RoundTrip": 1}, map[string]string{"(net/http.RoundTripper).RoundTrip": "network"}},
+		{"http.DefaultClient through an interface", `package main
+import "net/http"
+type doer interface{ Do(*http.Request) (*http.Response, error) }
+func F(req *http.Request) (*http.Response, error) { var d doer = http.DefaultClient; return d.Do(req) }
+func main() {}`, map[string]int{"(net/http.Client).Do": 1}, map[string]string{"(net/http.Client).Do": "network"}},
+		{"another interface's method of the same name", `package main
+type RoundTripper interface{ RoundTrip(int) int }
+func F(r RoundTripper) int { return r.RoundTrip(1) }
+func main() {}`, map[string]int{}, map[string]string{}},
+	}
+	srcs := make([]string, len(cases))
+	for i, c := range cases {
+		srcs[i] = c.src
+	}
+	fns := functions(t, srcs...)
+	for i, c := range cases {
+		fn := fns[i]
+		t.Run(c.name, func(t *testing.T) {
+			tp := topology.ExtractTopology(fn)
+			pkgPath := fn.Pkg.Pkg.Path()
+			targets, capabilities := rekey(tp.CallTargets, pkgPath), rekey(tp.Capabilities, pkgPath)
+			if !reflect.DeepEqual(targets, c.targets) || !reflect.DeepEqual(capabilities, c.capabilities) {
+				t.Errorf("CallTargets = %v, Capabilities = %v; want %v, %v", targets, capabilities, c.targets, c.capabilities)
 			}
 		})
 	}

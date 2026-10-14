@@ -254,6 +254,25 @@ func checkCache(k string) bool { return len(k) > 3 }
 func formatRole(r string) string { return "<" + r + ">" }
 func Get(k string) string { return k }
 `},
+		{name: "a primitive's result logged instead of checked", fn: "Handle", label: "RemovedCheck(crypto/hmac.Equal)", high: true,
+			oldSrc: checkedMAC,
+			newSrc: `package p
+import ("crypto/hmac";"log")
+func Handle(mac, want []byte) error { ok := hmac.Equal(mac, want); log.Printf("mac ok: %v", ok); return nil }
+`},
+		{name: "a primitive's result dropped", fn: "Handle", label: "RemovedCheck(crypto/hmac.Equal)", high: true,
+			oldSrc: checkedMAC,
+			newSrc: `package p
+import "crypto/hmac"
+func Handle(mac, want []byte) error { hmac.Equal(mac, want); return nil }
+`},
+		{name: "a check moved into a helper that ignores it", fn: "Handle", label: "RemovedCheck(crypto/hmac.Equal)", high: true,
+			oldSrc: checkedMAC,
+			newSrc: `package p
+import ("crypto/hmac";"errors")
+func macOK(mac, want []byte) bool { hmac.Equal(mac, want); return true }
+func Handle(mac, want []byte) error { if !macOK(mac, want) { return errors.New("bad mac") }; return nil }
+`},
 		{name: "a check moved into a helper", fn: "Handle", label: "RemovedCheck",
 			oldSrc: `package p
 import ("crypto/hmac";"errors")
@@ -311,6 +330,11 @@ func Open(p string) (*os.File, error) { f, err := os.Open(p); if errors.Is(err, 
 	})
 }
 
+const checkedMAC = `package p
+import ("crypto/hmac";"errors")
+func Handle(mac, want []byte) error { if !hmac.Equal(mac, want) { return errors.New("bad mac") }; return nil }
+`
+
 // Security settings that weaken on their own appear, or settings whose
 // removal weakens disappear.
 func TestDiffRisk_WeakenedSecurity(t *testing.T) {
@@ -330,6 +354,72 @@ func TestDiffRisk_WeakenedSecurity(t *testing.T) {
 		{name: "TLS minimum raised", fn: "Cfg", label: "WeakenedSecurity",
 			oldSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg(n string) *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }\n",
 			newSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg(n string) *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS13, ServerName: n} }\n"},
+		{name: "a legacy TLS minimum raised", fn: "Cfg", label: "WeakenedSecurity",
+			oldSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS10} }\n",
+			newSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS11} }\n"},
+		{name: "a legacy TLS maximum lowered", fn: "Cfg", label: "WeakenedSecurity(crypto/tls.Config.MaxVersion=TLS1.0)", high: true,
+			oldSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { return &tls.Config{MaxVersion: tls.VersionTLS11} }\n",
+			newSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { return &tls.Config{MaxVersion: tls.VersionTLS10} }\n"},
+		{name: "settings hidden behind a defined type", fn: "Cfg", label: "WeakenedSecurity(crypto/tls.Config.InsecureSkipVerify=true)", high: true,
+			oldSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }\n",
+			newSrc: "package p\nimport \"crypto/tls\"\ntype cfg tls.Config\nfunc Cfg() *tls.Config { return (*tls.Config)(&cfg{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}) }\n"},
+		{name: "Secure and HttpOnly set, then cleared", fn: "Set", label: "WeakenedSecurity(-net/http.Cookie.HttpOnly=true,-net/http.Cookie.Secure=true)", high: true,
+			oldSrc: secureCookie,
+			newSrc: "package p\nimport \"net/http\"\nfunc Set(w http.ResponseWriter, v string) { c := &http.Cookie{Name: \"s\", Value: v, Secure: true, HttpOnly: true}; c.Secure, c.HttpOnly = false, false; http.SetCookie(w, c) }\n"},
+		{name: "a decoy secure cookie", fn: "Set", label: "WeakenedSecurity(-net/http.Cookie.HttpOnly=true,-net/http.Cookie.Secure=true)", high: true,
+			oldSrc: secureCookie,
+			newSrc: "package p\nimport \"net/http\"\nfunc Set(w http.ResponseWriter, v string) {\n\thttp.SetCookie(w, &http.Cookie{Name: \"pref\", Value: \"1\", Secure: true, HttpOnly: true})\n\thttp.SetCookie(w, &http.Cookie{Name: \"s\", Value: v})\n}\n"},
+		{name: "ClientAuth set, then lowered", fn: "Cfg", label: "WeakenedSecurity(-crypto/tls.Config.ClientAuth=RequireAndVerifyClientCert)", high: true,
+			oldSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { return &tls.Config{ClientAuth: tls.RequireAndVerifyClientCert} }\n",
+			newSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { c := &tls.Config{ClientAuth: tls.RequireAndVerifyClientCert}; c.ClientAuth = tls.NoClientCert; return c }\n"},
+		{name: "cookie construction moved into a helper", fn: "Set", label: "WeakenedSecurity",
+			oldSrc: secureCookie,
+			newSrc: "package p\nimport \"net/http\"\nfunc session(v string) *http.Cookie { return &http.Cookie{Name: \"s\", Value: v, Secure: true, HttpOnly: true} }\nfunc Set(w http.ResponseWriter, v string) { http.SetCookie(w, session(v)) }\n"},
+		{name: "cookie hardening moved into a helper", fn: "Set", label: "WeakenedSecurity",
+			oldSrc: secureCookie,
+			newSrc: "package p\nimport \"net/http\"\nfunc harden(c *http.Cookie) { c.Secure, c.HttpOnly = true, true }\nfunc Set(w http.ResponseWriter, v string) { c := &http.Cookie{Name: \"s\", Value: v}; harden(c); http.SetCookie(w, c) }\n"},
+		{name: "TLS config construction moved into a helper", fn: "Cfg", label: "WeakenedSecurity",
+			oldSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { return &tls.Config{ClientAuth: tls.RequireAndVerifyClientCert} }\n",
+			newSrc: "package p\nimport \"crypto/tls\"\nfunc server() *tls.Config { return &tls.Config{ClientAuth: tls.RequireAndVerifyClientCert} }\nfunc Cfg() *tls.Config { return server() }\n"},
+	})
+}
+
+const secureCookie = "package p\nimport \"net/http\"\nfunc Set(w http.ResponseWriter, v string) { http.SetCookie(w, &http.Cookie{Name: \"s\", Value: v, Secure: true, HttpOnly: true}) }\n"
+
+// Capabilities reached without naming the dangerous call, and calls that
+// name a dangerous package but do nothing dangerous.
+func TestDiffRisk_HiddenCapabilities(t *testing.T) {
+	runDeletionCases(t, []deletionCase{
+		{name: "exec.Cmd run through an interface", fn: "Run", label: "Capability+exec((os/exec.Cmd).Run)", high: true,
+			oldSrc: "package p\nfunc Run(x string) error { return nil }\n",
+			newSrc: "package p\nimport \"os/exec\"\ntype runner interface{ Run() error }\nfunc Run(x string) error { var r runner = &exec.Cmd{Path: \"/bin/sh\", Args: []string{\"sh\", \"-c\", x}}; return r.Run() }\n"},
+		{name: "exec.Cmd run through a generic helper", fn: "Run", label: "Capability+exec((os/exec.Cmd).Run)", high: true,
+			oldSrc: "package p\nfunc Run(x string) error { return nil }\n",
+			newSrc: "package p\nimport \"os/exec\"\nfunc run[T interface{ Run() error }](c T) error { return c.Run() }\nfunc Run(x string) error { return run(&exec.Cmd{Path: \"/bin/sh\", Args: []string{\"sh\", \"-c\", x}}) }\n"},
+		{name: "http.DefaultClient through an interface", fn: "Fetch", label: "Capability+network((net/http.Client).Do)", high: true,
+			oldSrc: "package p\nimport \"net/http\"\nfunc Fetch(req *http.Request) (*http.Response, error) { return nil, nil }\n",
+			newSrc: "package p\nimport \"net/http\"\ntype doer interface{ Do(*http.Request) (*http.Response, error) }\nfunc Fetch(req *http.Request) (*http.Response, error) { var d doer = http.DefaultClient; return d.Do(req) }\n"},
+		{name: "a request sent through http.DefaultTransport", fn: "Fetch", label: "Capability+network((net/http.RoundTripper).RoundTrip)", high: true,
+			oldSrc: "package p\nimport \"net/http\"\nfunc Fetch(req *http.Request) (*http.Response, error) { return nil, nil }\n",
+			newSrc: "package p\nimport \"net/http\"\nfunc Fetch(req *http.Request) (*http.Response, error) { return http.DefaultTransport.RoundTrip(req) }\n"},
+		{name: "a method called by name through reflection", fn: "Invoke", label: "Capability+reflection((reflect.Value).MethodByName)", high: true,
+			oldSrc: "package p\nfunc Invoke(x any, m string) error { return nil }\n",
+			newSrc: "package p\nimport \"reflect\"\nfunc Invoke(x any, m string) error { return reflect.ValueOf(x).MethodByName(m).Interface().(func() error)() }\n"},
+		{name: "ioutil.WriteFile", fn: "Save", label: "Capability+filesystem(io/ioutil.WriteFile)", high: true,
+			oldSrc: "package p\nfunc Save(p string, b []byte) error { return nil }\n",
+			newSrc: "package p\nimport \"io/ioutil\"\nfunc Save(p string, b []byte) error { return ioutil.WriteFile(p, b, 0o644) }\n"},
+		{name: "a read-only handle made setuid", fn: "Fix", label: "Capability+filesystem((os.File).Chmod)", high: true,
+			oldSrc: "package p\nimport \"os\"\nfunc Fix(p string) error { _, err := os.Open(p); return err }\n",
+			newSrc: "package p\nimport \"os\"\nfunc Fix(p string) error { f, err := os.Open(p); if err != nil { return err }; return f.Chmod(0o4777) }\n"},
+		{name: "a temporary file dropped", fn: "Drop", label: "Capability+filesystem(os.CreateTemp)", high: true,
+			oldSrc: "package p\nfunc Drop(dir string, b []byte) error { return nil }\n",
+			newSrc: "package p\nimport \"os\"\nfunc Drop(dir string, b []byte) error { f, err := os.CreateTemp(dir, \"*.desktop\"); if err != nil { return err }; _, err = f.Write(b); return err }\n"},
+		{name: "the page size read through syscall", fn: "Page", label: "Capability",
+			oldSrc: "package p\nimport \"os\"\nfunc Page() int { return os.Getpagesize() }\n",
+			newSrc: "package p\nimport \"syscall\"\nfunc Page() int { return syscall.Getpagesize() }\n"},
+		{name: "a tool looked up, not run", fn: "HasGit", label: "Capability",
+			oldSrc: "package p\nimport \"os\"\nfunc HasGit() bool { _, err := os.Stat(\"/usr/bin/git\"); return err == nil }\n",
+			newSrc: "package p\nimport \"os/exec\"\nfunc HasGit() bool { _, err := exec.LookPath(\"git\"); return err == nil }\n"},
 	})
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/topology"
@@ -169,7 +170,7 @@ func assessTopologyDeltaFor(oldT, newT *topology.FunctionTopology, profile riskP
 	// removal weakens disappears ("-" prefix).
 	var weakened []string
 	for s := range newT.WeakSettings {
-		if !oldT.WeakSettings[s] {
+		if !oldT.WeakSettings[s] && !raisesTLSVersion(s, oldT.WeakSettings) {
 			weakened = append(weakened, s)
 		}
 	}
@@ -267,6 +268,44 @@ func assessTopologyDeltaFor(oldT, newT *topology.FunctionTopology, profile riskP
 
 // callTargetsOf prefers the import-path-qualified targets and falls back to
 // the package-name call profile for topologies built without them.
+// raisesTLSVersion reports whether s, a weak TLS version bound
+// ("crypto/tls.Config.MinVersion=TLS1.1"), replaces an old weak bound on
+// the same field that was no higher: raising a legacy minimum from TLS 1.0
+// to 1.1 leaves it weak, but weakens nothing.
+func raisesTLSVersion(s string, old map[string]bool) bool {
+	field, version, ok := strings.Cut(s, "=")
+	if !ok || (field != "crypto/tls.Config.MinVersion" && field != "crypto/tls.Config.MaxVersion") {
+		return false
+	}
+	v, ok := tlsVersionNumber(version)
+	if !ok {
+		return false
+	}
+	for o := range old {
+		if oField, oVersion, _ := strings.Cut(o, "="); oField == field {
+			if ov, ok := tlsVersionNumber(oVersion); ok && ov <= v {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// tlsVersionNumber reads a version as collectSecuritySettings writes it:
+// a name ("TLS1.0") or the constant's value.
+func tlsVersionNumber(s string) (int64, bool) {
+	switch s {
+	case "SSL3.0":
+		return 0x0300, true
+	case "TLS1.0":
+		return 0x0301, true
+	case "TLS1.1":
+		return 0x0302, true
+	}
+	v, err := strconv.ParseInt(s, 0, 64)
+	return v, err == nil
+}
+
 func callTargetsOf(t *topology.FunctionTopology) map[string]int {
 	if t.CallTargets != nil {
 		return t.CallTargets

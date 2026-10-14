@@ -362,8 +362,8 @@ func Client() *tls.Config {                       func Client() *tls.Config {
 | `Client` | `WeakenedSecurity(crypto/tls.Config.InsecureSkipVerify=true)` |
 
 **`RemovedCheck`:** a key of the old function's `Checks` is missing from the new one's. `Checks` holds the calls that verify something:
-- the verification primitives listed under [Capability classes](#capability-classes);
-- *check helpers:* static calls to a function of the same package that reaches a primitive through at most 3 levels of static calls within that package (`validSignature` above), when the result decides a branch or is returned, or the helper has no result (it panics or exits on failure). The primitives the helper reaches are recorded with it, so moving a check into a helper is not a removal;
+- the verification primitives listed under [Capability classes](#capability-classes), when the result decides a branch or is returned;
+- *check helpers:* static calls to a function of the same package that calls a primitive, and decides on its result, through at most 3 levels of static calls within that package (`validSignature` above), when the result decides a branch or is returned, or the helper has no result (it panics or exits on failure). The primitives the helper reaches are recorded with it, so moving a check into a helper is not a removal;
 - calls whose name contains a word that starts with `auth`, `verif`, `valid`, `permi`, `allow`, `admin`, `acl`, `csrf`, `xsrf`, `signature`, `privilege`, `owner`, `role` or `access` (`authorize`, `isAdmin`, `checkPermission`; words split at camelCase and `_`), when the result decides a branch or is returned as a `bool` or `error`; getters that return other values do not count, nor do `os.IsPermission` and `reflect.Value.IsValid`. Interface methods count (`(example.com/p.Verifier).Verify`).
 
 A call whose result is ignored checks nothing, and results kept in locals, as in a function with a `defer`, are followed to their use.
@@ -379,25 +379,27 @@ A call whose result is ignored checks nothing, and results kept in locals, as in
 | `http.Cookie.SameSite = SameSiteNoneMode` | `http.Cookie.HttpOnly = true` |
 | a call to `ssh.InsecureIgnoreHostKey` (`golang.org/x/crypto/ssh`) | |
 
-A new weak setting is reported as is; a lost secure setting carries a `-` prefix (`WeakenedSecurity(-net/http.Cookie.Secure=true)`). A non-constant value records nothing.
+A new weak setting is reported as is; a lost secure setting carries a `-` prefix (`WeakenedSecurity(-net/http.Cookie.Secure=true)`). A non-constant value records nothing. The fields count also through a defined type (`type cfg tls.Config`) or an embedded struct, and `ssh.InsecureIgnoreHostKey` counts when taken as a value.
+
+A secure setting holds only when no store in the function writes a weaker constant to the field (`c.Secure = false` after `Secure: true`) and every cookie or config the function allocates gets it, itself or from a helper it is passed to: a second cookie without `Secure` is not hidden by a first one with it. Settings made by helpers of the same package, up to 3 calls deep, count as the caller's, so moving a cookie's construction into a helper is not a removal. A weak TLS version bound that replaces a lower one on the same field (`MinVersion` from TLS 1.0 to 1.1) is not reported.
 
 **`ErrorExits-N`:** `ErrorExits` counts two-way branches with exactly one side that ends the function with a failure: a `panic`, a call that does not return, `http.Error`, `http.NotFound` or `WriteHeader` with a constant status of 400 or more, or the return of a failure error. A failure error is a new one (`errors.New`, `errors.Join`, `fmt.Errorf`, a concrete type converted to `error`), a package-level error variable, or the value the branch just tested as non-nil (`if err != nil { return err }`). A drop is labelled and not scored: error handling is often refactored away legitimately.
 
 ### Capability classes
 
-Call targets come from `*ssa.Function` callees and functions passed by name. Each is keyed by import path (`os/exec.Command`, `(net/http.Client).Do`) and classified by `topology.ClassifyCallTarget`:
+Call targets come from `*ssa.Function` callees and functions passed by name. Each is keyed by import path (`os/exec.Command`, `(net/http.Client).Do`) and classified by `topology.ClassifyCallTarget`. Capabilities a function reaches without naming them are call targets too: the methods of a value converted to a non-empty interface, or passed for a constrained type parameter, that the interface or constraint declares (an `exec.Cmd` run through `interface{ Run() error }` records `(os/exec.Cmd).Run`), and calls of `http.RoundTripper`'s `RoundTrip`. Only classified methods are recorded this way.
 
 | Class | Members |
 |-------|---------|
-| `exec` | every function in `os/exec`; `os.StartProcess`; `Exec`, `ForkExec` and `StartProcess` in `syscall`, `golang.org/x/sys/unix` and `golang.org/x/sys/windows`; `net/http/cgi.Handler.ServeHTTP`, which runs `Handler.Path` for every request |
-| `syscall` | every other package-level function in `syscall`, `golang.org/x/sys/unix` and `golang.org/x/sys/windows` (methods excluded) |
+| `exec` | every function in `os/exec` except `LookPath`; `os.StartProcess`; `Exec`, `ForkExec` and `StartProcess` in `syscall`, `golang.org/x/sys/unix` and `golang.org/x/sys/windows`; `net/http/cgi.Handler.ServeHTTP`, which runs `Handler.Path` for every request |
+| `syscall` | every other package-level function in `syscall`, `golang.org/x/sys/unix` and `golang.org/x/sys/windows` (methods excluded, and conversion helpers that make no system call: `BytePtrFromString`, `UTF16PtrFromString`, `NsecToTimespec`, `Getpagesize` and the like) |
 | `plugin` | everything in `plugin` |
-| `network` | `net` functions starting with `Dial`, `Listen`, `Lookup`, `Resolve` or `File`. `net/http` package-level functions and methods on `Client`, `Server` and `Transport` named `Get`, `Post`, `PostForm`, `Head`, `Do`, `RoundTrip`, `ListenAndServe`, `ListenAndServeTLS`, `Serve` or `ServeTLS`. Functions starting with `Dial` or `Listen`, plus `SendMail`, in `crypto/tls`, `net/rpc`, `net/rpc/jsonrpc`, `net/smtp`, `net/textproto` and `log/syslog`. `net/http/httptest.NewServer`, `NewTLSServer` and `NewUnstartedServer`. `net/http/httputil.ReverseProxy.ServeHTTP` |
-| `reflection` | `reflect.Value.Call`, `reflect.Value.CallSlice` |
-| `filesystem` | `os.WriteFile`, `Create`, `OpenFile`, `Remove`, `RemoveAll`, `Rename`, `Chmod`, `Chown`, `Lchown`, `Truncate`, `Symlink` and `Link`, as package-level functions or `os.Root` methods; `os.CopyFS` |
+| `network` | `net` functions starting with `Dial`, `Listen`, `Lookup`, `Resolve` or `File`. `net/http` package-level functions and methods on `Client`, `Server`, `Transport` and the `RoundTripper` interface named `Get`, `Post`, `PostForm`, `Head`, `Do`, `RoundTrip`, `ListenAndServe`, `ListenAndServeTLS`, `Serve` or `ServeTLS`. Functions starting with `Dial` or `Listen`, plus `SendMail`, in `crypto/tls`, `net/rpc`, `net/rpc/jsonrpc`, `net/smtp`, `net/textproto` and `log/syslog`. `net/http/httptest.NewServer`, `NewTLSServer` and `NewUnstartedServer`. `net/http/httputil.ReverseProxy.ServeHTTP` |
+| `reflection` | `reflect.Value.Call`, `CallSlice`, `MethodByName` and `Method` (the last two return a method the code can call as a func value) |
+| `filesystem` | `os.WriteFile`, `Create`, `CreateTemp`, `OpenFile`, `Remove`, `RemoveAll`, `Rename`, `Chmod`, `Chown`, `Lchown`, `Chtimes`, `Truncate`, `Symlink`, `Link`, `Mkdir`, `MkdirAll` and `MkdirTemp`, as package-level functions or `os.Root` methods; `os.CopyFS`; `(*os.File).Chmod`, `Chown` and `Truncate`; `io/ioutil.WriteFile`, `TempFile` and `TempDir` |
 
 Verification calls (`topology.IsVerificationCall`), whose removal is a `RemovedCheck`:
-- `crypto/subtle.ConstantTime*`, `crypto/hmac.Equal`
+- `crypto/subtle.ConstantTimeCompare`, `ConstantTimeEq`, `ConstantTimeByteEq` and `ConstantTimeLessOrEq`; `crypto/hmac.Equal`
 - `Verify*` in `crypto/ed25519`, `crypto/ecdsa` and `crypto/rsa`
 - `x509.Certificate` / `CertificateRequest` `Verify*`, `CheckSignature`, `CheckSignatureFrom`
 - `(*tls.Conn).VerifyHostname`
@@ -410,21 +412,22 @@ Closures and range-over-func loop bodies are separate functions (`Handle$1`) and
 
 **Scored:**
 - A function newly reaching one of the capability classes above through a concrete call target. This includes replacing one call with another while the call count stays the same (`fmt.Println` → `net.Dial` scores 20).
-- `reflect.Value.Call` and `CallSlice`, which are scored as the `reflection` capability.
+- `reflect.Value.Call`, `CallSlice`, `MethodByName` and `Method`, which are scored as the `reflection` capability.
 - Removal of a verification call or a check helper, or deletion of a function that made one.
 - A capability call left without any guard, and weakened security settings (see [Deletion signals](#deletion-signals)).
 - New goroutines, entropy class increases and obfuscation class increases.
 
 **Not scored (no concrete target):**
-- Interface method calls (`invoke:`).
-- Calls through function values (`dynamic:`).
+- Interface method calls (`invoke:`), except those described under [Capability classes](#capability-classes): `http.RoundTripper.RoundTrip`, and capability methods of a value the function itself converts to the interface. A generic function on its own records nothing for the methods it calls on a type parameter; its callers do, through the type argument.
+- Calls through function values (`dynamic:`), including func-typed fields such as `http.Transport.DialContext`.
 
 These appear in `CallSignatures` but not in `CallTargets`, so they never reach the capability classifier.
 
 **Not scored (other limits):**
 - **Guards around ordinary code:** removing a condition (`if user != admin`, a bounds check) scores only when it leaves a capability call unconditional, removes a check, or weakens a listed setting. Otherwise it shows up as `Branches-N`, `ErrorExits-N` and changed literals in `removed_ops`, and scores 0. Deleting one of several guards of a capability call scores 0 as well.
 - **Check helpers in other packages:** a helper is found only through calls within the function's own package, or by its name.
-- **Filesystem calls outside the list:** `os.Mkdir`, `os.MkdirAll`, methods on `*os.File` and `ioutil.WriteFile` are not in the `filesystem` class.
+- **Filesystem calls outside the list:** writes to an open `*os.File` (`Write`, `WriteString`) are not in the `filesystem` class; opening the file for writing is.
+- **Settings through a pointer:** a field's address passed to a call (`flag.BoolVar(&cfg.InsecureSkipVerify, ...)`) records nothing; only constant stores do.
 - **Package-level payloads:** a package-level `var` initializer lives in the package `init` function, so its literal is attributed to `init`, not to the function that uses it.
 - **Parse failures:** in `sfw diff`, a file that fails to type-check is a fatal error. In `sfw check`, it is a per-file `error` entry.
 
