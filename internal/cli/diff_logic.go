@@ -56,28 +56,33 @@ func RunDiffBatch(pairsFile string, noSandbox bool) error {
 		if err != nil {
 			return err
 		}
-		// Mount the pairs file and the context root of every input (or its
-		// directory when it has none) rather than each file.
-		inputs := []string{cleanPairs}
-		seen := map[string]bool{}
-		for _, p := range pairs {
-			for _, f := range []string{p.Old, p.New} {
-				if f == "" || f == os.DevNull {
-					continue
-				}
-				m := findContextRoot(f)
-				if m == "" {
-					m = filepath.Dir(f)
-				}
-				if !seen[m] {
-					seen[m] = true
-					inputs = append(inputs, m)
-				}
-			}
-		}
-		return SandboxExec(sb, os.Stdout, os.Stderr, "diff-batch", []string{cleanPairs}, inputs...)
+		return SandboxExec(sb, os.Stdout, os.Stderr, "diff-batch", []string{cleanPairs}, batchMounts(cleanPairs, pairs)...)
 	}
 	return RunDiffBatchLogic(fsys, os.Stdout, cleanPairs)
+}
+
+// batchMounts lists what a sandboxed batch needs to see: the pairs file and
+// the context root (see findContextRoot) of every input, or its directory
+// when it has none, each once, rather than each file.
+func batchMounts(pairsFile string, pairs []api.DiffPair) []string {
+	inputs := []string{pairsFile}
+	seen := map[string]bool{}
+	for _, p := range pairs {
+		for _, f := range []string{p.Old, p.New} {
+			if f == "" || f == os.DevNull {
+				continue
+			}
+			m := findContextRoot(f)
+			if m == "" {
+				m = filepath.Dir(f)
+			}
+			if !seen[m] {
+				seen[m] = true
+				inputs = append(inputs, m)
+			}
+		}
+	}
+	return inputs
 }
 
 // RunDiffBatchLogic prints the JSON array of api.DiffBatch results for the

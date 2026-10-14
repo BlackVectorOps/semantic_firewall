@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -95,5 +96,34 @@ func TestRunDiffBatchLogic(t *testing.T) {
 	}
 	if len(out) != 2 || out[0].ErrorMessage == "" || out[1].ErrorMessage != "" || status(out[1], "A") != models.StatusModified {
 		t.Errorf("results = %+v; want the failed pair's error, then A modified", out)
+	}
+}
+
+// A sandboxed batch mounts the pairs file and each input's context root
+// once; inputs without a root mount their directory.
+func TestBatchMounts(t *testing.T) {
+	dir := t.TempDir()
+	for name, src := range map[string]string{
+		"m/go.mod":      "module example.com/m\n",
+		"m/p/a.go":      "package p\n",
+		"m/q/b.go":      "package q\n",
+		"loose/main.go": "package main\n",
+	} {
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, b, loose := filepath.Join(dir, "m/p/a.go"), filepath.Join(dir, "m/q/b.go"), filepath.Join(dir, "loose/main.go")
+	if root := findContextRoot(loose); root != "" {
+		t.Skipf("%s has a context root %s above the temp dir", loose, root)
+	}
+	got := batchMounts("pairs", []api.DiffPair{{Old: a, New: b}, {Old: "", New: loose}, {Old: os.DevNull, New: a}})
+	want := []string{"pairs", filepath.Join(dir, "m"), filepath.Join(dir, "loose")}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("batchMounts = %v; want %v", got, want)
 	}
 }
