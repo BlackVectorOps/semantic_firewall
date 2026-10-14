@@ -690,6 +690,14 @@ func main() {}`, 0},
 import "net/http"
 func F(w http.ResponseWriter, e *http.MaxBytesError, ok bool) { if !ok { _ = e.Error(); return }; w.Write(nil) }
 func main() {}`, 0},
+		{"a side that branches again is not followed", `package main
+import "errors"
+func F(ok, z bool) error {
+	if ok { return nil }
+	if z { return errors.New("z") }
+	return nil
+}
+func main() {}`, 1},
 		{"a side that never ends is no error exit", `package main
 func F(ok bool) error { if !ok { for {} }; return nil }
 func main() {}`, 0},
