@@ -322,7 +322,7 @@ func TestDepsDiff_NewPackageOfUnchangedModule(t *testing.T) {
 	proxy := moduleProxy(t, map[string]map[string]string{
 		"example.com/m@v1.0.0": {
 			"go.mod": "module example.com/m\n\ngo 1.22\n",
-			"a/a.go": "package a\n\nfunc A() int { return 1 }\n",
+			"a/a.go": "package a\n\nimport _ \"unsafe\"\n\n//go:linkname nanotime runtime.nanotime\nfunc nanotime() int64\n\nfunc A() int64 { return nanotime() }\n",
 			"b/b.go": "package b\n\nimport \"os/exec\"\n\nfunc init() { exec.Command(\"sh\", \"-c\", \"id\").Run() }\n\nfunc B() {}\n",
 		},
 	})
@@ -339,11 +339,30 @@ func TestDepsDiff_NewPackageOfUnchangedModule(t *testing.T) {
 	if out := depsDiff(t, oldDir, app("\t_ \"example.com/m/a\"\n")); len(out.Modules) != 0 {
 		t.Errorf("same packages: modules = %+v; want none", out.Modules)
 	}
-	m := findModule(t, depsDiff(t, oldDir, app("\t_ \"example.com/m/a\"\n\t_ \"example.com/m/b\"\n")), "example.com/m")
+	out := depsDiff(t, oldDir, app("\t_ \"example.com/m/a\"\n\t_ \"example.com/m/b\"\n"))
+	m := findModule(t, out, "example.com/m")
+	// a's linkname was built before: only b is new.
 	if m.Status != models.ModuleUpdated || m.OldVersion != "v1.0.0" || m.NewVersion != "v1.0.0" ||
 		fmt.Sprint(m.Capabilities) != "[exec]" || len(m.Reach) != 1 || m.Reach[0].Function != "example.com/m/b.init" ||
-		m.RiskScore != 40 || len(m.Packages) != 0 {
+		m.RiskScore != 40 || len(m.Packages) != 0 || len(m.Unanalyzed) != 0 {
 		t.Errorf("module = %+v; want v1.0.0 with b's exec-running init reported, risk 40", m)
+	}
+	if want := (models.DepsDiffSummary{ModulesUpdated: 1, HighRiskChanges: 1}); out.Summary != want {
+		t.Errorf("summary = %+v; want %+v", out.Summary, want)
+	}
+}
+
+// The tree's own module is not a dependency, whatever packages it adds.
+func TestDepsDiff_OwnModule(t *testing.T) {
+	oldDir := appTree(t, "", nil, nil)
+	newDir := appTree(t, "\t_ \"example.com/app/tool\"\n", nil, map[string]string{
+		"app/tool/tool.go": "package tool\n\nimport \"os/exec\"\n\nfunc init() { exec.Command(\"id\").Run() }\n",
+	})
+	if out := depsDiff(t, oldDir, newDir); len(out.Modules) != 0 {
+		t.Errorf("modules = %+v; want none", out.Modules)
+	}
+	if _, err := api.DepsDiff(filepath.Join(t.TempDir(), "missing"), newDir); err == nil || !strings.Contains(err.Error(), "old tree") {
+		t.Errorf("a missing tree: err = %v; want an old-tree load error", err)
 	}
 }
 
@@ -358,4 +377,188 @@ func TestDepsDiff_ReplacedModuleVersions(t *testing.T) {
 	if m := findModule(t, depsDiff(t, without, with), "example.com/x"); m.Status != models.ModuleAdded || m.NewVersion != "replace ../lib/x" {
 		t.Errorf("added module = %+v; want new version \"replace ../lib/x\"", m)
 	}
+}
+
+// mkfifo makes a named pipe, or skips the test where it cannot.
+func mkfifo(t *testing.T, path string) {
+	t.Helper()
+	if out, err := exec.Command("mkfifo", path).CombinedOutput(); err != nil {
+		t.Skipf("mkfifo: %v %s", err, out)
+	}
+}
+
+// pe returns a minimal PE header: "MZ", e_lfanew at 0x3c pointing at off,
+// and sig at off, padded to size.
+func pe(off int, sig string, size int) string {
+	b := make([]byte, max(size, off+len(sig)))
+	copy(b, "MZ")
+	b[0x3c] = byte(off)
+	copy(b[off:], sig)
+	return string(b)
+}
+
+// The inventory reads only regular files, tells machine code by its
+// header, skips version-control directories, and treats an excluded Go
+// file that does not parse as excluded, not as cgo.
+func TestDepsDiff_InventoryEdges(t *testing.T) {
+	deps := map[string]string{"example.com/native": "native"}
+	imports := "\t_ \"example.com/native/n\"\n\t_ \"example.com/native/c\"\n"
+	other := "windows"
+	if runtime.GOOS == "windows" {
+		other = "linux"
+	}
+	tree := func(v string) string {
+		return appTree(t, imports, deps, map[string]string{
+			"lib/native/n/n.go":                    "package n\n\nfunc N() int { return 1 }\n",
+			"lib/native/n/bad.go":                  "//go:build ignore\n\npackage n\n\nfunc ( // " + v + "\n",
+			"lib/native/n/n_" + other + "_test.go": "package n\n\nimport _ \"unsafe\"\n\n//go:linkname nt runtime.nanotime\nfunc nt() int64 // " + v + "\n",
+			"lib/native/c/c.go":                    "package c\n\n// #cgo LDFLAGS: -L${SRCDIR}/../objs\nimport \"C\"\n",
+			"lib/native/c/plain.go":                "package c\n\nfunc C() int { return 1 }\n",
+			"lib/native/objs/pe":                   pe(0x40, "PE\x00\x00"+v, 0x48),
+			"lib/native/objs/pe64":                 pe(0x30, "PE\x00\x00"+v, 0x40), // exactly the header's length
+			"lib/native/objs/badsig":               pe(0x40, "XX\x00\x00"+v, 0x48),
+			"lib/native/objs/far":                  pe(0x40, "", 0x40)[:0x3c] + "\xff\xff\x00\x00" + v,
+			"lib/native/objs/mzshort":              "MZ" + v,
+			"lib/native/.git/HEAD":                 "ref: " + v,
+		})
+	}
+	oldDir, newDir := tree("v1"), tree("v2")
+	pkg := filepath.Join(newDir, "..", "lib", "native", "n")
+	if err := os.Symlink("gone.bin", filepath.Join(pkg, "gone.syso")); err != nil {
+		t.Skip(err)
+	}
+	// go list -compiled itself blocks on a pipe named .go, .s, .h or .syso;
+	// neither git nor a module zip can hold one. It leaves .o files alone.
+	mkfifo(t, filepath.Join(pkg, "pipe.o"))
+	mkfifo(t, filepath.Join(newDir, "..", "lib", "native", "objs", "pipe"))
+
+	got := unanalyzedKeys(findModule(t, depsDiff(t, oldDir, newDir), "example.com/native"))
+	want := map[string]int{
+		"excluded-go modified n/bad.go": 5,
+		"object modified objs/pe":       20,
+		"object modified objs/pe64":     20,
+		"other modified objs/badsig":    5,
+		"other modified objs/far":       5,
+		"other modified objs/mzshort":   5,
+	}
+	for k, risk := range want {
+		if r, ok := got[k]; !ok || r != risk {
+			t.Errorf("%s: risk %d, reported %v; want risk %d", k, r, ok, risk)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("unanalyzed = %v; want exactly %v (no pipes, dangling links, .git, tests or compiled files)", got, want)
+	}
+}
+
+// Every file an assembly file includes counts, however the directive is
+// spaced, by a relative or absolute path, through include cycles, and
+// never a pipe.
+func TestDepsDiff_AssemblyIncludes(t *testing.T) {
+	deps := map[string]string{"example.com/asm": "asm"}
+	imports := "\t_ \"example.com/asm/p\"\n"
+	tree := func(v string) string {
+		return appTree(t, imports, deps, map[string]string{
+			"lib/asm/p/p.go":       "package p\n\n// Add is implemented in assembly.\nfunc Add(a, b int64) int64\n",
+			"lib/asm/impl/a.inc":   "#include \"b.inc\"\n// " + v + "\n",
+			"lib/asm/impl/b.inc":   "#include \"a.inc\"\n// " + v + "\n",
+			"lib/asm/impl/sp.inc":  "// " + v + "\n",
+			"lib/asm/impl/abs.inc": "// " + v + "\n",
+			"lib/asm/impl/not.inc": "// " + v + "\n",
+		})
+	}
+	oldDir, newDir := tree("v1"), tree("v2")
+	for _, dir := range []string{oldDir, newDir} {
+		impl, err := filepath.Abs(filepath.Join(dir, "..", "lib", "asm", "impl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mkfifo(t, filepath.Join(impl, "pipe.inc"))
+		src := "#include \"textflag.h\"\n#include \"../impl/a.inc\"\n  #  include \"../impl/sp.inc\"\n" +
+			"#include \"" + filepath.ToSlash(filepath.Join(impl, "abs.inc")) + "\"\n#include \"../impl/pipe.inc\"\n" +
+			"// #include \"../impl/not.inc\" is a comment\nDATA ·s+0(SB)/8, $\"../impl/not.inc\"\n"
+		writeFilesIn(t, filepath.Join(dir, "..", "lib", "asm", "p"), map[string]string{"add_amd64.s": src})
+	}
+	got := unanalyzedKeys(findModule(t, depsDiff(t, oldDir, newDir), "example.com/asm"))
+	want := map[string]int{
+		"assembly modified p/add_amd64.s": 5, // it names each tree's own absolute path
+		"assembly modified impl/a.inc":    5,
+		"assembly modified impl/b.inc":    5,
+		"assembly modified impl/sp.inc":   5,
+		"assembly modified impl/abs.inc":  5,
+	}
+	for k, risk := range want {
+		if r, ok := got[k]; !ok || r != risk {
+			t.Errorf("%s: risk %d, reported %v; want risk %d", k, r, ok, risk)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("unanalyzed = %v; want exactly %v", got, want)
+	}
+}
+
+// Reach is shared around a call cycle whatever function the walk enters
+// it by; an initializer's reach stops at other packages' initializers
+// even when theirs was computed first; methods outside the exported API
+// and types with no single body are no entry points; an added module's
+// exported functions show in its capabilities, not its reach.
+func TestDepsDiff_ReachGraph(t *testing.T) {
+	deps := map[string]string{"example.com/lib": "lib"}
+	t.Run("a call cycle", func(t *testing.T) {
+		src := func(dial string) string {
+			return "package g\n\nimport \"net\"\n\nfunc A() { a(3) }\n\nfunc C() { c(3) }\n\n" +
+				"func a(n int) { b(n); " + dial + " }\n\nfunc b(n int) { c(n) }\n\nfunc c(n int) { if n > 0 { a(n - 1) } }\n\nvar _ = net.Dial\n"
+		}
+		imports := "\t_ \"example.com/lib/g\"\n"
+		m := findModule(t, depsDiff(t,
+			appTree(t, imports, deps, map[string]string{"lib/lib/g/g.go": src("")}),
+			appTree(t, imports, deps, map[string]string{"lib/lib/g/g.go": src("net.Dial(\"tcp\", \"x:1\")")})), "example.com/lib")
+		var names []string
+		for _, r := range m.Reach {
+			names = append(names, r.Function)
+		}
+		if fmt.Sprint(names) != "[example.com/lib/g.A example.com/lib/g.C]" {
+			t.Errorf("reach = %v; want A and C", names)
+		}
+	})
+	t.Run("an initializer computed first", func(t *testing.T) {
+		imports := "\t_ \"example.com/lib/a\"\n\t_ \"example.com/lib/b\"\n"
+		dialer := "package a\n\nimport \"net\"\n\nvar Dial = net.Dial\n\nconst Name = \"tcp\"\n"
+		m := findModule(t, depsDiff(t,
+			appTree(t, imports, deps, map[string]string{
+				"lib/lib/a/a.go": dialer,
+				"lib/lib/b/b.go": "package b\n\nfunc Network() string { return \"tcp\" }\n",
+			}),
+			appTree(t, imports, deps, map[string]string{
+				"lib/lib/a/a.go": dialer,
+				"lib/lib/b/b.go": "package b\n\nimport \"example.com/lib/a\"\n\nfunc Network() string { return a.Name }\n",
+			})), "example.com/lib")
+		if len(m.Reach) != 0 {
+			t.Errorf("reach = %+v; want none", m.Reach)
+		}
+	})
+	t.Run("what is no entry point", func(t *testing.T) {
+		imports := "\t_ \"example.com/lib/d\"\n"
+		src := func(body string) string {
+			return "package d\n\nimport (\"bytes\";\"net\")\n\n" +
+				"type Client struct{}\n\nfunc (c *Client) send() { " + body + " }\n\nfunc (c *Client) Close() {}\n\n" +
+				"type Doer interface{ Do() }\n\ntype Box[T any] struct{ v T }\n\nfunc (b Box[T]) Get() T { " + body + " return b.v }\n\n" +
+				"type Handler = func()\n\ntype Buf = bytes.Buffer\n\nvar _ = net.Dial\n"
+		}
+		m := findModule(t, depsDiff(t,
+			appTree(t, imports, deps, map[string]string{"lib/lib/d/d.go": src("")}),
+			appTree(t, imports, deps, map[string]string{"lib/lib/d/d.go": src("net.Dial(\"tcp\", \"x:1\");")})), "example.com/lib")
+		if len(m.Reach) != 0 {
+			t.Errorf("reach = %+v; want none", m.Reach)
+		}
+	})
+	t.Run("an added module's exported functions", func(t *testing.T) {
+		m := findModule(t, depsDiff(t, appTree(t, "", nil, nil),
+			appTree(t, "\t_ \"example.com/lib/p\"\n", deps, map[string]string{
+				"lib/lib/p/p.go": "package p\n\nimport \"net\"\n\nfunc Ping() { net.Dial(\"tcp\", \"x:1\") }\n",
+			})), "example.com/lib")
+		if fmt.Sprint(m.Capabilities) != "[network]" || len(m.Reach) != 0 || m.RiskScore != 0 {
+			t.Errorf("module = %+v; want network capability, no reach entry, risk 0", m)
+		}
+	})
 }

@@ -14,6 +14,8 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -66,20 +68,14 @@ func DepsDiff(oldDir, newDir string) (*models.DepsDiffOutput, error) {
 	}
 
 	out := &models.DepsDiffOutput{OldDir: oldDir, NewDir: newDir, Modules: []models.ModuleDiff{}}
-	paths := make(map[string]bool)
+	paths := make(map[string]struct{})
 	for p := range oldSide.modules {
-		paths[p] = true
+		paths[p] = struct{}{}
 	}
 	for p := range newSide.modules {
-		paths[p] = true
+		paths[p] = struct{}{}
 	}
-	sorted := make([]string, 0, len(paths))
-	for p := range paths {
-		sorted = append(sorted, p)
-	}
-	sort.Strings(sorted)
-
-	for _, path := range sorted {
+	for _, path := range slices.Sorted(maps.Keys(paths)) {
 		om, nm := oldSide.modules[path], newSide.modules[path]
 		var md models.ModuleDiff
 		switch {
@@ -196,15 +192,13 @@ func loadDepsSide(dir string) (*depsSide, error) {
 		thirdParty = append(thirdParty, p)
 		m := side.modules[p.Module.Path]
 		if m == nil {
+			// Module.Dir is the replacement's directory for a replaced module.
 			m = &depModule{path: p.Module.Path, identity: p.Module.Version, dir: p.Module.Dir}
 			if r := p.Module.Replace; r != nil {
 				if r.Version != "" {
 					m.identity = r.Path + "@" + r.Version
 				} else {
 					m.identity, m.localReplace = "replace "+r.Path, true
-				}
-				if r.Dir != "" {
-					m.dir = r.Dir
 				}
 			}
 			if vendored {
@@ -214,9 +208,6 @@ func loadDepsSide(dir string) (*depsSide, error) {
 		}
 		m.pkgs = append(m.pkgs, p)
 	})
-	for _, m := range side.modules {
-		sort.Slice(m.pkgs, func(i, j int) bool { return m.pkgs[i].PkgPath < m.pkgs[j].PkgPath })
-	}
 
 	var buildErr error
 	func() {
@@ -227,9 +218,7 @@ func loadDepsSide(dir string) (*depsSide, error) {
 		}()
 		side.prog, _ = ssautil.AllPackages(roots, ssa.InstantiateGenerics)
 		for _, p := range thirdParty {
-			if sp := side.prog.Package(p.Types); sp != nil {
-				sp.Build()
-			}
+			side.prog.Package(p.Types).Build()
 		}
 	}()
 	if buildErr != nil {
@@ -297,13 +286,13 @@ func diffModule(oldSide, newSide *depsSide, om, nm *depModule) models.ModuleDiff
 // used the module, did not have.
 func (s *depsSide) describe(m *depModule, pkgs []*packages.Package, status string, before *depModule) models.ModuleDiff {
 	md := models.ModuleDiff{Path: m.path, Status: status, NewVersion: m.identity}
-	classes := make(map[string]bool)
+	classes := make(map[string]struct{})
 	entries := s.entryPoints(pkgs)
 	for _, name := range sortedEntryNames(entries) {
 		fn := entries[name]
 		r := s.reach(fn)
 		for _, class := range r {
-			classes[class] = true
+			classes[class] = struct{}{}
 		}
 		if isPackageInit(fn) {
 			if rc, ok := reachChange(name, nil, r, true); ok {
@@ -312,10 +301,7 @@ func (s *depsSide) describe(m *depModule, pkgs []*packages.Package, status strin
 			}
 		}
 	}
-	for c := range classes {
-		md.Capabilities = append(md.Capabilities, c)
-	}
-	sort.Strings(md.Capabilities)
+	md.Capabilities = slices.Sorted(maps.Keys(classes))
 	var old map[string]string
 	if before != nil {
 		old = inventory(before)
@@ -379,11 +365,7 @@ func (s *depsSide) fingerprintPackage(p *packages.Package) []diff.FingerprintRes
 	if p == nil {
 		return nil
 	}
-	sp := s.prog.Package(p.Types)
-	if sp == nil {
-		return nil
-	}
-	fns := diff.PackageFunctions(s.prog, sp)
+	fns := diff.PackageFunctions(s.prog, s.prog.Package(p.Types))
 	out := make([]diff.FingerprintResult, 0, len(fns))
 	for _, fn := range fns {
 		out = append(out, diff.GenerateFingerprint(fn, ir.DefaultLiteralPolicy, false))
@@ -399,11 +381,7 @@ func (s *depsSide) fingerprintPackage(p *packages.Package) []diff.FingerprintRes
 func (s *depsSide) entryPoints(pkgs []*packages.Package) map[string]*ssa.Function {
 	out := make(map[string]*ssa.Function)
 	for _, p := range pkgs {
-		sp := s.prog.Package(p.Types)
-		if sp == nil {
-			continue
-		}
-		for _, fn := range diff.PackageFunctions(s.prog, sp) {
+		for _, fn := range diff.PackageFunctions(s.prog, s.prog.Package(p.Types)) {
 			if fn.Parent() != nil || fn.Signature.Recv() != nil {
 				continue
 			}
@@ -417,8 +395,9 @@ func (s *depsSide) entryPoints(pkgs []*packages.Package) map[string]*ssa.Functio
 			if !ok || !tn.Exported() {
 				continue
 			}
+			// An alias of another package's type adds no code of this one.
 			named, ok := types.Unalias(tn.Type()).(*types.Named)
-			if !ok || named.Obj().Pkg() != p.Types || named.TypeParams().Len() > 0 || types.IsInterface(named) {
+			if !ok || named.Obj().Pkg() != p.Types {
 				continue
 			}
 			values := s.prog.MethodSets.MethodSet(named)
@@ -431,6 +410,7 @@ func (s *depsSide) entryPoints(pkgs []*packages.Package) map[string]*ssa.Functio
 				if v := values.Lookup(sel.Obj().Pkg(), sel.Obj().Name()); v != nil {
 					sel, recv = v, name
 				}
+				// Interface and generic methods have no single body.
 				if fn := s.prog.MethodValue(sel); fn != nil {
 					out[p.PkgPath+".("+recv+")."+sel.Obj().Name()] = fn
 				}
@@ -577,29 +557,24 @@ func reachChange(name string, oldReach, newReach map[string]string, isInit bool)
 	for _, c := range oldReach {
 		oldClasses[c] = true
 	}
-	added := make(map[string]bool)
-	var targets []string
+	added := make(map[string]struct{})
+	targets := make(map[string]struct{})
 	for key, class := range newReach {
 		if !oldClasses[class] {
-			added[class] = true
-			targets = append(targets, key)
+			added[class] = struct{}{}
+			targets[key] = struct{}{}
 		}
 	}
 	if len(added) == 0 {
 		return models.ReachChange{}, false
 	}
-	rc := models.ReachChange{Function: name, Targets: targets}
-	for c := range added {
-		rc.Added = append(rc.Added, c)
-		if r := capabilityRisk[c]; r > rc.RiskScore {
-			rc.RiskScore = r
-		}
+	rc := models.ReachChange{Function: name, Added: slices.Sorted(maps.Keys(added)), Targets: slices.Sorted(maps.Keys(targets))}
+	for _, c := range rc.Added {
+		rc.RiskScore = max(rc.RiskScore, capabilityRisk[c])
 	}
 	if isInit {
 		rc.RiskScore += riskInitReach
 	}
-	sort.Strings(rc.Added)
-	sort.Strings(rc.Targets)
 	return rc, true
 }
 
@@ -644,15 +619,12 @@ func inventory(m *depModule) map[string]string {
 		for _, f := range p.CompiledGoFiles {
 			compiled[filepath.Clean(f)] = true
 		}
-		dirs := make(map[string]bool)
+		dirs := make(map[string]struct{})
 		for _, f := range append(append(append([]string{}, p.GoFiles...), p.OtherFiles...), p.IgnoredFiles...) {
-			dirs[filepath.Dir(f)] = true
+			dirs[filepath.Dir(f)] = struct{}{}
 		}
 		for dir := range dirs {
-			entries, err := os.ReadDir(dir)
-			if err != nil {
-				continue
-			}
+			entries, _ := os.ReadDir(dir) // what could be read
 			for _, e := range entries {
 				f := filepath.Join(dir, e.Name())
 				if compiled[f] || !isRegular(f, e) {
@@ -713,23 +685,18 @@ func isRegular(f string, e fs.DirEntry) bool {
 	if e.Type().IsRegular() {
 		return true
 	}
-	if e.Type()&fs.ModeSymlink == 0 {
-		return false
-	}
-	info, err := os.Stat(f)
+	info, err := os.Stat(f) // follows a symbolic link
 	return err == nil && info.Mode().IsRegular()
 }
 
-// hashFile returns the SHA-256 of a regular file, read as a stream.
+// hashFile returns the SHA-256 of a file, read as a stream. Callers pass
+// regular files only: opening a FIFO would block.
 func hashFile(f string) (string, bool) {
 	file, err := os.Open(f)
 	if err != nil {
 		return "", false
 	}
 	defer file.Close()
-	if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() {
-		return "", false
-	}
 	h := sha256.New()
 	if _, err := io.Copy(h, file); err != nil {
 		return "", false
@@ -753,9 +720,9 @@ func isMachineCode(f string) bool {
 		return false
 	}
 	defer file.Close()
-	head := make([]byte, 0x40)
-	n, _ := io.ReadFull(file, head)
-	head = head[:n]
+	buf := make([]byte, 0x40)
+	n, _ := io.ReadFull(file, buf)
+	head := buf[:n]
 	for _, magic := range machineCodeMagic {
 		if bytes.HasPrefix(head, magic) {
 			return true
@@ -771,38 +738,26 @@ func isMachineCode(f string) bool {
 	return err == nil && string(sig) == "PE\x00\x00"
 }
 
+// includeDirective matches the quoted #include lines of assembly, which
+// the assembler's preprocessor reads like C's: "#include", "# include".
+var includeDirective = regexp.MustCompile(`(?m)^[ \t]*#[ \t]*include[ \t]*"([^"\n]+)"`)
+
 // hashIncludes hashes, as assembly, every file an assembly file includes
 // with #include "file", directly or through other included files. The
 // assembler looks for the file next to the including one first; one found
-// only on its search path (textflag.h) is not the module's.
+// only on its search path (textflag.h) is not the module's. Only regular
+// files are read.
 func hashIncludes(f string, seen map[string]bool, hash func(kind, f string)) {
-	data, err := os.ReadFile(f)
-	if err != nil {
-		return
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "#include")
-		if !ok {
-			continue
-		}
-		name, ok := strings.CutPrefix(strings.TrimSpace(rest), `"`)
-		if !ok {
-			continue
-		}
-		name, _, ok = strings.Cut(name, `"`)
-		if !ok || name == "" {
-			continue
-		}
-		target := name
+	data, _ := os.ReadFile(f)
+	for _, m := range includeDirective.FindAllSubmatch(data, -1) {
+		target := string(m[1])
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(f), target)
 		}
-		target = filepath.Clean(target)
 		if seen[target] {
 			continue
 		}
-		info, err := os.Stat(target)
-		if err != nil || !info.Mode().IsRegular() {
+		if info, err := os.Stat(target); err != nil || !info.Mode().IsRegular() {
 			continue
 		}
 		seen[target] = true
@@ -887,19 +842,14 @@ func packageLinknames(p *packages.Package) []string {
 // added or removed linkname directives.
 func diffInventories(oldInv, newInv map[string]string) []models.FileChange {
 	var out []models.FileChange
-	keys := make(map[string]bool)
+	keys := make(map[string]struct{})
 	for k := range oldInv {
-		keys[k] = true
+		keys[k] = struct{}{}
 	}
 	for k := range newInv {
-		keys[k] = true
+		keys[k] = struct{}{}
 	}
-	sorted := make([]string, 0, len(keys))
-	for k := range keys {
-		sorted = append(sorted, k)
-	}
-	sort.Strings(sorted)
-	for _, k := range sorted {
+	for _, k := range slices.Sorted(maps.Keys(keys)) {
 		ov, inOld := oldInv[k]
 		nv, inNew := newInv[k]
 		change := ""

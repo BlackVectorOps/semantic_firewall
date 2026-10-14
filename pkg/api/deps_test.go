@@ -3,6 +3,7 @@ package api_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/api"
@@ -135,6 +136,21 @@ func init() { go beacon("init") }
 	}
 	if beacon == nil || beacon.Status != models.StatusAdded || beacon.RiskScore < models.RiskScoreHigh {
 		t.Errorf("beacon = %+v; want added, high risk", beacon)
+	}
+	// A new goroutine in a dependency is labelled, not charged: what it
+	// runs is scored through reach.
+	for _, p := range m.Packages {
+		for _, f := range p.Functions {
+			if f.Function == "normalize" && (f.RiskScore >= models.RiskScoreHigh || !strings.Contains(f.TopologyDelta, models.TopoDeltaGoroutine)) {
+				t.Errorf("normalize = %+v; want the goroutine labelled and not charged", f)
+			}
+		}
+	}
+	// A compiled file is analyzed, not listed as unanalyzed.
+	for _, fc := range m.Unanalyzed {
+		if strings.HasSuffix(fc.File, "codec.go") {
+			t.Errorf("compiled codec.go listed as %+v", fc)
+		}
 	}
 	if out.Summary.ModulesUpdated != 1 || out.Summary.HighRiskChanges < 4 {
 		t.Errorf("summary = %+v; want 1 updated module, at least 4 high-risk changes", out.Summary)
