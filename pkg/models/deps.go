@@ -41,9 +41,9 @@ type ModuleDiff struct {
 	Reach []ReachChange `json:"reach,omitempty"`
 
 	// Unanalyzed lists added, modified and removed files the SSA analysis
-	// cannot see: assembly, C and other non-Go sources, .syso objects, cgo
-	// and build-constraint-excluded Go files, embedded files, and
-	// //go:linkname directives.
+	// cannot see: assembly, C and other non-Go sources, .syso and other
+	// object files, cgo and build-constraint-excluded Go files, embedded
+	// files, and //go:linkname directives.
 	Unanalyzed []FileChange `json:"unanalyzed,omitempty"`
 
 	// Capabilities, for an added module, lists the capability classes its

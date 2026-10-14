@@ -299,9 +299,9 @@ func withoutModuleTargets(t *topology.FunctionTopology, mod string) *topology.Fu
 // "golang.org/x/sys/unix" for "golang.org/x/sys/unix.Syscall6" and for
 // "(golang.org/x/sys/unix.Timespec).Unix".
 func targetPackage(key string) string {
-	if strings.HasPrefix(key, "(") {
-		if end := strings.Index(key, ")."); end > 0 {
-			key = key[1:end]
+	if rest, ok := strings.CutPrefix(key, "("); ok {
+		if recv, _, found := strings.Cut(rest, ")."); found {
+			key = recv
 		}
 	}
 	if i := strings.LastIndexByte(key, '.'); i > 0 {

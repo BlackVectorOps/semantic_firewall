@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,9 +25,9 @@ import (
 )
 
 // Risk charged for changes to code the SSA analysis cannot see. A new or
-// changed .syso object links precompiled machine code into the binary, and a
-// new //go:linkname directive reaches into another package's internals; both
-// are high-risk. Other unanalyzed changes are reported below the threshold.
+// changed .syso or other object file links precompiled machine code into the
+// binary, and a new //go:linkname directive reaches into another package's
+// internals; both are high-risk. Other unanalyzed changes are reported below the threshold.
 const (
 	riskUnanalyzedSyso     = 20
 	riskUnanalyzedLinkname = models.RiskScoreHigh
@@ -280,7 +281,7 @@ func (s *depsSide) describeAdded(m *depModule) models.ModuleDiff {
 	}
 	sort.Strings(md.Capabilities)
 	for _, fc := range diffInventories(nil, inventory(m)) {
-		if fc.Kind == "syso" || fc.Kind == "linkname" {
+		if fc.Kind == "syso" || fc.Kind == "object" || fc.Kind == "linkname" {
 			md.Unanalyzed = append(md.Unanalyzed, fc)
 			noteRisk(&md, fc.RiskScore)
 		}
@@ -486,9 +487,19 @@ func reachChange(name string, oldReach, newReach map[string]string, isInit bool)
 	return rc, true
 }
 
-// inventory hashes the files of a module's built packages that the SSA
-// analysis does not cover, keyed by "<kind>:<module-relative path>", and
-// records each //go:linkname directive in the compiled Go files as
+// inventory hashes the files of a module that its build can use but the SSA
+// analysis does not cover, keyed by "<kind>:<module-relative path>":
+//
+//   - in each built package's directory, every source file other than the
+//     package's compiled Go files and tests: assembly, C and the other
+//     languages cgo compiles, .syso and other object files, and Go files the
+//     build configuration excludes (cgo files among them, as the loader
+//     disables cgo, which also hides the package's C files from go list);
+//   - in a module with a cgo file, native sources, headers and libraries
+//     anywhere in the module, as #include and #cgo directives reach them;
+//   - every file a built package embeds.
+//
+// It also records each //go:linkname directive in the compiled Go files as
 // "linkname:<path>: <directive>".
 func inventory(m *depModule) map[string]string {
 	out := make(map[string]string)
@@ -506,17 +517,33 @@ func inventory(m *depModule) map[string]string {
 		sum := sha256.Sum256(data)
 		out[kind+":"+rel(f)] = fmt.Sprintf("%x", sum[:])
 	}
+	usesCgo := false
 	for _, p := range m.pkgs {
-		for _, f := range p.OtherFiles {
-			hash(otherFileKind(f), f)
+		compiled := make(map[string]bool)
+		for _, f := range p.CompiledGoFiles {
+			compiled[filepath.Clean(f)] = true
 		}
-		for _, f := range p.IgnoredFiles {
-			if strings.HasSuffix(f, ".go") {
-				kind := "excluded-go"
-				if importsC(f) {
-					kind = "cgo"
+		dirs := make(map[string]bool)
+		for _, f := range append(append(append([]string{}, p.GoFiles...), p.OtherFiles...), p.IgnoredFiles...) {
+			dirs[filepath.Dir(f)] = true
+		}
+		for dir := range dirs {
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				f := filepath.Join(dir, e.Name())
+				if !e.Type().IsRegular() || compiled[f] {
+					continue
 				}
-				hash(kind, f)
+				kind := fileKind(f)
+				if kind == "cgo" {
+					usesCgo = true
+				}
+				if kind != "" {
+					hash(kind, f)
+				}
 			}
 		}
 		for _, f := range p.EmbedFiles {
@@ -528,20 +555,44 @@ func inventory(m *depModule) map[string]string {
 			}
 		}
 	}
+	if usesCgo {
+		filepath.WalkDir(m.dir, func(f string, e fs.DirEntry, err error) error {
+			if err == nil && e.Type().IsRegular() {
+				if kind := fileKind(f); kind != "" && kind != "cgo" && kind != "excluded-go" {
+					hash(kind, f)
+				}
+			}
+			return nil
+		})
+	}
 	return out
 }
 
-func otherFileKind(f string) string {
-	switch strings.ToLower(filepath.Ext(f)) {
-	case ".s":
+// fileKind classifies a file the build can use without the SSA analysis
+// seeing it, or returns "" for a compiled-or-irrelevant file: a test, or
+// one that is neither source nor object code.
+func fileKind(f string) string {
+	name := filepath.Base(f)
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".go":
+		switch {
+		case strings.HasSuffix(name, "_test.go"):
+			return ""
+		case importsC(f):
+			return "cgo"
+		}
+		return "excluded-go"
+	case ".s", ".sx":
 		return "assembly"
 	case ".syso":
 		return "syso"
-	case ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".m":
+	case ".a", ".o", ".so", ".dylib", ".dll", ".lib":
+		return "object"
+	case ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".m",
+		".f", ".for", ".f90", ".swig", ".swigcxx":
 		return "c"
-	default:
-		return "other"
 	}
+	return ""
 }
 
 // importsC reports whether a Go file imports "C" (uses cgo).
@@ -609,7 +660,7 @@ func diffInventories(oldInv, newInv map[string]string) []models.FileChange {
 		fc := models.FileChange{File: file, Kind: kind, Change: change}
 		if change != "removed" {
 			switch kind {
-			case "syso":
+			case "syso", "object":
 				fc.RiskScore = riskUnanalyzedSyso
 			case "linkname":
 				fc.RiskScore = riskUnanalyzedLinkname

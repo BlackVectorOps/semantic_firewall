@@ -1,0 +1,494 @@
+package topology_test
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
+	"testing"
+
+	"golang.org/x/tools/go/packages"
+
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/topology"
+)
+
+// topologies compiles each source as its own package of one module, in a
+// single load, and returns the topology of the function F in each. Package
+// paths in call target keys read "testmod", as if each were the only one.
+func topologies(t *testing.T, srcs ...string) []*topology.FunctionTopology {
+	t.Helper()
+	dir := t.TempDir()
+	files := map[string]string{"go.mod": "module testmod\n\ngo 1.23\n"}
+	for i, src := range srcs {
+		files[fmt.Sprintf("c%d/main.go", i)] = src
+	}
+	for name, content := range files {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &packages.Config{
+		Dir:  dir,
+		Mode: packages.LoadAllSyntax,
+		Env:  append(os.Environ(), "GO111MODULE=on", "GOPROXY=off", "CGO_ENABLED=0", "GOFLAGS="),
+	}
+	pkgs, err := packages.Load(cfg, "./...")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packages.PrintErrors(pkgs) > 0 {
+		t.Fatal("compilation errors in test sources")
+	}
+	prog, _, err := ir.BuildSSAFromPackages(pkgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]*topology.FunctionTopology, len(srcs))
+	for _, pkg := range pkgs {
+		var i int
+		if _, err := fmt.Sscanf(pkg.PkgPath, "testmod/c%d", &i); err != nil || i < 0 || i >= len(srcs) {
+			t.Fatalf("unexpected package %s", pkg.PkgPath)
+		}
+		fn := prog.Package(pkg.Types).Func("F")
+		if fn == nil {
+			t.Fatalf("no function F in case %d", i)
+		}
+		tp := topology.ExtractTopology(fn)
+		if tp == nil {
+			t.Fatalf("no topology for F in case %d", i)
+		}
+		out[i] = tp
+		pkgPath := pkg.PkgPath
+		tp.CapabilityGuards = rekey(tp.CapabilityGuards, pkgPath)
+		tp.Checks = rekey(tp.Checks, pkgPath)
+	}
+	for i, tp := range out {
+		if tp == nil {
+			t.Fatalf("case %d was not loaded", i)
+		}
+	}
+	return out
+}
+
+func rekey[V any](m map[string]V, pkgPath string) map[string]V {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]V, len(m))
+	for k, v := range m {
+		out[strings.ReplaceAll(k, pkgPath, "testmod")] = v
+	}
+	return out
+}
+
+// manyBranches returns a function F with n one-armed ifs (two blocks each),
+// optionally one if-else (three blocks), and a final unconditional
+// os.Remove: 1+2n blocks, or 4+2n with the if-else.
+func manyBranches(ifElse bool, n int) string {
+	var b strings.Builder
+	b.WriteString("package main\nimport \"os\"\nfunc F(x int, p string) {\n")
+	if ifElse {
+		b.WriteString("\tif x < 0 { x++ } else { x-- }\n")
+	}
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, "\tif x == %d { x++ }\n", i)
+	}
+	b.WriteString("\tos.Remove(p)\n}\nfunc main() {}\n")
+	return b.String()
+}
+
+func keys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func TestCapabilityGuards(t *testing.T) {
+	cases := []struct {
+		name, src string
+		want      map[string]int
+	}{
+		{"unconditional", `package main
+import "os"
+func F(p string) { os.Remove(p) }
+func main() {}`, map[string]int{"os.Remove": 0}},
+		{"one guard", `package main
+import "os"
+func F(p string, ok bool) {
+	if ok { os.Remove(p) }
+}
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"nested guards: only the innermost is direct", `package main
+import "os"
+func F(p string, a, b bool) {
+	if a {
+		if b { os.Remove(p) }
+	}
+}
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"either of two conditions", `package main
+import "os"
+func F(p string, a, b bool) {
+	if a || b { os.Remove(p) }
+}
+func main() {}`, map[string]int{"os.Remove": 2}},
+		{"early return", `package main
+import ("errors";"os")
+func F(p string, ok bool) error {
+	if !ok { return errors.New("no") }
+	return os.Remove(p)
+}
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"loop condition is not a guard", `package main
+import "os"
+func F(ps []string) { for _, p := range ps { os.Remove(p) } }
+func main() {}`, map[string]int{"os.Remove": 0}},
+		{"guard inside a loop counts", `package main
+import "os"
+func F(ps []string) { for _, p := range ps { if len(p) > 1 { os.Remove(p) } } }
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"panic ends the function", `package main
+import "os"
+func F(p string, ok bool) { if !ok { panic("no") }; os.Remove(p) }
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"log.Fatal ends the function", `package main
+import ("log";"os")
+func F(p string, ok bool) { if !ok { log.Fatal("no") }; os.Remove(p) }
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"os.Exit ends the function", `package main
+import "os"
+func F(p string, ok bool) { if !ok { os.Exit(1) }; os.Remove(p) }
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"Logger.Fatalf ends the function", `package main
+import ("log";"os")
+func F(l *log.Logger, p string, ok bool) { if !ok { l.Fatalf("no") }; os.Remove(p) }
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"runtime.Goexit ends the function", `package main
+import ("os";"runtime")
+func F(p string, ok bool) { if !ok { runtime.Goexit() }; os.Remove(p) }
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"an ordinary call does not end the function", `package main
+import ("fmt";"os")
+func F(p string, ok bool) { if !ok { fmt.Println("no") }; os.Remove(p) }
+func main() {}`, map[string]int{"os.Remove": 0}},
+		{"fewest guards over all references", `package main
+import "os"
+func F(p string, ok bool) {
+	if ok { os.Remove(p) }
+	os.Remove(p + ".tmp")
+}
+func main() {}`, map[string]int{"os.Remove": 0}},
+		{"switch case with two values", `package main
+import "os"
+func F(cmd, p string) {
+	switch cmd {
+	case "a":
+	case "rm", "del": os.Remove(p)
+	}
+}
+func main() {}`, map[string]int{"os.Remove": 2}},
+		{"two targets", `package main
+import ("net";"os")
+func F(p string, ok bool) {
+	net.Dial("tcp", p)
+	if ok { os.Remove(p) }
+}
+func main() {}`, map[string]int{"net.Dial": 0, "os.Remove": 1}},
+	}
+	srcs := make([]string, len(cases))
+	for i, c := range cases {
+		srcs[i] = c.src
+	}
+	srcs = append(srcs,
+		"package main\nfunc F(a int) int { if a > 1 { return 2 }; return 1 }\nfunc main() {}",
+		manyBranches(true, 998), manyBranches(false, 1001))
+	tps := topologies(t, srcs...)
+	for i, c := range cases {
+		tp := tps[i]
+		t.Run(c.name, func(t *testing.T) {
+			got := tp.CapabilityGuards
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("CapabilityGuards = %v; want %v", got, c.want)
+			}
+		})
+	}
+
+	t.Run("no capability, no map", func(t *testing.T) {
+		if g := tps[len(cases)].CapabilityGuards; g != nil {
+			t.Errorf("CapabilityGuards = %v; want nil", g)
+		}
+	})
+	t.Run("block limit", func(t *testing.T) {
+		at, over := tps[len(cases)+1], tps[len(cases)+2]
+		if at.BlockCount != 2000 || over.BlockCount != 2003 {
+			t.Fatalf("fixtures have %d and %d blocks; want 2000 and 2003", at.BlockCount, over.BlockCount)
+		}
+		if want := map[string]int{"os.Remove": 0}; !reflect.DeepEqual(at.CapabilityGuards, want) {
+			t.Errorf("at the limit: CapabilityGuards = %v; want %v", at.CapabilityGuards, want)
+		}
+		if over.CapabilityGuards != nil {
+			t.Errorf("over the limit: CapabilityGuards = %v; want nil", over.CapabilityGuards)
+		}
+	})
+}
+
+func TestChecks(t *testing.T) {
+	cases := []struct {
+		name, src string
+		want      []string
+	}{
+		{"verification primitive", `package main
+import "crypto/hmac"
+func F(a, b []byte) bool { return hmac.Equal(a, b) }
+func main() {}`, []string{"crypto/hmac.Equal"}},
+		{"helper reaching a primitive", `package main
+import "crypto/subtle"
+func same(a, b []byte) bool { return subtle.ConstantTimeCompare(a, b) == 1 }
+func F(a, b []byte) { same(a, b) }
+func main() {}`, []string{"testmod.same"}},
+		{"helper three calls deep", `package main
+import "crypto/hmac"
+func h1(a, b []byte) bool { return h2(a, b) }
+func h2(a, b []byte) bool { return h3(a, b) }
+func h3(a, b []byte) bool { return hmac.Equal(a, b) }
+func F(a, b []byte) { h1(a, b) }
+func main() {}`, []string{"testmod.h1"}},
+		{"helper four calls deep is too far", `package main
+import "crypto/hmac"
+func h1(a, b []byte) bool { return h2(a, b) }
+func h2(a, b []byte) bool { return h3(a, b) }
+func h3(a, b []byte) bool { return h4(a, b) }
+func h4(a, b []byte) bool { return hmac.Equal(a, b) }
+func F(a, b []byte) { h1(a, b) }
+func main() {}`, nil},
+		{"recursive helper terminates", `package main
+func loop(n int) bool { if n == 0 { return false }; return loop(n - 1) }
+func F() { loop(3) }
+func main() {}`, nil},
+		{"verification name deciding a branch", `package main
+func authorize(u string) bool { return u == "admin" }
+func F(u string) int { if !authorize(u) { return 0 }; return 1 }
+func main() {}`, []string{"testmod.authorize"}},
+		{"verification name whose error decides a branch", `package main
+import "errors"
+func validate(u string) error { if u == "" { return errors.New("empty") }; return nil }
+func F(u string) int { if err := validate(u); err != nil { return 0 }; return 1 }
+func main() {}`, []string{"testmod.validate"}},
+		{"verification name returned to the caller", `package main
+func isAdmin(u string) bool { return u == "admin" }
+func F(u string) bool { return isAdmin(u) }
+func main() {}`, []string{"testmod.isAdmin"}},
+		{"verification name with the result unused", `package main
+func authorize(u string) bool { return u == "admin" }
+func F(u string) { authorize(u) }
+func main() {}`, nil},
+		{"other names deciding a branch", `package main
+func checkCache(k string) bool { return len(k) > 3 }
+func F(k string) int { if checkCache(k) { return 1 }; return 0 }
+func main() {}`, nil},
+		{"interface verifier", `package main
+type Verifier interface{ Verify(msg []byte) error }
+func F(v Verifier, m []byte) int { if v.Verify(m) != nil { return 0 }; return 1 }
+func main() {}`, []string{"(testmod.Verifier).Verify"}},
+		{"interface method with another name", `package main
+type Store interface{ Load(k string) error }
+func F(s Store, k string) int { if s.Load(k) != nil { return 0 }; return 1 }
+func main() {}`, nil},
+	}
+	srcs := make([]string, len(cases))
+	for i, c := range cases {
+		srcs[i] = c.src
+	}
+	tps := topologies(t, srcs...)
+	for i, c := range cases {
+		tp := tps[i]
+		t.Run(c.name, func(t *testing.T) {
+			got := keys(tp.Checks)
+			if len(got) == 0 {
+				got = nil
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("Checks = %v; want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestSecuritySettings(t *testing.T) {
+	cases := []struct {
+		name, src    string
+		weak, secure []string
+	}{
+		{"InsecureSkipVerify true", `package main
+import "crypto/tls"
+func F() *tls.Config { return &tls.Config{InsecureSkipVerify: true} }
+func main() {}`, []string{"crypto/tls.Config.InsecureSkipVerify=true"}, nil},
+		{"InsecureSkipVerify false", `package main
+import "crypto/tls"
+func F() *tls.Config { return &tls.Config{InsecureSkipVerify: false} }
+func main() {}`, nil, nil},
+		{"MinVersion and MaxVersion below TLS 1.2", `package main
+import "crypto/tls"
+func F() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS10, MaxVersion: tls.VersionTLS11} }
+func main() {}`, []string{"crypto/tls.Config.MaxVersion=TLS1.1", "crypto/tls.Config.MinVersion=TLS1.0"}, nil},
+		{"SSL 3.0 and an unnamed old version", `package main
+import "crypto/tls"
+func F() (*tls.Config, *tls.Config) { return &tls.Config{MinVersion: 0x0300}, &tls.Config{MinVersion: 0x0299} }
+func main() {}`, []string{"crypto/tls.Config.MinVersion=665", "crypto/tls.Config.MinVersion=SSL3.0"}, nil},
+		{"TLS 1.2 and 1.3", `package main
+import "crypto/tls"
+func F() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS13} }
+func main() {}`, nil, nil},
+		{"client certificates required and verified", `package main
+import "crypto/tls"
+func F() *tls.Config { return &tls.Config{ClientAuth: tls.RequireAndVerifyClientCert} }
+func main() {}`, nil, []string{"crypto/tls.Config.ClientAuth=RequireAndVerifyClientCert"}},
+		{"client certificates requested only", `package main
+import "crypto/tls"
+func F() *tls.Config { return &tls.Config{ClientAuth: tls.RequireAnyClientCert} }
+func main() {}`, nil, nil},
+		{"secure cookie", `package main
+import "net/http"
+func F() *http.Cookie { return &http.Cookie{Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode} }
+func main() {}`, nil, []string{"net/http.Cookie.HttpOnly=true", "net/http.Cookie.Secure=true"}},
+		{"cookie with SameSite=None", `package main
+import "net/http"
+func F() *http.Cookie { return &http.Cookie{Secure: false, SameSite: http.SameSiteNoneMode} }
+func main() {}`, []string{"net/http.Cookie.SameSite=SameSiteNoneMode"}, nil},
+		{"non-constant value", `package main
+import "crypto/tls"
+func F(skip bool) *tls.Config { return &tls.Config{InsecureSkipVerify: skip} }
+func main() {}`, nil, nil},
+		{"same field name on another struct", `package main
+type Config struct{ InsecureSkipVerify bool; Secure bool }
+func F() *Config { return &Config{InsecureSkipVerify: true, Secure: true} }
+func main() {}`, nil, nil},
+		{"assignment after construction", `package main
+import "crypto/tls"
+func F() *tls.Config { c := &tls.Config{}; c.InsecureSkipVerify = true; return c }
+func main() {}`, []string{"crypto/tls.Config.InsecureSkipVerify=true"}, nil},
+	}
+	srcs := make([]string, len(cases))
+	for i, c := range cases {
+		srcs[i] = c.src
+	}
+	tps := topologies(t, srcs...)
+	for i, c := range cases {
+		tp := tps[i]
+		t.Run(c.name, func(t *testing.T) {
+			weak, secure := keys(tp.WeakSettings), keys(tp.SecureSettings)
+			if len(weak) == 0 {
+				weak = nil
+			}
+			if len(secure) == 0 {
+				secure = nil
+			}
+			if !reflect.DeepEqual(weak, c.weak) || !reflect.DeepEqual(secure, c.secure) {
+				t.Errorf("weak %v, secure %v; want %v, %v", weak, secure, c.weak, c.secure)
+			}
+		})
+	}
+}
+
+func TestErrorExits(t *testing.T) {
+	cases := []struct {
+		name, src string
+		want      int
+	}{
+		{"error check returning err", `package main
+import "os"
+func F(p string) error { if _, err := os.Stat(p); err != nil { return err }; return nil }
+func main() {}`, 1},
+		{"nil check written the other way", `package main
+import "os"
+func F(p string) error { _, err := os.Stat(p); if err == nil { return nil }; return err }
+func main() {}`, 1},
+		{"errors.New", `package main
+import "errors"
+func F(ok bool) error { if !ok { return errors.New("no") }; return nil }
+func main() {}`, 1},
+		{"fmt.Errorf", `package main
+import "fmt"
+func F(n int) error { if n < 0 { return fmt.Errorf("bad %d", n) }; return nil }
+func main() {}`, 1},
+		{"errors.Join", `package main
+import "errors"
+func F(a, b error) error { if a != nil { return errors.Join(a, b) }; return nil }
+func main() {}`, 1},
+		{"sentinel error", `package main
+import "errors"
+var ErrNo = errors.New("no")
+func F(ok bool) error { if !ok { return ErrNo }; return nil }
+func main() {}`, 1},
+		{"concrete error type", `package main
+type E struct{}
+func (*E) Error() string { return "e" }
+func F(ok bool) error { if !ok { return &E{} }; return nil }
+func main() {}`, 1},
+		{"panic", `package main
+func F(ok bool) int { if !ok { panic("no") }; return 1 }
+func main() {}`, 1},
+		{"log.Fatal", `package main
+import "log"
+func F(ok bool) int { if !ok { log.Fatal("no") }; return 1 }
+func main() {}`, 1},
+		{"http.Error", `package main
+import "net/http"
+func F(w http.ResponseWriter, ok bool) { if !ok { http.Error(w, "no", 403); return }; w.Write(nil) }
+func main() {}`, 1},
+		{"http.NotFound", `package main
+import "net/http"
+func F(w http.ResponseWriter, r *http.Request, ok bool) { if !ok { http.NotFound(w, r); return }; w.Write(nil) }
+func main() {}`, 1},
+		{"WriteHeader 4xx", `package main
+import "net/http"
+func F(w http.ResponseWriter, ok bool) { if !ok { w.WriteHeader(401); return }; w.Write(nil) }
+func main() {}`, 1},
+		{"WriteHeader 2xx is not a failure", `package main
+import "net/http"
+func F(w http.ResponseWriter, ok bool) { if !ok { w.WriteHeader(204); return }; w.Write(nil) }
+func main() {}`, 0},
+		{"a passed-through result is not a failure", `package main
+import "os"
+func F(p string, ok bool) error { if ok { return os.Remove(p) }; return os.RemoveAll(p) }
+func main() {}`, 0},
+		{"failure on both sides is not a check", `package main
+import "errors"
+func F(ok bool) error { if ok { return errors.New("a") }; return errors.New("b") }
+func main() {}`, 0},
+		{"no error result", `package main
+func F(n int) int { if n > 1 { return 2 }; return 1 }
+func main() {}`, 0},
+		{"two checks", `package main
+import ("errors";"os")
+func F(p string, ok bool) error {
+	if !ok { return errors.New("no") }
+	if _, err := os.Stat(p); err != nil { return err }
+	return nil
+}
+func main() {}`, 2},
+	}
+	srcs := make([]string, len(cases))
+	for i, c := range cases {
+		srcs[i] = c.src
+	}
+	tps := topologies(t, srcs...)
+	for i, c := range cases {
+		tp := tps[i]
+		t.Run(c.name, func(t *testing.T) {
+			if got := tp.ErrorExits; got != c.want {
+				t.Errorf("ErrorExits = %d; want %d", got, c.want)
+			}
+		})
+	}
+}
