@@ -782,6 +782,15 @@ scanner, err := pebbledb.NewPebbleScanner("signatures.db", pebbledb.DefaultPebbl
 └────────────────────────────────────────────────────────────────┘
 ```
 
+### Loading
+
+`sfw diff`, single and batch, loads source with `pkg/diff/loader.go`. It asks `go/packages` for metadata only (`go list`, with the environment above) and type-checks the packages itself:
+- the packages being diffed are parsed with comments and fully type-checked, with the same `types.Config` as `go/packages`;
+- their dependencies are parsed with function bodies removed (`PurgeFuncBodies`, copied from x/tools' gopls), without comments or object resolution, and type-checked without bodies;
+- standard-library packages, and module-cache packages not replaced by a local directory, are type-checked once per process and shared by both trees and all batch groups. The cache key covers the package path and name, type sizes, Go version, file paths and the keys of its imports.
+
+The only output difference from `go/packages` is that a type error inside a dependency's function body is not reported, since bodies are not checked. `pkg/diff` tests compare the two loaders' functions, fingerprints and full topologies on fixtures for modules, tests, overlays, type errors, cgo, build tags, replacements, vendoring, cross-package generics and Go versions, and, with `SFW_PARITY_CORPUS` set, on a corpus of cloned projects. `SFW_LOADER=packages` selects `go/packages`. A module with an import cycle falls back to it. `sfw check`, `scan` and `deps diff` use `go/packages`.
+
 A function with more than 5000 blocks (`MaxFunctionBlocks`) is not canonicalized. Its fingerprint is a SHA-256 over the raw SSA, which is sensitive to renames.
 
 ### Example
@@ -1205,6 +1214,25 @@ func main() {
 	}
 }
 ```
+
+## Development
+
+```bash
+CGO_ENABLED=0 go vet ./...
+CGO_ENABLED=0 go test ./...
+CGO_ENABLED=1 go test -race ./pkg/diff/... ./pkg/api/... ./internal/actiontest/...
+```
+
+`.github/workflows/test.yml` runs these on every pull request. `internal/actiontest` runs the Action's shell steps from `action.yml` against fixture repositories, with an `sfw` built from the tree; it needs `jq` and `bc`.
+
+`tools/mutate` is a mutation tester for the lines a branch changed. It applies one fault at a time (an operator flipped, a condition forced, a statement removed) to the Go files changed since a base commit, runs the tests, and lists every mutant no test caught:
+
+```bash
+go run ./tools/mutate -base origin/main -pkgs ./pkg/analysis/topology -workers 3
+go run ./tools/mutate -base origin/main -list            # mutants per file
+```
+
+`-run` limits the tests run per mutant, `-tests` names the packages whose tests judge it (default: the mutated file's package), `-files` limits the files mutated, and `-retest <output>` reruns only the survivors of an earlier run. A surviving mutant is a missing test, or code no test can observe (a cache, a check that cannot fail); each needs one answer or the other.
 
 ## License
 

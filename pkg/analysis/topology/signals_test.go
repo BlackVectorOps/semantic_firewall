@@ -150,6 +150,22 @@ func F(p string, ok bool) {
 	if ok { os.Remove(p) }
 }
 func main() {}`, map[string]int{"os.Remove": 1}},
+		{"a guard whose branch reaches the call through other blocks", `package main
+import "os"
+func F(p string, ok, z bool) {
+	if ok {
+		if z { println() }
+		os.Remove(p)
+	}
+}
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"a closure calling a capability is not the function's call", `package main
+import "os"
+func F(p string, ok bool) func() {
+	if ok { os.Remove(p) }
+	return func() { os.Remove(p) }
+}
+func main() {}`, map[string]int{"os.Remove": 1}},
 		{"nested guards: only the innermost is direct", `package main
 import "os"
 func F(p string, a, b bool) {
@@ -174,6 +190,19 @@ func main() {}`, map[string]int{"os.Remove": 1}},
 		{"loop condition is not a guard", `package main
 import "os"
 func F(ps []string) { for _, p := range ps { os.Remove(p) } }
+func main() {}`, map[string]int{"os.Remove": 0}},
+		{"a branch counts once when both sides lead to the call", `package main
+import ("log";"os")
+func F(p string, ok, z bool) {
+	if ok { return }
+	log.Fatal("x") // the rest is dead code, but its branch still counts once
+	if z { println() }
+	os.Remove(p)
+}
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"nested loop conditions are not guards", `package main
+import "os"
+func F(pss [][]string) { for _, ps := range pss { for i := 0; i < len(ps); i++ { os.Remove(ps[i]) } } }
 func main() {}`, map[string]int{"os.Remove": 0}},
 		{"guard inside a loop counts", `package main
 import "os"

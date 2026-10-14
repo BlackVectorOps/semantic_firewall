@@ -12,6 +12,11 @@ func TestSplitWords(t *testing.T) {
 		"HTTPServer":       {"http", "server"},
 		"has_role2":        {"has", "role"},
 		"VerifyPKCS1v15":   {"verify", "pkcs", "v"},
+		"parseURL":         {"parse", "url"},
+		"ID":               {"id"},
+		"x":                {"x"},
+		"":                 nil,
+		"__":               nil,
 	}
 	for in, want := range cases {
 		if got := splitWords(in); !reflect.DeepEqual(got, want) {

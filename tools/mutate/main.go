@@ -53,6 +53,7 @@ func main() {
 	only := flag.String("files", "", "regexp: mutate only matching files")
 	testPkgs := flag.String("tests", "", "comma-separated packages whose tests judge each mutant (default: the mutated file's package)")
 	retest := flag.String("retest", "", "output of an earlier run: test only the mutants it reported as SURVIVED")
+	list := flag.Bool("list", false, "print the mutants per file and exit")
 	exclude := flag.String("exclude", `(_test\.go|^tools/|^testdata/|/testdata/|^internal/actiontest/)`, "regexp of files not to mutate")
 	flag.Parse()
 
@@ -79,6 +80,16 @@ func main() {
 		mutants = onlySurvivors(mutants, *retest)
 	}
 	fmt.Printf("%d mutants in %d files\n", len(mutants), len(files))
+	if *list {
+		perFile := map[string]int{}
+		for _, m := range mutants {
+			perFile[m.file]++
+		}
+		for _, f := range files {
+			fmt.Printf("%6d %s\n", perFile[f], f)
+		}
+		return
+	}
 
 	// One copy of the module per worker, so mutants run in parallel without
 	// touching the working tree. The copies go when the run ends or is

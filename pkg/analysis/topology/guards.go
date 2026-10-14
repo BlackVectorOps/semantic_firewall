@@ -28,22 +28,10 @@ func collectCapabilityGuards(fn *ssa.Function, t *FunctionTopology, loops *loop.
 	if len(t.Capabilities) == 0 || len(fn.Blocks) > maxGuardBlocks {
 		return
 	}
-	headers := make(map[*ssa.BasicBlock]bool)
-	var walk func([]*loop.Loop)
-	walk = func(ls []*loop.Loop) {
-		for _, l := range ls {
-			headers[l.Header] = true
-			walk(l.Children)
-		}
-	}
-	if loops != nil {
-		walk(loops.Loops)
-	}
-
-	exits := make(map[*ssa.BasicBlock]bool)
+	var exits []*ssa.BasicBlock
 	for _, b := range fn.Blocks {
 		if len(b.Succs) == 0 || callsNoReturn(b) {
-			exits[b] = true
+			exits = append(exits, b)
 		}
 	}
 
@@ -52,10 +40,10 @@ func collectCapabilityGuards(fn *ssa.Function, t *FunctionTopology, loops *loop.
 		if n, ok := counts[b]; ok {
 			return n
 		}
-		escapes := escapesAvoiding(fn, exits, b)
+		escapes := escapesAvoiding(exits, b)
 		n := 0
 		for _, a := range fn.Blocks {
-			if a == b || len(a.Succs) != 2 || headers[a] || !escapes[a] {
+			if a == b || len(a.Succs) != 2 || loops.LoopMap[a] != nil || !escapes[a] {
 				continue
 			}
 			for _, s := range a.Succs {
@@ -74,13 +62,12 @@ func collectCapabilityGuards(fn *ssa.Function, t *FunctionTopology, loops *loop.
 		for _, instr := range b.Instrs {
 			for _, op := range instr.Operands(nil) {
 				callee, ok := (*op).(*ssa.Function)
-				if !ok || callee.Parent() != nil {
-					continue
-				}
-				pkgPath, recv, name, ok := calleeIdentity(callee)
 				if !ok {
 					continue
 				}
+				// Capabilities holds package-level callees only: the key of
+				// a closure or a package initializer never matches.
+				pkgPath, recv, name, _ := calleeIdentity(callee)
 				key := callTargetKey(pkgPath, recv, name)
 				if _, sensitive := t.Capabilities[key]; !sensitive {
 					continue
@@ -97,10 +84,10 @@ func collectCapabilityGuards(fn *ssa.Function, t *FunctionTopology, loops *loop.
 // escapesAvoiding returns the blocks from which some path reaches an exit
 // without passing through avoid. A block it omits is post-dominated by
 // avoid: every way out of the function runs avoid first.
-func escapesAvoiding(fn *ssa.Function, exits map[*ssa.BasicBlock]bool, avoid *ssa.BasicBlock) map[*ssa.BasicBlock]bool {
+func escapesAvoiding(exits []*ssa.BasicBlock, avoid *ssa.BasicBlock) map[*ssa.BasicBlock]bool {
 	reached := make(map[*ssa.BasicBlock]bool)
 	var queue []*ssa.BasicBlock
-	for b := range exits {
+	for _, b := range exits {
 		if b != avoid {
 			reached[b] = true
 			queue = append(queue, b)
