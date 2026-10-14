@@ -69,7 +69,6 @@ func reachesVerification(fn *ssa.Function, pkg *ssa.Package, depth int, memo map
 	if found, ok := memo[key]; ok {
 		return found
 	}
-	found := false
 	for _, b := range fn.Blocks {
 		for _, instr := range b.Instrs {
 			for _, op := range instr.Operands(nil) {
@@ -77,12 +76,8 @@ func reachesVerification(fn *ssa.Function, pkg *ssa.Package, depth int, memo map
 				if !ok {
 					continue
 				}
-				if pkgPath, recv, name, ok := calleeIdentity(callee); ok && IsVerificationCall(pkgPath, recv, name) {
-					found = true
-				} else if reachesVerification(callee, pkg, depth-1, memo) {
-					found = true
-				}
-				if found {
+				pkgPath, recv, name, _ := calleeIdentity(callee)
+				if IsVerificationCall(pkgPath, recv, name) || reachesVerification(callee, pkg, depth-1, memo) {
 					memo[key] = true
 					return true
 				}
