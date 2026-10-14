@@ -1,7 +1,9 @@
 package topology
 
 import (
+	"go/token"
 	"go/types"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -16,15 +18,19 @@ const maxCheckHelperDepth = 3
 // without being one of the primitives IsVerificationCall lists:
 //   - a static call to a function of the same package whose body, following
 //     static calls within that package up to maxCheckHelperDepth deep, calls
-//     a verification primitive;
+//     a verification primitive, when the call's result decides a branch or
+//     is returned, or the helper has no result (it panics or exits on
+//     failure). The primitives it reaches are recorded too, so moving a
+//     check into a helper does not read as removing it;
 //   - a call, static or through an interface, whose name contains a
 //     verification word (authorize, verify, validate, ...; see
 //     isVerificationName) and whose result decides a branch or is returned.
 //
+// A check whose result nothing decides on has no effect, and is not one.
 // Static calls are keyed like CallTargets; interface calls are keyed by the
 // interface type and method, "(example.com/p.Verifier).Verify".
 func collectCheckHelpers(fn *ssa.Function, t *FunctionTopology) {
-	memo := make(map[reachKey]bool)
+	memo := newReachMemo()
 	for _, b := range fn.Blocks {
 		for _, instr := range b.Instrs {
 			call, ok := instr.(*ssa.Call)
@@ -36,18 +42,53 @@ func collectCheckHelpers(fn *ssa.Function, t *FunctionTopology) {
 				if isVerificationName(m.Name()) && resultDecides(call) {
 					t.Checks["("+types.TypeString(call.Call.Value.Type(), nil)+")."+m.Name()] = true
 				}
-			} else if callee := call.Call.StaticCallee(); callee != nil && callee.Parent() == nil {
-				// A primitive is already recorded under the same key.
-				pkgPath, recv, name, ok := calleeIdentity(callee)
-				if ok && ((isVerificationName(name) && resultDecides(call)) || reachesVerification(callee, fn.Pkg, maxCheckHelperDepth, memo)) {
-					t.Checks[callTargetKey(pkgPath, recv, name)] = true
+				continue
+			}
+			callee := call.Call.StaticCallee()
+			if callee == nil || callee.Parent() != nil {
+				continue
+			}
+			// A primitive is already recorded under the same key.
+			pkgPath, recv, name, ok := calleeIdentity(callee)
+			if !ok {
+				continue
+			}
+			key := callTargetKey(pkgPath, recv, name)
+			decides := resultDecides(call)
+			if decides && isVerificationName(name) && !notChecks[key] {
+				t.Checks[key] = true
+			}
+			if decides || call.Call.Signature().Results().Len() == 0 {
+				if reached := verificationsReached(callee, pkgOf(fn), maxCheckHelperDepth, memo); len(reached) > 0 {
+					t.Checks[key] = true
+					for _, k := range reached {
+						t.Checks[k] = true
+					}
 				}
 			}
 		}
 	}
 }
 
-// reachKey memoizes reachesVerification: the answer depends on the depth
+// notChecks are callees whose names contain a verification word but which
+// classify or inspect a value rather than check a permission:
+// os.IsPermission reads an error, and its documented replacement,
+// errors.Is(err, fs.ErrPermission), contains no such word.
+var notChecks = map[string]bool{
+	"os.IsPermission":         true,
+	"(reflect.Value).IsValid": true,
+}
+
+// pkgOf returns the package of fn, or of the generic function fn
+// instantiates.
+func pkgOf(fn *ssa.Function) *ssa.Package {
+	if fn.Pkg == nil && fn.Origin() != nil {
+		return fn.Origin().Pkg
+	}
+	return fn.Pkg
+}
+
+// reachKey memoizes verificationsReached: the answer depends on the depth
 // left, as a helper reached at the end of a long chain may be within reach
 // when called directly.
 type reachKey struct {
@@ -55,43 +96,86 @@ type reachKey struct {
 	depth int
 }
 
-// reachesVerification reports whether fn, a function of package pkg, calls
-// a verification primitive, directly or through static calls to other
-// functions of pkg, at most depth calls deep. The search never leaves pkg:
-// whether another package's functions have SSA bodies depends on which
-// packages happened to be built, and the result must not. Every recursive
-// call has less depth, so recursion in the code ends the search.
-func reachesVerification(fn *ssa.Function, pkg *ssa.Package, depth int, memo map[reachKey]bool) bool {
-	if depth <= 0 || pkg == nil || fn.Pkg != pkg || len(fn.Blocks) == 0 {
-		return false
+// reachMemo holds what one function's search has learned: the answers
+// verificationsReached gave, and what each body it read references.
+type reachMemo struct {
+	reached map[reachKey][]string
+	bodies  map[*ssa.Function]*bodyRefs
+}
+
+func newReachMemo() *reachMemo {
+	return &reachMemo{reached: make(map[reachKey][]string), bodies: make(map[*ssa.Function]*bodyRefs)}
+}
+
+// bodyRefs is what a function body references, once each: the
+// verification primitives, and the functions of its own package.
+type bodyRefs struct {
+	primitives []string
+	callees    []*ssa.Function
+}
+
+func (m *reachMemo) refs(fn *ssa.Function) *bodyRefs {
+	if r, ok := m.bodies[fn]; ok {
+		return r
 	}
-	key := reachKey{fn, depth}
-	if found, ok := memo[key]; ok {
-		return found
-	}
+	r := &bodyRefs{}
+	pkg := pkgOf(fn)
+	var ops []*ssa.Value
 	for _, b := range fn.Blocks {
 		for _, instr := range b.Instrs {
-			for _, op := range instr.Operands(nil) {
+			ops = instr.Operands(ops[:0])
+			for _, op := range ops {
 				callee, ok := (*op).(*ssa.Function)
 				if !ok {
 					continue
 				}
 				pkgPath, recv, name, _ := calleeIdentity(callee)
-				if IsVerificationCall(pkgPath, recv, name) || reachesVerification(callee, pkg, depth-1, memo) {
-					memo[key] = true
-					return true
+				if IsVerificationCall(pkgPath, recv, name) {
+					if k := callTargetKey(pkgPath, recv, name); !slices.Contains(r.primitives, k) {
+						r.primitives = append(r.primitives, k)
+					}
+				} else if pkgOf(callee) == pkg && len(callee.Blocks) > 0 && !slices.Contains(r.callees, callee) {
+					r.callees = append(r.callees, callee)
 				}
 			}
 		}
 	}
-	memo[key] = false
-	return false
+	m.bodies[fn] = r
+	return r
+}
+
+// verificationsReached returns the keys of the verification primitives fn,
+// a function of package pkg, calls, directly or through static calls to
+// other functions of pkg, at most depth calls deep. The search never leaves
+// pkg: whether another package's functions have SSA bodies depends on which
+// packages happened to be built, and the result must not. Every recursive
+// call has less depth, so recursion in the code ends the search.
+func verificationsReached(fn *ssa.Function, pkg *ssa.Package, depth int, m *reachMemo) []string {
+	if depth <= 0 || pkg == nil || pkgOf(fn) != pkg || len(fn.Blocks) == 0 {
+		return nil
+	}
+	key := reachKey{fn, depth}
+	if reached, ok := m.reached[key]; ok {
+		return reached
+	}
+	r := m.refs(fn)
+	reached := slices.Clone(r.primitives)
+	for _, callee := range r.callees {
+		for _, k := range verificationsReached(callee, pkg, depth-1, m) {
+			if !slices.Contains(reached, k) {
+				reached = append(reached, k)
+			}
+		}
+	}
+	m.reached[key] = reached
+	return reached
 }
 
 // resultDecides reports whether a call's result, possibly through up to
-// four unary or binary operations, conversions, tuple extracts and phis, is
-// the condition of a branch or is returned to the caller (which then
-// decides on it).
+// four unary or binary operations, conversions, tuple extracts, phis and
+// locals, is the condition of a branch or a boolean or error the function
+// returns (its caller then decides on it). Returning any other value, as a
+// getter does, decides nothing.
 func resultDecides(call *ssa.Call) bool {
 	var decides func(v ssa.Value, depth int) bool
 	decides = func(v ssa.Value, depth int) bool {
@@ -101,17 +185,38 @@ func resultDecides(call *ssa.Call) bool {
 		}
 		for _, ref := range *v.Referrers() {
 			switch r := ref.(type) {
-			case *ssa.If, *ssa.Return:
+			case *ssa.If:
 				return true
+			case *ssa.Return:
+				if isBoolOrError(v.Type()) {
+					return true
+				}
 			case *ssa.UnOp, *ssa.BinOp, *ssa.ChangeType, *ssa.Convert, *ssa.Extract, *ssa.Phi:
 				if decides(r.(ssa.Value), depth+1) {
 					return true
+				}
+			case *ssa.Store:
+				// A local the value is stored in, such as the result a
+				// function with a defer returns: follow its loads.
+				if local, ok := r.Addr.(*ssa.Alloc); ok && r.Val == v {
+					for _, use := range *local.Referrers() {
+						if load, ok := use.(*ssa.UnOp); ok && load.Op == token.MUL && decides(load, depth+1) {
+							return true
+						}
+					}
 				}
 			}
 		}
 		return false
 	}
 	return decides(call, 0)
+}
+
+func isBoolOrError(t types.Type) bool {
+	if basic, ok := t.Underlying().(*types.Basic); ok {
+		return basic.Info()&types.IsBoolean != 0
+	}
+	return isErrorType(t)
 }
 
 // verificationWords are word prefixes that mark a function name as a

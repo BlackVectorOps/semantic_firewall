@@ -275,6 +275,64 @@ func F(p string, ok bool) {
 	if ok { os.Remove(p) }
 }
 func main() {}`, map[string]int{"net.Dial": 0, "os.Remove": 1}},
+		{"the first branch of a for {} body is a guard", `package main
+import "os"
+func F(ps []string, ok bool) { i := 0; for { if ok { os.Remove(ps[i]) }; i++; if i >= len(ps) { return } } }
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"a guard in a function that never returns", `package main
+import "os"
+func F(jobs <-chan string, allowed map[string]bool) {
+	for { p := <-jobs; if len(p) == 0 { continue }; if allowed[p] { os.Remove(p) } }
+}
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"a skip in a function that never returns is a guard", `package main
+import "os"
+func F(jobs <-chan string) { for { p := <-jobs; if len(p) == 0 { continue }; os.Remove(p) } }
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"an unguarded call in a function that never returns", `package main
+import "os"
+func F(jobs <-chan string) { for { os.Remove(<-jobs) } }
+func main() {}`, map[string]int{"os.Remove": 0}},
+		{"a loop that never ends behind a guard", `package main
+import "os"
+func F(jobs <-chan string, ok bool) { if !ok { return }; for { os.Remove(<-jobs) } }
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"a constant condition is no guard", `package main
+import "os"
+func F(p string) { if true { os.Remove(p) } }
+func main() {}`, map[string]int{"os.Remove": 0}},
+		{"a constant flag bypasses a guard", `package main
+import "os"
+const bypass = true
+func F(p string, isAdmin bool) { if bypass || isAdmin { os.Remove(p) } }
+func main() {}`, map[string]int{"os.Remove": 0}},
+		{"a constant flag that keeps a guard", `package main
+import "os"
+const strict = true
+func F(p string, isAdmin bool) { if strict && !isAdmin { return }; os.Remove(p) }
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"a call only in dead code", `package main
+import "os"
+func F(p string) { if false { os.Remove(p) } }
+func main() {}`, map[string]int{}},
+		{"the same call on both sides of a branch", `package main
+import "os"
+func F(p string, isAdmin bool) { if isAdmin { os.Remove(p) } else { os.Remove(p) } }
+func main() {}`, map[string]int{"os.Remove": 0}},
+		{"calls under two branches that can both be skipped", `package main
+import "os"
+func F(p string, a, b bool) { if a { os.Remove(p) } else if b { os.Remove(p) } }
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"a helper of the package that always exits", `package main
+import "os"
+func die(msg string) { println(msg); os.Exit(1) }
+func F(p string, ok bool) { if !ok { die("forbidden") }; os.Remove(p) }
+func main() {}`, map[string]int{"os.Remove": 1}},
+		{"a helper of the package that may return", `package main
+import "os"
+func warn(msg string, fatal bool) { if fatal { os.Exit(1) }; println(msg) }
+func F(p string, ok bool) { if !ok { warn("forbidden", true) }; os.Remove(p) }
+func main() {}`, map[string]int{"os.Remove": 0}},
 	}
 	srcs := make([]string, len(cases))
 	for i, c := range cases {
@@ -325,22 +383,22 @@ func main() {}`, []string{"crypto/hmac.Equal"}},
 		{"helper reaching a primitive", `package main
 import "crypto/subtle"
 func same(a, b []byte) bool { return subtle.ConstantTimeCompare(a, b) == 1 }
-func F(a, b []byte) { same(a, b) }
-func main() {}`, []string{"testmod.same"}},
+func F(a, b []byte) bool { return same(a, b) }
+func main() {}`, []string{"testmod.same", "crypto/subtle.ConstantTimeCompare"}},
 		{"helper three calls deep", `package main
 import "crypto/hmac"
 func h1(a, b []byte) bool { return h2(a, b) }
 func h2(a, b []byte) bool { return h3(a, b) }
 func h3(a, b []byte) bool { return hmac.Equal(a, b) }
-func F(a, b []byte) { h1(a, b) }
-func main() {}`, []string{"testmod.h1"}},
+func F(a, b []byte) bool { return h1(a, b) }
+func main() {}`, []string{"testmod.h1", "crypto/hmac.Equal"}},
 		{"helper four calls deep is too far", `package main
 import "crypto/hmac"
 func h1(a, b []byte) bool { return h2(a, b) }
 func h2(a, b []byte) bool { return h3(a, b) }
 func h3(a, b []byte) bool { return h4(a, b) }
 func h4(a, b []byte) bool { return hmac.Equal(a, b) }
-func F(a, b []byte) { h1(a, b) }
+func F(a, b []byte) bool { return h1(a, b) }
 func main() {}`, nil},
 		{"a helper within reach after one out of reach", `package main
 import "crypto/hmac"
@@ -348,34 +406,53 @@ func h1(a, b []byte) bool { return h2(a, b) }
 func h2(a, b []byte) bool { return h3(a, b) }
 func h3(a, b []byte) bool { return h4(a, b) }
 func h4(a, b []byte) bool { return hmac.Equal(a, b) }
-func F(a, b []byte) { h1(a, b); h3(a, b) }
-func main() {}`, []string{"testmod.h3"}},
+func F(a, b []byte) bool { return h1(a, b) && h3(a, b) }
+func main() {}`, []string{"testmod.h3", "crypto/hmac.Equal"}},
 		{"mutually recursive helpers reaching a primitive", `package main
 import "crypto/hmac"
 func even(a, b []byte, n int) bool { if n == 0 { return hmac.Equal(a, b) }; return odd(a, b, n-1) }
 func odd(a, b []byte, n int) bool { return even(a, b, n-1) }
-func F(a, b []byte) { odd(a, b, 3) }
-func main() {}`, []string{"testmod.odd"}},
+func F(a, b []byte) bool { return odd(a, b, 3) }
+func main() {}`, []string{"testmod.odd", "crypto/hmac.Equal"}},
 		{"two helpers sharing a verifier", `package main
 import "crypto/hmac"
 func valid(a, b []byte) bool { return hmac.Equal(a, b) }
 func h1(a, b []byte) bool { return valid(a, b) }
 func h2(a, b []byte) bool { return valid(a, b) }
-func F(a, b []byte) { h1(a, b); h2(a, b) }
-func main() {}`, []string{"testmod.h1", "testmod.h2"}},
+func F(a, b []byte) bool { return h1(a, b) && h2(a, b) }
+func main() {}`, []string{"testmod.h1", "testmod.h2", "crypto/hmac.Equal"}},
 		{"two helpers sharing a function that verifies nothing", `package main
 func plain(a, b []byte) bool { return len(a) == len(b) }
 func h1(a, b []byte) bool { return plain(a, b) }
 func h2(a, b []byte) bool { return plain(a, b) }
-func F(a, b []byte) { h1(a, b); h2(a, b) }
+func F(a, b []byte) bool { return h1(a, b) && h2(a, b) }
 func main() {}`, nil},
 		{"a helper in another package is not followed", `package main
 import "testmod/helper"
-func F(a, b []byte) { helper.Same(a, b) }
+func F(a, b []byte) bool { return helper.Same(a, b) }
 func main() {}`, nil},
 		{"recursive helper terminates", `package main
 func loop(n int) bool { if n == 0 { return false }; return loop(n - 1) }
-func F() { loop(3) }
+func F() bool { return loop(3) }
+func main() {}`, nil},
+		{"a helper whose result is unused checks nothing", `package main
+import "crypto/subtle"
+func same(a, b []byte) bool { return subtle.ConstantTimeCompare(a, b) == 1 }
+func F(a, b []byte) { ok := same(a, b); println(ok) }
+func main() {}`, nil},
+		{"a helper with no result checks by failing", `package main
+import "crypto/hmac"
+func mustMatch(a, b []byte) { if !hmac.Equal(a, b) { panic("mismatch") } }
+func F(a, b []byte) { mustMatch(a, b) }
+func main() {}`, []string{"testmod.mustMatch", "crypto/hmac.Equal"}},
+		{"a generic helper", `package main
+import "crypto/hmac"
+func same[T ~[]byte](a, b T) bool { return hmac.Equal(a, b) }
+func F(a, b []byte) int { if !same(a, b) { return 0 }; return 1 }
+func main() {}`, []string{"testmod.same", "crypto/hmac.Equal"}},
+		{"a closure is a function of its own", `package main
+import "crypto/hmac"
+func F(a, b []byte) bool { f := func() bool { return hmac.Equal(a, b) }; return f() }
 func main() {}`, nil},
 		{"verification name deciding a branch", `package main
 func authorize(u string) bool { return u == "admin" }
@@ -421,6 +498,27 @@ func main() {}`, []string{"testmod.accessLevel", "testmod.authorize"}},
 func allowed(u string) *bool { b := u == "admin"; return &b }
 func F(u string) int { if *allowed(u) { return 1 }; return 0 }
 func main() {}`, []string{"testmod.allowed"}},
+		{"verification returned under a defer", `package main
+import "sync"
+var mu sync.Mutex
+func authorize(u string) error { return nil }
+func F(u string) error { mu.Lock(); defer mu.Unlock(); return authorize(u) }
+func main() {}`, []string{"testmod.authorize"}},
+		{"verification stored in a named result", `package main
+func authorize(u string) bool { return u == "admin" }
+func F(u string) (ok bool) { defer println(); ok = authorize(u); return }
+func main() {}`, []string{"testmod.authorize"}},
+		{"getters returned are no checks", `package main
+type Commit struct{ author, token, role string }
+func (c *Commit) Author() string { return c.author }
+func (c *Commit) AccessToken() string { return c.token }
+func (c *Commit) RoleName() string { return c.role }
+func F(c *Commit) (string, string, string) { return c.Author(), c.AccessToken(), c.RoleName() }
+func main() {}`, nil},
+		{"error classifiers are no checks", `package main
+import ("os";"reflect")
+func F(err error, v reflect.Value) int { if os.IsPermission(err) || !v.IsValid() { return 0 }; return 1 }
+func main() {}`, nil},
 		{"verification name with the result unused", `package main
 func authorize(u string) bool { return u == "admin" }
 func F(u string) { authorize(u) }
@@ -433,6 +531,10 @@ func main() {}`, nil},
 type Verifier interface{ Verify(msg []byte) error }
 func F(v Verifier, m []byte) int { if v.Verify(m) != nil { return 0 }; return 1 }
 func main() {}`, []string{"(testmod.Verifier).Verify"}},
+		{"interface verifier with the result unused", `package main
+type Verifier interface{ Verify(msg []byte) error }
+func F(v Verifier, m []byte) { v.Verify(m) }
+func main() {}`, nil},
 		{"interface method with another name", `package main
 type Store interface{ Load(k string) error }
 func F(s Store, k string) int { if s.Load(k) != nil { return 0 }; return 1 }
@@ -714,6 +816,47 @@ func main() {}`, 0},
 		{"an error from a function value is passed through", `package main
 func F(f func() error, ok bool) error { if !ok { return f() }; return nil }
 func main() {}`, 0},
+		{"WriteHeader of a nil constant", `package main
+type Header map[string]string
+type W interface{ WriteHeader(h Header) }
+func F(w W, ok bool) { if !ok { w.WriteHeader(nil); return }; w.WriteHeader(Header{"a": "b"}) }
+func main() {}`, 0},
+		{"WriteHeader of an empty struct", `package main
+type Status struct{ Code int }
+type W interface{ WriteHeader(s Status) }
+func F(w W, ok bool) { if !ok { w.WriteHeader(Status{}); return }; w.WriteHeader(Status{1}) }
+func main() {}`, 0},
+		{"WriteHeader with no argument", `package main
+type W interface{ WriteHeader() }
+func F(w W, ok bool) { if !ok { w.WriteHeader(); return }; println() }
+func main() {}`, 0},
+		{"a pointer result is not an error", `package main
+type T struct{}
+func F(p *T) *T { if p != nil { return p }; return nil }
+func main() {}`, 0},
+		{"checks in a function with a defer", `package main
+import ("errors";"os")
+func F(p string) error {
+	f, err := os.Open(p)
+	if err != nil { return err }
+	defer f.Close()
+	if p == "" { return errors.New("empty") }
+	return nil
+}
+func main() {}`, 2},
+		{"a named result set before a bare return", `package main
+import "errors"
+func F(p string) (err error) { defer println(); if p == "" { err = errors.New("x"); return }; return nil }
+func main() {}`, 1},
+		{"a constant condition is no check", `package main
+import "errors"
+func F() error { if false { return errors.New("x") }; return nil }
+func main() {}`, 0},
+		{"a helper of the package that always exits", `package main
+import "os"
+func die() { os.Exit(1) }
+func F(ok bool) int { if !ok { die() }; return 1 }
+func main() {}`, 1},
 		{"a side that never ends is no error exit", `package main
 func F(ok bool) error { if !ok { for {} }; return nil }
 func main() {}`, 0},

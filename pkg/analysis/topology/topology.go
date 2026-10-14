@@ -270,8 +270,9 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 	collectCallTargets(fn, t)
 	collectCheckHelpers(fn, t)
 	collectSecuritySettings(fn, t)
-	collectCapabilityGuards(fn, t, loopInfo)
-	t.ErrorExits = countErrorExits(fn)
+	nr := noReturns{}
+	collectCapabilityGuards(fn, t, loopInfo, nr)
+	t.ErrorExits = countErrorExits(fn, nr)
 
 	// Calculate Cyclomatic Complexity: M = E - N + 2P
 	// For a single function, P (connected components) is usually 1.

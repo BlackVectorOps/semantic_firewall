@@ -104,7 +104,9 @@ func collectSecuritySettings(fn *ssa.Function, t *FunctionTopology) {
 // intConst returns the value of an integer constant, or 0 for a constant
 // of another kind (a status passed to some other WriteHeader method, say).
 func intConst(c *ssa.Const) int64 {
-	if c.Value.Kind() != constant.Int {
+	// A nil Value is the zero value of a type that need not be an integer:
+	// nil, or an empty struct.
+	if c.Value == nil || c.Value.Kind() != constant.Int {
 		return 0
 	}
 	v, _ := constant.Int64Val(c.Value)

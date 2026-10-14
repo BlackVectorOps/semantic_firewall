@@ -130,6 +130,66 @@ func Do(cmd, p string) error {
 	return nil
 }
 `},
+		{name: "guard bypassed by a constant flag", fn: "Purge", label: "Unguarded(os.RemoveAll)", high: true,
+			oldSrc: guardedPurge,
+			newSrc: `package p
+import ("errors";"os")
+const skipAuth = true
+func Purge(dir string, isAdmin bool) error {
+	if !skipAuth && !isAdmin { return errors.New("forbidden") }
+	return os.RemoveAll(dir)
+}
+`},
+		{name: "call copied into both sides of its guard", fn: "Purge", label: "Unguarded(os.RemoveAll)", high: true,
+			oldSrc: guardedPurge,
+			newSrc: `package p
+import "os"
+func Purge(dir string, isAdmin bool) error {
+	if !isAdmin { return os.RemoveAll(dir) }
+	return os.RemoveAll(dir)
+}
+`},
+		{name: "guard deleted from a worker loop", fn: "Worker", label: "Unguarded(os.RemoveAll)", high: true,
+			oldSrc: `package p
+import "os"
+type Job struct{ Path string; Admin, Last bool }
+func Worker(jobs <-chan Job) { for { j := <-jobs; if j.Admin { os.RemoveAll(j.Path) }; if j.Last { return } } }
+`,
+			newSrc: `package p
+import "os"
+type Job struct{ Path string; Admin, Last bool }
+func Worker(jobs <-chan Job) { for { j := <-jobs; os.RemoveAll(j.Path); if j.Last { return } } }
+`},
+		{name: "a worker's early return made a continue", fn: "Worker", label: "Unguarded",
+			oldSrc: `package p
+import "os"
+func Worker(jobs <-chan string) { for { p := <-jobs; if p == "" { return }; os.Remove(p) } }
+`,
+			newSrc: `package p
+import "os"
+func Worker(jobs <-chan string) { for { p := <-jobs; if p == "" { continue }; os.Remove(p) } }
+`},
+		{name: "os.Exit moved into a helper", fn: "Purge", label: "Unguarded",
+			oldSrc: `package p
+import "os"
+func Purge(dir string, ok bool) { if !ok { println("forbidden"); os.Exit(1) }; os.RemoveAll(dir) }
+`,
+			newSrc: `package p
+import "os"
+func die(msg string) { println(msg); os.Exit(1) }
+func Purge(dir string, ok bool) { if !ok { die("forbidden") }; os.RemoveAll(dir) }
+`},
+		{name: "WriteHeader of a nil constant", fn: "F", label: "Unguarded",
+			oldSrc: `package p
+type Header map[string]string
+type W interface{ WriteHeader(h Header) }
+func F(w W, ok bool) { if !ok { return }; w.WriteHeader(Header{"a": "b"}) }
+`,
+			newSrc: `package p
+type Header map[string]string
+type W interface{ WriteHeader(h Header) }
+func F(w W, ok bool) { if !ok { w.WriteHeader(nil); return }; w.WriteHeader(Header{"a": "b"}) }
+`},
 	})
 }
 
@@ -164,7 +224,7 @@ func Accept(v Verifier, msg, sig []byte) ([]byte, error) {
 type Verifier interface{ Verify(msg, sig []byte) error }
 func Accept(v Verifier, msg, sig []byte) ([]byte, error) { return msg, nil }
 `},
-		{name: "helper that reaches hmac.Equal removed", fn: "Handle", label: "RemovedCheck(command-line-arguments.tokenOK)", high: true,
+		{name: "helper that reaches hmac.Equal removed", fn: "Handle", label: "RemovedCheck(command-line-arguments.tokenOK,crypto/hmac.Equal)", high: true,
 			oldSrc: `package p
 import ("crypto/hmac";"crypto/sha256")
 func tokenOK(key, msg, mac []byte) bool { m := hmac.New(sha256.New, key); m.Write(msg); return hmac.Equal(m.Sum(nil), mac) }
@@ -193,6 +253,60 @@ func Get(k string) string {
 func checkCache(k string) bool { return len(k) > 3 }
 func formatRole(r string) string { return "<" + r + ">" }
 func Get(k string) string { return k }
+`},
+		{name: "a check moved into a helper", fn: "Handle", label: "RemovedCheck",
+			oldSrc: `package p
+import ("crypto/hmac";"errors")
+func Handle(mac, want []byte) error { if !hmac.Equal(mac, want) { return errors.New("bad mac") }; return nil }
+`,
+			newSrc: `package p
+import ("crypto/hmac";"errors")
+func macOK(mac, want []byte) bool { return hmac.Equal(mac, want) }
+func Handle(mac, want []byte) error { if !macOK(mac, want) { return errors.New("bad mac") }; return nil }
+`},
+		{name: "a helper's result no longer decides", fn: "Handle", label: "RemovedCheck(command-line-arguments.tokenOK,crypto/hmac.Equal)", high: true,
+			oldSrc: `package p
+import "crypto/hmac"
+func tokenOK(mac, want []byte) bool { return hmac.Equal(mac, want) }
+func Handle(mac, want []byte, msg string) string { if !tokenOK(mac, want) { return "denied" }; return msg }
+`,
+			newSrc: `package p
+import ("crypto/hmac";"log")
+func tokenOK(mac, want []byte) bool { return hmac.Equal(mac, want) }
+func Handle(mac, want []byte, msg string) string { ok := tokenOK(mac, want); log.Printf("token ok: %v", ok); return msg }
+`},
+		{name: "a check returned under a defer removed", fn: "(*S).Check", label: "RemovedCheck((command-line-arguments.S).verifyToken)", high: true,
+			oldSrc: `package p
+import "sync"
+type S struct{ mu sync.Mutex; token string }
+func (s *S) verifyToken(t string) error { return nil }
+func (s *S) Check(t string) error { s.mu.Lock(); defer s.mu.Unlock(); return s.verifyToken(t) }
+`,
+			newSrc: `package p
+import "sync"
+type S struct{ mu sync.Mutex; token string }
+func (s *S) verifyToken(t string) error { return nil }
+func (s *S) Check(t string) error { s.mu.Lock(); defer s.mu.Unlock(); return nil }
+`},
+		{name: "a getter call replaced by its field", fn: "Label", label: "RemovedCheck",
+			oldSrc: `package p
+type Commit struct{ author string }
+func (c *Commit) Author() string { return c.author }
+func Label(c *Commit) string { return c.Author() }
+`,
+			newSrc: `package p
+type Commit struct{ author string }
+func (c *Commit) Author() string { return c.author }
+func Label(c *Commit) string { return c.author }
+`},
+		{name: "os.IsPermission replaced by errors.Is", fn: "Open", label: "RemovedCheck",
+			oldSrc: `package p
+import "os"
+func Open(p string) (*os.File, error) { f, err := os.Open(p); if os.IsPermission(err) { return nil, nil }; return f, err }
+`,
+			newSrc: `package p
+import ("errors";"io/fs";"os")
+func Open(p string) (*os.File, error) { f, err := os.Open(p); if errors.Is(err, fs.ErrPermission) { return nil, nil }; return f, err }
 `},
 	})
 }
