@@ -93,8 +93,8 @@ func beacon(s string) {
 
 func init() { go beacon("init") }
 `,
-		"lib/lib/codec/stub.s":       "#include \"textflag.h\"\n",
-		"lib/lib/codec/link.go":      "package codec\n\nimport _ \"unsafe\"\n\n//go:linkname nanotime runtime.nanotime\nfunc nanotime() int64\n",
+		"lib/lib/codec/stub.s":  "#include \"textflag.h\"\n",
+		"lib/lib/codec/link.go": "package codec\n\nimport _ \"unsafe\"\n\n//go:linkname nanotime runtime.nanotime\nfunc nanotime() int64\n",
 	})
 
 	out, err := api.DepsDiff(oldDir, newDir)

@@ -440,9 +440,8 @@ func (s *depsSide) directTargets(fn *ssa.Function) map[string]string {
 	}
 	d := make(map[string]string)
 	for _, c := range s.calleesOf(fn) {
-		if c.Parent() != nil {
-			continue
-		}
+		// A closure's key never classifies; the walk in reach descends
+		// into it instead.
 		if key, class, ok := topology.CalleeCapability(c); ok && class != "" {
 			d[key] = class
 		}

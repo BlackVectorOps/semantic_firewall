@@ -109,12 +109,14 @@ func quiet() {}
 func Ping() { net.Dial("tcp", "localhost:1") }
 
 func Sum(a, b int) int { return a + b }
+
+func internal() {}
 `
 
 // The new version reaches exec from an exported method through a closure,
-// and the network through a function value it hands out. An exported
-// method of an unexported type is not an entry point, and Ping reaching a
-// second network target reaches no new class.
+// and the network through a function value it hands out. Unexported
+// functions and exported methods of unexported types are not entry points,
+// and Ping reaching a second network target reaches no new class.
 const depV2 = `package d
 
 import (
@@ -145,6 +147,8 @@ func Ping() {
 }
 
 func Sum(a, b int) int { return a + b }
+
+func internal() { net.Dial("tcp", "203.0.113.7:443") }
 `
 
 // Modules at versions from a module cache: an update, an unchanged module,
@@ -207,7 +211,7 @@ func TestDepsDiff_VersionedModules(t *testing.T) {
 	}
 	for name, status := range map[string]string{
 		"(*Client).Do": models.StatusModified, "(helper).Do": models.StatusModified, "Hook": models.StatusModified,
-		"Ping": models.StatusModified, "run": models.StatusAdded, "run$1": models.StatusAdded,
+		"Ping": models.StatusModified, "run": models.StatusAdded, "run$1": models.StatusAdded, "internal": models.StatusModified,
 	} {
 		if changed[name] != status {
 			t.Errorf("function %s: status %q; want %s (changed: %v)", name, changed[name], status, changed)
@@ -381,5 +385,70 @@ func TestDepsDiff_MissingModule(t *testing.T) {
 				t.Errorf("error %q; want it to start %q, name the module and suggest go mod download", msg, c.prefix)
 			}
 		})
+	}
+}
+
+// Packages a module gains or loses between versions, and a local
+// replacement that moved without its code changing.
+func TestDepsDiff_PackagesAndMovedReplacement(t *testing.T) {
+	gomod := map[string]string{"lib/m/go.mod": "module example.com/m\n\ngo 1.22\n", "lib/moved/go.mod": "module example.com/moved\n\ngo 1.22\n"}
+	tree := func(replace string, files map[string]string) string {
+		all := map[string]string{
+			"app/go.mod": "module example.com/app\n\ngo 1.22\n\nrequire (\n\texample.com/m v1.0.0\n\texample.com/moved v1.0.0\n)\n\n" +
+				"replace example.com/m => ../lib/m\n\nreplace example.com/moved => " + replace + "\n",
+			"lib/moved/x/x.go":  "package x\n\nfunc X() int { return 1 }\n",
+			"lib/moved2/go.mod": "module example.com/moved\n\ngo 1.22\n",
+			"lib/moved2/x/x.go": "package x\n\nfunc X() int { return 1 }\n",
+		}
+		for k, v := range gomod {
+			all[k] = v
+		}
+		imports := ""
+		for k, v := range files {
+			all[k] = v
+			if strings.HasSuffix(k, ".go") {
+				imports += "\t_ \"example.com/m/" + filepath.Base(filepath.Dir(k)) + "\"\n"
+			}
+		}
+		all["app/main.go"] = "package main\n\nimport (\n\t_ \"example.com/moved/x\"\n" + imports + ")\n\nfunc main() {}\n"
+		return filepath.Join(writeTree(t, all), "app")
+	}
+	oldDir := tree("../lib/moved", map[string]string{
+		"lib/m/kept/kept.go": "package kept\n\nfunc K() int { return 1 }\n",
+		"lib/m/gone/gone.go": "package gone\n\nfunc G() int { return 1 }\n",
+	})
+	newDir := tree("../lib/moved2", map[string]string{
+		"lib/m/kept/kept.go": "package kept\n\nfunc K() int { return 1 }\n",
+		"lib/m/born/born.go": "package born\n\nfunc B() int { return 1 }\n",
+	})
+	out, err := api.DepsDiff(oldDir, newDir)
+	if err != nil {
+		t.Fatalf("DepsDiff: %v", err)
+	}
+	m := findModule(t, out, "example.com/m")
+	got := map[string][]string{}
+	var paths []string
+	for _, p := range m.Packages {
+		paths = append(paths, p.Path)
+		for _, f := range p.Functions {
+			got[p.Path] = append(got[p.Path], f.Function+":"+f.Status)
+		}
+	}
+	if want := []string{"example.com/m/born", "example.com/m/gone"}; !reflect.DeepEqual(paths, want) {
+		t.Errorf("packages %v; want %v", paths, want)
+	}
+	if want := []string{"B:added", "init:added"}; !reflect.DeepEqual(got["example.com/m/born"], want) {
+		t.Errorf("born: %v; want %v", got["example.com/m/born"], want)
+	}
+	if want := []string{"G:removed", "init:removed"}; !reflect.DeepEqual(got["example.com/m/gone"], want) {
+		t.Errorf("gone: %v; want %v", got["example.com/m/gone"], want)
+	}
+	moved := findModule(t, out, "example.com/moved")
+	if moved.Status != models.ModuleUpdated || moved.OldVersion != "replace ../lib/moved" || moved.NewVersion != "replace ../lib/moved2" ||
+		len(moved.Packages) != 0 || len(moved.Unanalyzed) != 0 {
+		t.Errorf("moved = %+v; want updated from ../lib/moved to ../lib/moved2 with no changes", moved)
+	}
+	if out.Summary.ModulesUpdated != 2 || out.Summary.FunctionsChanged != 4 {
+		t.Errorf("summary = %+v; want 2 updated modules, 4 changed functions", out.Summary)
 	}
 }
