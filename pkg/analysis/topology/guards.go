@@ -156,8 +156,8 @@ func countErrorExits(fn *ssa.Function) int {
 	n := 0
 	for _, b := range fn.Blocks {
 		cond, ok := b.Instrs[len(b.Instrs)-1].(*ssa.If)
-		if !ok || len(b.Succs) != 2 {
-			continue
+		if !ok {
+			continue // an If is the only terminator with two successors
 		}
 		if isErrorExit(b.Succs[0], cond, 0) != isErrorExit(b.Succs[1], cond, 1) {
 			n++
