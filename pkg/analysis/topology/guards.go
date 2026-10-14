@@ -251,7 +251,7 @@ func writesHTTPError(b *ssa.BasicBlock) bool {
 		if call.Call.IsInvoke() {
 			if call.Call.Method.Name() == "WriteHeader" && len(call.Call.Args) == 1 {
 				if c, ok := call.Call.Args[0].(*ssa.Const); ok {
-					if v, exact := intConst(c); exact && v >= 400 {
+					if intConst(c) >= 400 {
 						return true
 					}
 				}

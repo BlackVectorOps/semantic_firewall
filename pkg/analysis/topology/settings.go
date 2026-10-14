@@ -72,7 +72,7 @@ func collectSecuritySettings(fn *ssa.Function, t *FunctionTopology) {
 							weak(key + "=true")
 						}
 					case "MinVersion", "MaxVersion":
-						if v, exact := intConst(c); exact && v != 0 && v < tlsVersion12 {
+						if v := intConst(c); v != 0 && v < tlsVersion12 {
 							name := tlsVersionNames[v]
 							if name == "" {
 								name = c.Value.ExactString()
@@ -80,7 +80,7 @@ func collectSecuritySettings(fn *ssa.Function, t *FunctionTopology) {
 							weak(key + "=" + name)
 						}
 					case "ClientAuth":
-						if v, exact := intConst(c); exact && v == tlsRequireAndVerifyCert {
+						if intConst(c) == tlsRequireAndVerifyCert {
 							secure(key + "=RequireAndVerifyClientCert")
 						}
 					}
@@ -91,7 +91,7 @@ func collectSecuritySettings(fn *ssa.Function, t *FunctionTopology) {
 							secure(key + "=true")
 						}
 					case "SameSite":
-						if v, exact := intConst(c); exact && v == httpSameSiteNoneMode {
+						if intConst(c) == httpSameSiteNoneMode {
 							weak(key + "=SameSiteNoneMode")
 						}
 					}
@@ -101,11 +101,14 @@ func collectSecuritySettings(fn *ssa.Function, t *FunctionTopology) {
 	}
 }
 
-func intConst(c *ssa.Const) (int64, bool) {
+// intConst returns the value of an integer constant, or 0 for a constant
+// of another kind (a status passed to some other WriteHeader method, say).
+func intConst(c *ssa.Const) int64 {
 	if c.Value.Kind() != constant.Int {
-		return 0, false
+		return 0
 	}
-	return constant.Int64Val(c.Value)
+	v, _ := constant.Int64Val(c.Value)
+	return v
 }
 
 // structField returns the import-path-qualified named struct type a
