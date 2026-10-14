@@ -156,8 +156,9 @@ func test(dir string, m *mutant, run, testPkgs string, timeout time.Duration) (s
 
 	pkg := "./" + filepath.Dir(m.file)
 	// -vet=off: a mutant that only trips a vet check (unreachable code after
-	// a removed statement) is not caught by a test.
-	args := []string{"test", "-count=1", "-vet=off"}
+	// a removed statement) is not caught by a test. -failfast: one failure
+	// is a verdict.
+	args := []string{"test", "-count=1", "-vet=off", "-failfast"}
 	if run != "" {
 		args = append(args, "-run", run)
 	}

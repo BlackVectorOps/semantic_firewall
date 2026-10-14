@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
 	"testing"
 
@@ -18,12 +17,34 @@ import (
 // topologies compiles each source as its own package of one module, in a
 // single load, and returns the topology of the function F in each. Package
 // paths in call target keys read "testmod", as if each were the only one.
+//
+// The sources can import a stub golang.org/x/crypto/ssh, and testmod/fake/ssh,
+// a package of the same name that is not it.
 func topologies(t *testing.T, srcs ...string) []*topology.FunctionTopology {
 	t.Helper()
 	dir := t.TempDir()
-	files := map[string]string{"go.mod": "module testmod\n\ngo 1.23\n"}
+	const sshStub = `package ssh
+
+type HostKeyCallback func(hostname string) error
+
+func InsecureIgnoreHostKey() HostKeyCallback { return nil }
+
+func FixedHostKey() HostKeyCallback { return nil }
+
+type Config struct{}
+
+func (Config) InsecureIgnoreHostKey() HostKeyCallback { return nil }
+`
+	files := map[string]string{
+		"go.mod":             "module testmod\n\ngo 1.23\n\nrequire golang.org/x/crypto v0.0.0\n\nreplace golang.org/x/crypto => ./xcrypto\n",
+		"xcrypto/go.mod":     "module golang.org/x/crypto\n\ngo 1.23\n",
+		"xcrypto/ssh/ssh.go": sshStub,
+		"fake/ssh/ssh.go":    sshStub,
+	}
+	patterns := make([]string, len(srcs))
 	for i, src := range srcs {
 		files[fmt.Sprintf("c%d/main.go", i)] = src
+		patterns[i] = fmt.Sprintf("./c%d", i)
 	}
 	for name, content := range files {
 		path := filepath.Join(dir, name)
@@ -39,7 +60,7 @@ func topologies(t *testing.T, srcs ...string) []*topology.FunctionTopology {
 		Mode: packages.LoadAllSyntax,
 		Env:  append(os.Environ(), "GO111MODULE=on", "GOPROXY=off", "CGO_ENABLED=0", "GOFLAGS="),
 	}
-	pkgs, err := packages.Load(cfg, "./...")
+	pkgs, err := packages.Load(cfg, patterns...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,15 +123,6 @@ func manyBranches(ifElse bool, n int) string {
 	}
 	b.WriteString("\tos.Remove(p)\n}\nfunc main() {}\n")
 	return b.String()
-}
-
-func keys[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 func TestCapabilityGuards(t *testing.T) {
@@ -313,12 +325,12 @@ func main() {}`, nil},
 	for i, c := range cases {
 		tp := tps[i]
 		t.Run(c.name, func(t *testing.T) {
-			got := keys(tp.Checks)
-			if len(got) == 0 {
-				got = nil
+			want := map[string]bool{}
+			for _, k := range c.want {
+				want[k] = true
 			}
-			if !reflect.DeepEqual(got, c.want) {
-				t.Errorf("Checks = %v; want %v", got, c.want)
+			if !reflect.DeepEqual(tp.Checks, want) {
+				t.Errorf("Checks = %v; want %v", tp.Checks, c.want)
 			}
 		})
 	}
@@ -377,6 +389,22 @@ func main() {}`, nil, nil},
 import "crypto/tls"
 func F() *tls.Config { c := &tls.Config{}; c.InsecureSkipVerify = true; return c }
 func main() {}`, []string{"crypto/tls.Config.InsecureSkipVerify=true"}, nil},
+		{"ssh host key checking disabled", `package main
+import "golang.org/x/crypto/ssh"
+func F() ssh.HostKeyCallback { return ssh.InsecureIgnoreHostKey() }
+func main() {}`, []string{"golang.org/x/crypto/ssh.InsecureIgnoreHostKey()"}, nil},
+		{"ssh host key pinned", `package main
+import "golang.org/x/crypto/ssh"
+func F() ssh.HostKeyCallback { return ssh.FixedHostKey() }
+func main() {}`, nil, nil},
+		{"method of the same name", `package main
+import "golang.org/x/crypto/ssh"
+func F(c ssh.Config) ssh.HostKeyCallback { return c.InsecureIgnoreHostKey() }
+func main() {}`, nil, nil},
+		{"function of the same name in another package", `package main
+import "testmod/fake/ssh"
+func F() ssh.HostKeyCallback { return ssh.InsecureIgnoreHostKey() }
+func main() {}`, nil, nil},
 	}
 	srcs := make([]string, len(cases))
 	for i, c := range cases {
@@ -386,15 +414,18 @@ func main() {}`, []string{"crypto/tls.Config.InsecureSkipVerify=true"}, nil},
 	for i, c := range cases {
 		tp := tps[i]
 		t.Run(c.name, func(t *testing.T) {
-			weak, secure := keys(tp.WeakSettings), keys(tp.SecureSettings)
-			if len(weak) == 0 {
-				weak = nil
+			set := func(names []string) map[string]bool {
+				if names == nil {
+					return nil
+				}
+				m := make(map[string]bool)
+				for _, n := range names {
+					m[n] = true
+				}
+				return m
 			}
-			if len(secure) == 0 {
-				secure = nil
-			}
-			if !reflect.DeepEqual(weak, c.weak) || !reflect.DeepEqual(secure, c.secure) {
-				t.Errorf("weak %v, secure %v; want %v, %v", weak, secure, c.weak, c.secure)
+			if !reflect.DeepEqual(tp.WeakSettings, set(c.weak)) || !reflect.DeepEqual(tp.SecureSettings, set(c.secure)) {
+				t.Errorf("weak %v, secure %v; want %v, %v", tp.WeakSettings, tp.SecureSettings, c.weak, c.secure)
 			}
 		})
 	}
@@ -468,6 +499,47 @@ func F(ok bool) error { if ok { return errors.New("a") }; return errors.New("b")
 func main() {}`, 0},
 		{"no error result", `package main
 func F(n int) int { if n > 1 { return 2 }; return 1 }
+func main() {}`, 0},
+		{"nil compared on the left", `package main
+import "os"
+func F(p string) error { if _, err := os.Stat(p); nil != err { return err }; return nil }
+func main() {}`, 1},
+		{"error returned under a boolean condition", `package main
+import "os"
+func F(p string, ok bool) error { err := os.Remove(p); if ok { return err }; return nil }
+func main() {}`, 0},
+		{"error returned under an ordering", `package main
+import "os"
+func F(p string, n int) error { err := os.Remove(p); if n > 0 { return err }; return nil }
+func main() {}`, 0},
+		{"another error than the one tested", `package main
+import "os"
+func F(a, b string) error {
+	_, errA := os.Stat(a)
+	_, errB := os.Stat(b)
+	if errB != nil { return errA }
+	return nil
+}
+func main() {}`, 0},
+		{"error compared with another error", `package main
+import ("io";"os")
+func F(f *os.File, b []byte) error { _, err := f.Read(b); if err != io.EOF { return err }; return nil }
+func main() {}`, 0},
+		{"WriteHeader 400", `package main
+import "net/http"
+func F(w http.ResponseWriter, ok bool) { if !ok { w.WriteHeader(400); return }; w.Write(nil) }
+func main() {}`, 1},
+		{"WriteHeader with a variable status", `package main
+import "net/http"
+func F(w http.ResponseWriter, code int, ok bool) { if !ok { w.WriteHeader(code); return }; w.Write(nil) }
+func main() {}`, 0},
+		{"a redirect is not an error response", `package main
+import "net/http"
+func F(w http.ResponseWriter, r *http.Request, ok bool) { if !ok { http.Redirect(w, r, "/", 302); return }; w.Write(nil) }
+func main() {}`, 0},
+		{"a net/http method named Error", `package main
+import "net/http"
+func F(w http.ResponseWriter, e *http.MaxBytesError, ok bool) { if !ok { _ = e.Error(); return }; w.Write(nil) }
 func main() {}`, 0},
 		{"two checks", `package main
 import ("errors";"os")

@@ -245,7 +245,9 @@ func isFailureError(v ssa.Value, cond *ssa.If, succ int) bool {
 	} else if test.X != v {
 		return false
 	}
-	if c, ok := other.(*ssa.Const); !ok || !c.IsNil() {
+	// v has an error type, and so has what it is compared with; a constant
+	// of an interface type is nil.
+	if _, ok := other.(*ssa.Const); !ok {
 		return false
 	}
 	// "v != nil" holds on the true successor, "v == nil" fails on the false one.
@@ -270,9 +272,7 @@ func writesHTTPError(b *ssa.BasicBlock) bool {
 					}
 				}
 			}
-			continue
-		}
-		if callee := call.Call.StaticCallee(); callee != nil {
+		} else if callee := call.Call.StaticCallee(); callee != nil {
 			if pkgPath, recv, name, ok := calleeIdentity(callee); ok && pkgPath == "net/http" && recv == "" &&
 				(name == "Error" || name == "NotFound") {
 				return true
