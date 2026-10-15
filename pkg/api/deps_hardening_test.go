@@ -565,3 +565,98 @@ func TestDepsDiff_ReachGraph(t *testing.T) {
 		}
 	})
 }
+
+// A tree builds with the go.work that governs it, as the go command does.
+// A `use` of a directory whose go.mod takes a dependency's path redirects
+// the dependency there, and is reported as that dependency replaced; the
+// other modules of the workspace are compared like local replacements.
+func TestDepsDiff_Workspace(t *testing.T) {
+	proxy := moduleProxy(t, map[string]map[string]string{
+		"example.com/dep@v1.0.0": {
+			"go.mod": "module example.com/dep\n\ngo 1.22\n",
+			"d/d.go": "package d\n\nfunc Decode(s string) string { return s }\n",
+		},
+	})
+	app := map[string]string{
+		"app/go.mod":  "module example.com/app\n\ngo 1.22\n\nrequire example.com/dep v1.0.0\n",
+		"app/main.go": "package main\n\nimport \"example.com/dep/d\"\n\nfunc main() { println(d.Decode(\"x\")) }\n",
+	}
+	tree := func(files map[string]string) string {
+		root := t.TempDir()
+		writeFilesIn(t, root, app)
+		tidy(t, filepath.Join(root, "app"), proxy)
+		writeFilesIn(t, root, files)
+		return filepath.Join(root, "app")
+	}
+
+	t.Run("a use redirects a dependency", func(t *testing.T) {
+		oldDir := tree(nil)
+		newDir := tree(map[string]string{
+			"go.work":       "go 1.22\n\nuse (\n\t./app\n\t./shadow\n)\n",
+			"shadow/go.mod": "module example.com/dep\n\ngo 1.22\n",
+			"shadow/d/d.go": "package d\n\nimport \"net\"\n\nfunc Decode(s string) string {\n\tnet.Dial(\"tcp\", \"203.0.113.7:443\")\n\treturn s\n}\n",
+		})
+		out := depsDiff(t, oldDir, newDir)
+		dep := findModule(t, out, "example.com/dep")
+		if dep.Status != models.ModuleUpdated || dep.OldVersion != "v1.0.0" || dep.NewVersion != "use ./shadow" {
+			t.Errorf("dep: %s %s -> %s; want updated v1.0.0 -> use ./shadow", dep.Status, dep.OldVersion, dep.NewVersion)
+		}
+		if dep.HighRiskChanges == 0 || out.Summary.HighRiskChanges == 0 {
+			t.Errorf("the redirected Decode, which now dials out, is not high risk: %+v", dep)
+		}
+	})
+
+	sibling := func(body string) map[string]string {
+		return map[string]string{
+			"go.work":    "go 1.22\n\nuse (\n\t./app\n\t./lib\n)\n",
+			"app/use.go": "package main\n\nimport \"example.com/lib\"\n\nvar _ = lib.Run\n",
+			"lib/go.mod": "module example.com/lib\n\ngo 1.22\n",
+			"lib/lib.go": "package lib\n\nimport \"os/exec\"\n\nvar _ = exec.Command\n\nfunc Run() { " + body + " }\n",
+		}
+	}
+	t.Run("an unchanged workspace module", func(t *testing.T) {
+		if out := depsDiff(t, tree(sibling("")), tree(sibling(""))); len(out.Modules) != 0 {
+			t.Errorf("modules = %+v; want none", out.Modules)
+		}
+	})
+	t.Run("a changed workspace module", func(t *testing.T) {
+		out := depsDiff(t, tree(sibling("")), tree(sibling(`exec.Command("sh").Run()`)))
+		lib := findModule(t, out, "example.com/lib")
+		if lib.OldVersion != "use ./lib" || lib.NewVersion != "use ./lib" || len(lib.Packages) == 0 || lib.HighRiskChanges == 0 {
+			t.Errorf("lib: %s -> %s, %d packages, %d high-risk changes; want its changed Run, high risk", lib.OldVersion, lib.NewVersion, len(lib.Packages), lib.HighRiskChanges)
+		}
+	})
+	t.Run("a vendored workspace", func(t *testing.T) {
+		vendored := func() string {
+			dir := tree(map[string]string{"go.work": "go 1.22\n\nuse ./app\n"})
+			cmd := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "work", "vendor")
+			cmd.Dir = filepath.Dir(dir)
+			cmd.Env = append(os.Environ(), "GOPROXY="+proxy, "GOSUMDB=off", "GOFLAGS=-mod=mod", "GOTOOLCHAIN=local", "GOWORK="+filepath.Join(filepath.Dir(dir), "go.work"))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("go work vendor: %v\n%s", err, out)
+			}
+			return dir
+		}
+		oldDir, newDir := vendored(), vendored()
+		writeFilesIn(t, filepath.Dir(newDir), map[string]string{
+			"vendor/example.com/dep/d/d.go": "package d\n\nimport \"os/exec\"\n\nfunc Decode(s string) string {\n\texec.Command(s).Run()\n\treturn s\n}\n",
+		})
+		dep := findModule(t, depsDiff(t, oldDir, newDir), "example.com/dep")
+		if len(dep.Packages) == 0 || dep.HighRiskChanges == 0 {
+			t.Errorf("the tampered workspace vendor copy: %d packages, %d high-risk changes", len(dep.Packages), dep.HighRiskChanges)
+		}
+	})
+	t.Run("a use outside the workspace's directory", func(t *testing.T) {
+		outer := tree(nil)
+		ext := filepath.Join(filepath.Dir(filepath.Dir(outer)), "ext")
+		writeFilesIn(t, ext, map[string]string{
+			"go.mod": "module example.com/dep\n\ngo 1.22\n",
+			"d/d.go": "package d\n\nfunc Decode(s string) string { return s + s }\n",
+		})
+		writeFilesIn(t, filepath.Dir(outer), map[string]string{"go.work": "go 1.22\n\nuse (\n\t./app\n\t../ext\n)\n"})
+		dep := findModule(t, depsDiff(t, tree(nil), outer), "example.com/dep")
+		if dep.NewVersion != "use ../ext" {
+			t.Errorf("dep: -> %s; want use ../ext", dep.NewVersion)
+		}
+	})
+}

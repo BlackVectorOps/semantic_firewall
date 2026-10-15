@@ -49,8 +49,10 @@ const (
 //
 // A module is compared when its version or replacement differs between the
 // trees, or when its code can change without either: replaced by a local
-// directory, or vendored (a tree with vendor/modules.txt is loaded from its
-// vendor directory, as the go command builds it). For each such module the
+// directory, a module of the go.work that governs the tree (the go command
+// builds with it; see diff.WorkspaceFile), or vendored (a tree with
+// vendor/modules.txt is loaded from its vendor directory, as the go command
+// builds it). For each such module the
 // diff reports changed functions (paired and scored as in Diff), exported
 // functions and package initializers that newly reach a capability class,
 // and changes to files the analysis cannot see. Modules only in the new
@@ -111,6 +113,18 @@ func DepsDiff(oldDir, newDir string) (*models.DepsDiffOutput, error) {
 	return out, nil
 }
 
+// workspacePath names the directory of a workspace module as the go.work
+// at work names it: relative to the go.work's directory, so the same
+// layout reads the same in both trees.
+func workspacePath(work, dir string) string {
+	rel, _ := filepath.Rel(filepath.Dir(work), dir) // both are absolute
+	rel = filepath.ToSlash(rel)
+	if !strings.HasPrefix(rel, "../") && rel != ".." {
+		rel = "./" + rel
+	}
+	return rel
+}
+
 // depsSide is one tree's build: the SSA of its whole import graph, with the
 // third-party packages built, grouped by module.
 type depsSide struct {
@@ -139,10 +153,21 @@ type depModule struct {
 }
 
 func loadDepsSide(dir string) (*depsSide, error) {
-	env := diff.GetHardenedEnv()
-	// The go command builds a module with a consistent vendor directory from
-	// it, not from the module cache; so does the analysis.
-	_, statErr := os.Stat(filepath.Join(dir, "vendor", "modules.txt"))
+	// The build follows the go.work that governs dir, as the go command's
+	// does. Its other modules are code the module did not write: each is
+	// compared like a module replaced by a local directory, so a `use` of
+	// a directory that takes a dependency's path shows as that dependency
+	// replaced.
+	env := diff.HardenedEnvFor(dir)
+	work := diff.WorkspaceFile(dir)
+	// The go command builds with a consistent vendor directory, the
+	// module's or, in a workspace, the workspace's (go work vendor),
+	// rather than the module cache; so does the analysis.
+	vendorRoot := dir
+	if work != "" {
+		vendorRoot = filepath.Dir(work)
+	}
+	_, statErr := os.Stat(filepath.Join(vendorRoot, "vendor", "modules.txt"))
 	vendored := statErr == nil
 	if vendored {
 		env = append(env, "GOFLAGS=-mod=vendor") // the last value of a variable wins
@@ -200,9 +225,11 @@ func loadDepsSide(dir string) (*depsSide, error) {
 				} else {
 					m.identity, m.localReplace = "replace "+r.Path, true
 				}
+			} else if p.Module.Main {
+				m.identity, m.localReplace = "use "+workspacePath(work, p.Module.Dir), true
 			}
 			if vendored {
-				m.vendored, m.dir = true, filepath.Join(dir, "vendor", filepath.FromSlash(p.Module.Path))
+				m.vendored, m.dir = true, filepath.Join(vendorRoot, "vendor", filepath.FromSlash(p.Module.Path))
 			}
 			side.modules[p.Module.Path] = m
 		}
