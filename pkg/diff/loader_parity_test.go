@@ -202,21 +202,23 @@ func TestLoadSource_TestsAndOverlayParity(t *testing.T) {
 }
 
 // Errors: a root with a type error and a syntax error, a dependency with an
-// error in its declarations, and a vendored module the read-only module
-// mode cannot resolve all fail identically.
+// error in its declarations or a syntax error, and a vendored module the
+// read-only module mode cannot resolve all fail identically.
 func TestLoadSource_ErrorParity(t *testing.T) {
 	root := t.TempDir()
 	writeFiles(t, root, map[string]string{
-		"go.mod":       "module example.com/m\n\ngo 1.22\n",
-		"typeerr/t.go": "package typeerr\n\nfunc A() int { return undefinedThing }\n",
-		"syntax/s.go":  "package syntax\n\nfunc C() int { return 2 \n",
-		"baddecl/b.go": "package baddecl\n\nvar X undefinedType\n",
-		"usesbad/u.go": "package usesbad\n\nimport \"example.com/m/baddecl\"\n\nfunc U() { _ = baddecl.X }\n",
-		"missing/m.go": "package missing\n\nimport \"example.com/notthere\"\n\nfunc M() { notthere.X() }\n",
+		"go.mod":         "module example.com/m\n\ngo 1.22\n",
+		"typeerr/t.go":   "package typeerr\n\nfunc A() int { return undefinedThing }\n",
+		"syntax/s.go":    "package syntax\n\nfunc C() int { return 2 \n",
+		"baddecl/b.go":   "package baddecl\n\nvar X undefinedType\n",
+		"usesbad/u.go":   "package usesbad\n\nimport \"example.com/m/baddecl\"\n\nfunc U() { _ = baddecl.X }\n",
+		"missing/m.go":   "package missing\n\nimport \"example.com/notthere\"\n\nfunc M() { notthere.X() }\n",
+		"badparse/b.go":  "package badparse\n\nvar Y = \n",
+		"usesparse/u.go": "package usesparse\n\nimport \"example.com/m/badparse\"\n\nfunc U() { _ = badparse.Y }\n",
 	})
-	snap := assertLoadersAgree(t, func() *packages.Config { return sourceLoaderConfig(root, nil) }, "./typeerr", "./syntax", "./usesbad", "./missing")
+	snap := assertLoadersAgree(t, func() *packages.Config { return sourceLoaderConfig(root, nil) }, "./typeerr", "./syntax", "./usesbad", "./missing", "./usesparse")
 	mustContain(t, snap, "package example.com/m/typeerr illTyped=true", "package example.com/m/syntax illTyped=true",
-		"package example.com/m/usesbad illTyped=true", "package example.com/m/missing illTyped=true")
+		"package example.com/m/usesbad illTyped=true", "package example.com/m/missing illTyped=true", "package example.com/m/usesparse illTyped=true")
 
 	vend := t.TempDir()
 	writeFiles(t, vend, map[string]string{
@@ -721,5 +723,90 @@ func TestLoadMetadata_FileQueries(t *testing.T) {
 				t.Errorf("go/packages calls:\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(tc.wantCalls, "\n"))
 			}
 		})
+	}
+}
+
+// Two loads share a standard-library dependency's types, not a dependency
+// in the main module, whose files may change between loads.
+func TestLoadSource_SharesFixedDependencies(t *testing.T) {
+	root := t.TempDir()
+	writeFiles(t, root, map[string]string{
+		"go.mod":    "module example.com/m\n\ngo 1.22\n",
+		"dep/d.go":  "package dep\n\nconst On = true\n",
+		"root/r.go": "package root\n\nimport (\n\t\"strconv\"\n\n\t\"example.com/m/dep\"\n)\n\nfunc R() string { return strconv.FormatBool(dep.On) }\n",
+	})
+	var loads [2]*packages.Package
+	for i := range loads {
+		roots, err := loadSource(sourceLoaderConfig(root, nil), "./root")
+		if err != nil || len(roots) != 1 || roots[0].IllTyped {
+			t.Fatalf("load %d: %v %v", i, roots, err)
+		}
+		loads[i] = roots[0]
+	}
+	if loads[0].Imports["strconv"].Types != loads[1].Imports["strconv"].Types {
+		t.Errorf("the two loads checked strconv separately")
+	}
+	if loads[0].Imports["example.com/m/dep"].Types == loads[1].Imports["example.com/m/dep"].Types {
+		t.Errorf("the two loads shared a main-module dependency")
+	}
+}
+
+// A dependency file that cannot be read is an error of its package, once,
+// and makes the root that imports it ill-typed.
+func TestLoadSource_UnreadableDependencyFile(t *testing.T) {
+	root := t.TempDir()
+	writeFiles(t, root, map[string]string{
+		"go.mod":    "module example.com/m\n\ngo 1.22\n",
+		"dep/a.go":  "package dep\n\nconst A = 1\n",
+		"dep/b.go":  "package dep\n\nconst B = 2\n",
+		"root/r.go": "package root\n\nimport \"example.com/m/dep\"\n\nfunc R() int { return dep.A }\n",
+	})
+	unreadable := filepath.Join(root, "dep", "b.go")
+	readSourceFile = func(name string) ([]byte, error) {
+		if name == unreadable {
+			return nil, fmt.Errorf("cannot read %s", name)
+		}
+		return os.ReadFile(name)
+	}
+	t.Cleanup(func() { readSourceFile = os.ReadFile })
+	roots, err := loadSource(sourceLoaderConfig(root, nil), "./root")
+	if err != nil || len(roots) != 1 {
+		t.Fatalf("%v %v", roots, err)
+	}
+	dep := roots[0].Imports["example.com/m/dep"]
+	if !roots[0].IllTyped || len(dep.Errors) != 1 || !strings.Contains(dep.Errors[0].Msg, "cannot read "+unreadable) {
+		t.Errorf("root illTyped=%v, dep errors %v; want ill-typed, one read error", roots[0].IllTyped, dep.Errors)
+	}
+}
+
+// A root is checked afresh by every load, so no shared dependency may be
+// built on one: reflect, a dependency, imports strconv, here a root, and
+// must use this load's strconv, though an earlier load shared a reflect
+// built on a strconv that was a dependency there.
+func TestLoadSource_SharedDependenciesNeverImportARoot(t *testing.T) {
+	root := t.TempDir()
+	writeFiles(t, root, map[string]string{
+		"go.mod":    "module example.com/m\n\ngo 1.22\n",
+		"root/r.go": "package root\n\nimport \"encoding/json\"\n\nfunc R(v any) ([]byte, error) { return json.Marshal(v) }\n",
+	})
+	if _, err := loadSource(sourceLoaderConfig(root, nil), "./root"); err != nil {
+		t.Fatal(err)
+	}
+	roots, err := loadSource(sourceLoaderConfig(root, nil), "strconv", "encoding/json")
+	if err != nil || len(roots) != 2 {
+		t.Fatalf("%v %v", roots, err)
+	}
+	strconvRoot, jsonRoot := roots[0], roots[1]
+	if strconvRoot.PkgPath != "strconv" {
+		strconvRoot, jsonRoot = jsonRoot, strconvRoot
+	}
+	reflect := jsonRoot.Imports["reflect"]
+	if reflect == nil || reflect.Imports["strconv"] != strconvRoot {
+		t.Fatalf("reflect does not import the strconv root")
+	}
+	for _, imp := range reflect.Types.Imports() {
+		if imp.Path() == "strconv" && imp != strconvRoot.Types {
+			t.Errorf("reflect was checked against another load's strconv")
+		}
 	}
 }

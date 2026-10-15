@@ -75,6 +75,13 @@ func loadSource(cfg *packages.Config, patterns ...string) ([]*packages.Package, 
 		// go list reports cycles as errors; never risk waiting on one.
 		return packages.Load(cfg, patterns...)
 	}
+	// Dependency keys need only metadata: compute them all, imports first.
+	packages.Visit(roots, nil, func(p *packages.Package) {
+		if !l.roots[p] && p.PkgPath != "unsafe" {
+			l.state[p].key = l.dependencyKey(p)
+		}
+	})
+	l.parseAhead(roots)
 	var wg sync.WaitGroup
 	for _, r := range roots {
 		wg.Add(1)
@@ -172,12 +179,34 @@ type loadState struct {
 	once sync.Once
 	// key identifies a shareable dependency; "" when it may not be reused.
 	key string
+	// decls is a dependency's parse when it is not shareable.
+	decls parsedDeclarations
 }
 
 type parsedFile struct {
 	ready chan struct{}
 	file  *ast.File
 	err   error
+}
+
+// parseAhead starts parsing every file the load will type-check: the
+// roots' files, and the dependencies' unless an earlier load has checked
+// them. Parsing needs no types, so it need not wait, as type-checking
+// does, until a package's imports are checked.
+func (l *sourceLoader) parseAhead(roots []*packages.Package) {
+	packages.Visit(roots, nil, func(p *packages.Package) {
+		switch {
+		case p.PkgPath == "unsafe":
+		case l.roots[p]:
+			for _, name := range p.CompiledGoFiles {
+				go l.parseRoot(name)
+			}
+		case l.state[p].key == "":
+			go l.state[p].decls.parse(l, p)
+		default:
+			go depCache.entry(l.state[p].key).decls.parse(l, p)
+		}
+	})
 }
 
 // load type-checks p after its imports, once.
@@ -282,45 +311,71 @@ func (l *sourceLoader) parseRoot(name string) (*ast.File, error) {
 // checkDependency type-checks a dependency's declarations only, or reuses
 // an identical earlier load.
 func (l *sourceLoader) checkDependency(p *packages.Package, st *loadState) {
-	st.key = l.dependencyKey(p)
 	if st.key == "" {
-		l.checkDeclarations(p)
+		l.checkDeclarations(p, &st.decls)
 		return
 	}
 	// One computation per key: every load uses the same *types.Package for
 	// a key, so a reused package and the imports it was checked against are
 	// the same objects as this load's.
 	listErrors := len(p.Errors)
-	c := depCache.do(st.key, func() cachedPackage {
-		l.checkDeclarations(p)
+	c := depCache.do(st.key, func(decls *parsedDeclarations) cachedPackage {
+		l.checkDeclarations(p, decls)
 		return cachedPackage{types: p.Types, errors: append([]packages.Error(nil), p.Errors[listErrors:]...)}
 	})
 	p.Types = c.types
 	p.Errors = append(p.Errors[:listErrors], c.errors...)
 }
 
-// checkDeclarations parses a dependency with its bodies purged and
-// type-checks its declarations.
-func (l *sourceLoader) checkDeclarations(p *packages.Package) {
-	var syntax []*ast.File
-	for _, name := range p.CompiledGoFiles {
-		src, err := l.readFile(name)
-		if err != nil {
-			appendLoadError(p, err)
-			continue
-		}
-		cpuTokens <- struct{}{}
-		f, err := parser.ParseFile(sharedFset, name, purge.PurgeFuncBodies(src), parser.SkipObjectResolution)
-		<-cpuTokens
-		if err != nil {
-			appendLoadError(p, err)
-		}
-		if f != nil {
-			syntax = append(syntax, f)
-		}
+// checkDeclarations type-checks a dependency's declarations, from its
+// files parsed with their bodies purged.
+func (l *sourceLoader) checkDeclarations(p *packages.Package, decls *parsedDeclarations) {
+	syntax, errs := decls.take(l, p)
+	for _, err := range errs {
+		appendLoadError(p, err)
 	}
 	p.Types = types.NewPackage(p.PkgPath, p.Name)
 	l.typeCheck(p, syntax, nil, true)
+}
+
+// parsedDeclarations is a dependency's files parsed once, with their
+// function bodies purged, and the errors reading and parsing them gave.
+// It holds them from parseAhead until checkDeclarations takes them.
+type parsedDeclarations struct {
+	once   sync.Once
+	syntax []*ast.File
+	errs   []error
+}
+
+// parse parses p's files, unless they are parsed already. Every package
+// that shares the parse has the same files with the same contents.
+func (d *parsedDeclarations) parse(l *sourceLoader, p *packages.Package) {
+	d.once.Do(func() {
+		for _, name := range p.CompiledGoFiles {
+			src, err := l.readFile(name)
+			if err != nil {
+				d.errs = append(d.errs, err)
+				continue
+			}
+			cpuTokens <- struct{}{}
+			// Given the source, ParseFile returns a file even when it fails.
+			f, err := parser.ParseFile(sharedFset, name, purge.PurgeFuncBodies(src), parser.SkipObjectResolution)
+			<-cpuTokens
+			if err != nil {
+				d.errs = append(d.errs, err)
+			}
+			d.syntax = append(d.syntax, f)
+		}
+	})
+}
+
+// take returns the parse, parsing first if no one has, and lets go of it:
+// a dependency's syntax is not kept once its declarations are checked.
+func (d *parsedDeclarations) take(l *sourceLoader, p *packages.Package) ([]*ast.File, []error) {
+	d.parse(l, p)
+	syntax, errs := d.syntax, d.errs
+	d.syntax, d.errs = nil, nil
+	return syntax, errs
 }
 
 // typeCheck runs the type checker with go/packages' configuration.
@@ -358,6 +413,9 @@ func (l *sourceLoader) typeCheck(p *packages.Package, files []*ast.File, info *t
 	}
 }
 
+// readSourceFile is os.ReadFile; tests make it fail.
+var readSourceFile = os.ReadFile
+
 // readFile reads a compiled Go file, preferring its overlay.
 func (l *sourceLoader) readFile(name string) ([]byte, error) {
 	if src, ok := l.overlay[name]; ok {
@@ -368,7 +426,7 @@ func (l *sourceLoader) readFile(name string) ([]byte, error) {
 			return src, nil
 		}
 	}
-	return os.ReadFile(name)
+	return readSourceFile(name)
 }
 
 func (l *sourceLoader) overlaid(name string) bool {
@@ -452,27 +510,32 @@ type packageCache struct {
 	m  map[string]*cacheEntry
 }
 
+// cacheEntry is one key's package: the parse its computation starts from,
+// which parseAhead may begin early, and the computed value.
 type cacheEntry struct {
-	ready chan struct{}
+	decls parsedDeclarations
+	once  sync.Once
 	value cachedPackage
 }
 
-// do returns the value cached for key, computing it with compute if no
-// load has: concurrent callers for one key wait for a single computation.
-func (c *packageCache) do(key string, compute func() cachedPackage) cachedPackage {
+// entry returns key's entry, adding it if there is none.
+func (c *packageCache) entry(key string) *cacheEntry {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	e, ok := c.m[key]
 	if !ok {
-		e = &cacheEntry{ready: make(chan struct{})}
+		e = &cacheEntry{}
 		c.m[key] = e
 	}
-	c.mu.Unlock()
-	if ok {
-		<-e.ready
-		return e.value
-	}
-	defer close(e.ready)
-	e.value = compute()
+	return e
+}
+
+// do returns the value cached for key, computing it with compute from the
+// entry's parse if no load has: concurrent callers for one key wait for a
+// single computation.
+func (c *packageCache) do(key string, compute func(*parsedDeclarations) cachedPackage) cachedPackage {
+	e := c.entry(key)
+	e.once.Do(func() { e.value = compute(&e.decls) })
 	return e.value
 }
 
