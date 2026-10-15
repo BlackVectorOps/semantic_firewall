@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/api"
@@ -258,4 +259,49 @@ func TestDiffBatchWithFS_EqualsDiffWithFS(t *testing.T) {
 		}
 		return out
 	})
+}
+
+// A batch applies Diff's input rules to each path: an empty path, a missing
+// file and a file of only whitespace have no functions; a stat or read
+// error and a file over models.MaxSourceFileSize fail their pair, the old
+// side's error first; a file of exactly the limit is diffed.
+func TestDiffBatch_InputRules(t *testing.T) {
+	root := t.TempDir()
+	src := "package p\n\nfunc F() int { return 1 }\n"
+	pad := func(size int) string { return src + "//" + strings.Repeat("x", size-len(src)-3) + "\n" }
+	writeFilesIn(t, root, map[string]string{
+		"go.mod":      "module example.com/m\n\ngo 1.22\n",
+		"p/a.go":      src,
+		"blank/b.go":  "\n\t \n",
+		"q/limit.go":  pad(models.MaxSourceFileSize),
+		"r/big.go":    pad(models.MaxSourceFileSize + 1),
+		"s/dir.go/x":  "",
+		"loose/b.txt": "",
+	})
+	path := func(name string) string { return filepath.Join(root, filepath.FromSlash(name)) }
+	pairs := []api.DiffPair{
+		{Old: "", New: path("p/a.go")},
+		{Old: path("p/missing.go"), New: path("p/a.go")},
+		{Old: path("blank/b.go"), New: path("p/a.go")},
+		{Old: "", New: path("q/limit.go")},
+		{Old: path("r/big.go"), New: path("p/a.go")},
+		{Old: path("p/a.go"), New: path("r/big.go")},
+		{Old: path("p/a.go/x.go"), New: path("p/a.go")},
+		{Old: path("p/a.go"), New: path("s/dir.go")},
+		{Old: path("r/big.go"), New: path("s/dir.go")},
+	}
+	got := api.DiffBatch(pairs)
+	sameAsSingles(t, pairs, got, singleDiff)
+	for i, want := range []string{
+		"", "", "", "",
+		"failed to process old file: file " + path("r/big.go") + " exceeds maximum analysis size",
+		"failed to process new file: file " + path("r/big.go") + " exceeds maximum analysis size",
+		"failed to process old file: failed to stat " + path("p/a.go/x.go"),
+		"failed to process new file: path is a directory: " + path("s/dir.go"),
+		"failed to process old file: file " + path("r/big.go"),
+	} {
+		if msg := got[i].ErrorMessage; want == "" && (msg != "" || len(got[i].Functions) == 0) || !strings.HasPrefix(msg, want) {
+			t.Errorf("pair %d: error %q, %d functions; want %q", i, msg, len(got[i].Functions), want)
+		}
+	}
 }
