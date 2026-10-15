@@ -180,7 +180,7 @@ func (s *settingsScan) store(addr *ssa.FieldAddr, c *ssa.Const) {
 // secureSettings returns the secure settings of fn (see
 // collectSecuritySettings), following helpers depth calls deep.
 func (m *settingsMemo) secureSettings(fn *ssa.Function, depth int) map[string]struct{} {
-	key := reachKey{fn, depth}
+	key := reachKey{fn: fn, depth: depth}
 	if settings, ok := m.secure[key]; ok {
 		return settings
 	}

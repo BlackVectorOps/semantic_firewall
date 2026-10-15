@@ -33,6 +33,14 @@ func TestAssessTopologyDelta_DeletionSignals(t *testing.T) {
 		return t
 	}
 	const skip, cookie = "crypto/tls.Config.InsecureSkipVerify=true", "net/http.Cookie.Secure=true"
+	checks := func(keys ...string) *topology.FunctionTopology {
+		t := fileTopo(nil, nil)
+		t.Checks = map[string]bool{}
+		for _, k := range keys {
+			t.Checks[k] = true
+		}
+		return t
+	}
 	cases := []struct {
 		name     string
 		old, new *topology.FunctionTopology
@@ -67,6 +75,22 @@ func TestAssessTopologyDelta_DeletionSignals(t *testing.T) {
 		{"secure setting added", settings(fileTopo(nil, nil), nil, nil), settings(fileTopo(nil, nil), nil, []string{cookie}),
 			nil, 0},
 
+		{"a check removed", checks("example.com/p.authorize"), checks(), []string{"RemovedCheck(example.com/p.authorize)"}, models.RiskScoreHigh},
+		{"a check exported", checks("(example.com/p.validator).validate"), checks("(example.com/p.Validator).Validate"), nil, 0},
+		{"a check renamed", checks("example.com/p.authorize"), checks("example.com/p.authorizeUser"),
+			[]string{"RemovedCheck(example.com/p.authorize)"}, models.RiskScoreHigh},
+		{"a module's new major version", checks("(github.com/casbin/casbin/v2.Enforcer).Enforce"), checks("(github.com/casbin/casbin/v3.Enforcer).Enforce"),
+			[]string{"ReplacedCheck((github.com/casbin/casbin/v2.Enforcer).Enforce->(github.com/casbin/casbin/v3.Enforcer).Enforce)"}, 0},
+		{"a fork and a moved library", checks("github.com/go-ozzo/ozzo-validation/v4.ValidateStruct", "(gopkg.in/square/go-jose.v2.JSONWebSignature).Verify"),
+			checks("github.com/pocketbase/ozzo-validation/v4.ValidateStruct", "(github.com/go-jose/go-jose/v3.JSONWebSignature).Verify"),
+			[]string{"ReplacedCheck((gopkg.in/square/go-jose.v2.JSONWebSignature).Verify->(github.com/go-jose/go-jose/v3.JSONWebSignature).Verify," +
+				"github.com/go-ozzo/ozzo-validation/v4.ValidateStruct->github.com/pocketbase/ozzo-validation/v4.ValidateStruct)"}, 0},
+		{"the same name in a package of another name", checks("example.com/auth.Verify"), checks("example.com/noop.Verify"),
+			[]string{"RemovedCheck(example.com/auth.Verify)"}, models.RiskScoreHigh},
+		{"a primitive replaced by a look-alike", checks("crypto/hmac.Equal"), checks("example.com/crypto/hmac.Equal"),
+			[]string{"RemovedCheck(crypto/hmac.Equal)"}, models.RiskScoreHigh},
+		{"a check replaced by a look-alike primitive", checks("example.com/x/hmac.Equal"), checks("crypto/hmac.Equal"),
+			[]string{"RemovedCheck(example.com/x/hmac.Equal)"}, models.RiskScoreHigh},
 		{"error exits removed are labelled, not charged", &topology.FunctionTopology{ErrorExits: 3}, &topology.FunctionTopology{ErrorExits: 1},
 			[]string{"ErrorExits-2"}, 0},
 		{"error exits added", &topology.FunctionTopology{ErrorExits: 1}, &topology.FunctionTopology{ErrorExits: 3},
@@ -106,6 +130,25 @@ func TestAssessTopologyDelta_Profile(t *testing.T) {
 	want = []string{"Capability+exec(golang.org/x/sys/unix.Exec)", "Unguarded(" + own + "," + near + ")", models.TopoDeltaGoroutine}
 	if score := riskAdditionalCapability + 2*models.RiskScoreHigh; !reflect.DeepEqual(r.labels, want) || r.score(0) != score {
 		t.Errorf("default profile: labels %q, score %d; want %q, %d", r.labels, r.score(0), want, score)
+	}
+}
+
+func TestPackageBase(t *testing.T) {
+	for path, want := range map[string]string{
+		"github.com/casbin/casbin/v2": "casbin", "gopkg.in/square/go-jose.v2": "go-jose", "github.com/go-jose/go-jose/v3": "go-jose",
+		"example.com/p": "p", "v2": "v2", "example.com/x.v": "x.v", "example.com/vendor": "vendor", "": "",
+	} {
+		if got := packageBase(path); got != want {
+			t.Errorf("packageBase(%q) = %q; want %q", path, got, want)
+		}
+	}
+	for key, want := range map[string][3]string{
+		"crypto/hmac.Equal": {"crypto/hmac", "", "Equal"}, "(crypto/x509.Certificate).Verify": {"crypto/x509", "Certificate", "Verify"},
+		"(.error).Error": {"", "error", "Error"}, "Name": {"", "", "Name"},
+	} {
+		if pkg, recv, name := splitCheckKey(key); [3]string{pkg, recv, name} != want {
+			t.Errorf("splitCheckKey(%q) = %q, %q, %q; want %q", key, pkg, recv, name, want)
+		}
 	}
 }
 

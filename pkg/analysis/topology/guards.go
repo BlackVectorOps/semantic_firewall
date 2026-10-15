@@ -254,7 +254,7 @@ func (nr noReturns) calledIn(b *ssa.BasicBlock) bool {
 // never reports whether callee, a function of caller's package, never
 // returns: each of its blocks that returns calls a function isNoReturn
 // lists (a die helper that prints and exits). The search goes no deeper,
-// and never leaves the package, for the reason verificationsReached gives.
+// and never leaves the package, for the reason checksReached gives.
 func (nr noReturns) never(callee, caller *ssa.Function) bool {
 	if pkg := pkgOf(callee); pkg == nil || pkg != pkgOf(caller) || len(callee.Blocks) == 0 {
 		return false

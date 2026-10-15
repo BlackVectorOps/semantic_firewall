@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -187,16 +188,39 @@ func assessTopologyDeltaFor(oldT, newT *topology.FunctionTopology, profile riskP
 
 	// A removed verification call is how a guard gets deleted: a MAC or
 	// signature check, certificate verification, a password comparison.
-	var removedChecks []string
+	// A check that reappears under the same name with only its first
+	// letter's case changed (an exported rename) is the same check. One
+	// that reappears under the same name in a package of the same name at
+	// another path (a module's new major version, a fork, a library that
+	// moved) is labelled ReplacedCheck without points: the code still
+	// checks, through an implementation a reviewer should see.
+	var addedChecks []string
+	for target := range newT.Checks {
+		if !oldT.Checks[target] {
+			addedChecks = append(addedChecks, target)
+		}
+	}
+	sort.Strings(addedChecks)
+	var removedChecks, replacedChecks []string
 	for target := range oldT.Checks {
-		if !newT.Checks[target] {
+		if newT.Checks[target] {
+			continue
+		}
+		switch match, samePackage := matchingCheck(target, addedChecks); {
+		case match == "":
 			removedChecks = append(removedChecks, target)
+		case !samePackage:
+			replacedChecks = append(replacedChecks, target+"->"+match)
 		}
 	}
 	if len(removedChecks) > 0 {
 		sort.Strings(removedChecks)
 		r.labels = append(r.labels, fmt.Sprintf("RemovedCheck(%s)", strings.Join(removedChecks, ",")))
 		r.escalation += models.RiskScoreHigh
+	}
+	if len(replacedChecks) > 0 {
+		sort.Strings(replacedChecks)
+		r.labels = append(r.labels, fmt.Sprintf("ReplacedCheck(%s)", strings.Join(replacedChecks, ",")))
 	}
 
 	if newPlain > 0 {
@@ -304,6 +328,68 @@ func tlsVersionNumber(s string) (int64, bool) {
 	}
 	v, err := strconv.ParseInt(s, 0, 64)
 	return v, err == nil
+}
+
+// matchingCheck returns the first of candidates that is check key old
+// under another spelling, and whether it is in the same package: the same
+// receiver and name but for the case of their first letters, in the same
+// package or in a package whose path ends in the same name, ignoring major
+// version suffixes ("/v3", ".v2"). A verification primitive matches only
+// itself: a function of another package named Equal is no hmac.Equal.
+func matchingCheck(old string, candidates []string) (match string, samePackage bool) {
+	pkg, recv, name := splitCheckKey(old)
+	if topology.IsVerificationCall(pkg, recv, name) {
+		return "", false
+	}
+	for _, c := range candidates {
+		cPkg, cRecv, cName := splitCheckKey(c)
+		if topology.IsVerificationCall(cPkg, cRecv, cName) || lowerFirst(cRecv) != lowerFirst(recv) || lowerFirst(cName) != lowerFirst(name) {
+			continue
+		}
+		if cPkg == pkg {
+			return c, true
+		}
+		if packageBase(cPkg) == packageBase(pkg) {
+			return c, false
+		}
+	}
+	return "", false
+}
+
+// splitCheckKey splits a Checks key, "pkg.Name" or "(pkg.Recv).Name".
+func splitCheckKey(key string) (pkg, recv, name string) {
+	if rest, ok := strings.CutPrefix(key, "("); ok {
+		if typ, method, found := strings.Cut(rest, ")."); found {
+			i := strings.LastIndexByte(typ, '.')
+			return typ[:max(i, 0)], typ[i+1:], method
+		}
+	}
+	i := strings.LastIndexByte(key, '.')
+	return key[:max(i, 0)], "", key[i+1:]
+}
+
+// packageBase is the last element of an import path without a major
+// version: "casbin" for github.com/casbin/casbin/v2, "go-jose" for
+// gopkg.in/square/go-jose.v2.
+func packageBase(path string) string {
+	elems := strings.Split(path, "/")
+	last := elems[len(elems)-1]
+	if len(elems) > 1 && majorVersion.MatchString(last) {
+		last = elems[len(elems)-2]
+	}
+	if i := strings.LastIndex(last, ".v"); i > 0 && majorVersion.MatchString(last[i+1:]) {
+		last = last[:i]
+	}
+	return last
+}
+
+var majorVersion = regexp.MustCompile(`^v[0-9]+$`)
+
+func lowerFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToLower(s[:1]) + s[1:]
 }
 
 func callTargetsOf(t *topology.FunctionTopology) map[string]int {

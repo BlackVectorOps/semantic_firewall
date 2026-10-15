@@ -26,6 +26,11 @@ func TestSplitWords(t *testing.T) {
 	for name, want := range map[string]bool{
 		"authorize": true, "IsAdmin": true, "hasPermission": true, "validateToken": true,
 		"checkCache": false, "formatRow": false, "Close": false, "authorName": true,
+		// Names with an action verb fetch, build or change state.
+		"GetRoles": false, "BuildRoleLinks": false, "rebuildRoleLinks": false, "GetRoleManager": false,
+		"DeleteAllExternalAuthsByRecord": false, "FindAllExternalAuthsByRecord": false,
+		"realtimeUnsetClientsAuthState": false, "setOwner": false, "loadACL": false, "updateAccessToken": false,
+		"NewValidator": false, "register_admin": false, "isValidProto": true, "AllowN": true, "Verified": true,
 	} {
 		if got := isVerificationName(name); got != want {
 			t.Errorf("isVerificationName(%q) = %v; want %v", name, got, want)

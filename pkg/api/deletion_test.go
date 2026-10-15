@@ -307,6 +307,27 @@ type S struct{ mu sync.Mutex; token string }
 func (s *S) verifyToken(t string) error { return nil }
 func (s *S) Check(t string) error { s.mu.Lock(); defer s.mu.Unlock(); return nil }
 `},
+		{name: "checks moved into a validate helper", fn: "Encode", label: "RemovedCheck",
+			oldSrc: `package p
+import "errors"
+func validName(s string) bool { return s != "" }
+func Encode(h map[string]string) error { for k := range h { if !validName(k) { return errors.New("bad header") } }; return nil }
+`,
+			newSrc: `package p
+import "errors"
+func validName(s string) bool { return s != "" }
+func validateHeaders(h map[string]string) string { for k := range h { if !validName(k) { return k } }; return "" }
+func Encode(h map[string]string) error { if bad := validateHeaders(h); bad != "" { return errors.New("bad header " + bad) }; return nil }
+`},
+		{name: "a check's role getter removed", fn: "Implicit", label: "RemovedCheck",
+			oldSrc: `package p
+type RM interface{ GetRoles(string) ([]string, error) }
+func Implicit(rm RM, u string) ([]string, error) { roles, err := rm.GetRoles(u); if err != nil { return nil, err }; return roles, nil }
+`,
+			newSrc: `package p
+type RM interface{ GetRoles(string) ([]string, error) }
+func Implicit(rm RM, u string) ([]string, error) { return []string{u}, nil }
+`},
 		{name: "a getter call replaced by its field", fn: "Label", label: "RemovedCheck",
 			oldSrc: `package p
 type Commit struct{ author string }

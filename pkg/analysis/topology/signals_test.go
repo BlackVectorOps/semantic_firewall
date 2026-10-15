@@ -602,6 +602,17 @@ type S = Server
 func (s S) authorize(u string) bool { return u == "admin" }
 func F(s Server, u string) int { if !s.authorize(u) { return 0 }; return 1 }
 func main() {}`, []string{"(testmod.Server).authorize"}},
+		{"checks a validate helper makes", `package main
+import "errors"
+func validName(s string) bool { return s != "" }
+func validateHeaders(h map[string]string) string { for k := range h { if !validName(k) { return k } }; return "" }
+func F(h map[string]string) error { if bad := validateHeaders(h); bad != "" { return errors.New(bad) }; return nil }
+func main() {}`, []string{"testmod.validateHeaders", "testmod.validName"}},
+		{"checks another helper makes stay its own", `package main
+func validName(s string) bool { return s != "" }
+func render(s string) string { if !validName(s) { return "" }; return s }
+func F(s string) string { return render(s) }
+func main() {}`, nil},
 		{"getters returned are no checks", `package main
 type Commit struct{ author, token, role string }
 func (c *Commit) Author() string { return c.author }
