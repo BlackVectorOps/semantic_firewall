@@ -1,5 +1,7 @@
 // Code copied from golang.org/x/tools v0.48.0, internal/astutil/purge.go.
-// Only the package clause and doc comment differ.
+// The package clause and doc comment differ, and so does the tracking of
+// "[...]": upstream forgets it at any semicolon, including those inside
+// the element type's struct or interface body, and purges the literal.
 
 // Copyright 2023 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
@@ -45,7 +47,7 @@ func PurgeFuncBodies(src []byte) []byte {
 	var prev token.Token
 	var cursor int         // last consumed src offset
 	var braces []token.Pos // stack of unclosed braces, or -1 for a region we preserve
-	var ellipsis bool      // saw "[...]" not yet consumed by a literal-body "{"
+	ellipsis := -1         // brace depth of a "[...]" not yet consumed by its literal-body "{", or -1
 	for {
 		pos, tok, _ := sc.Scan()
 		if tok == token.EOF {
@@ -56,22 +58,27 @@ func PurgeFuncBodies(src []byte) []byte {
 			// TODO(adonovan): opt: skip, to save an estimated 20% of time.
 
 		case token.SEMICOLON:
-			ellipsis = false
+			// A semicolon at the depth of the "[...]" ends its
+			// statement; deeper ones are in the element type's
+			// struct or interface body.
+			if len(braces) == ellipsis {
+				ellipsis = -1
+			}
 
 		case token.RBRACK:
 			// "...]" occurs only in the array-type prefix of a
 			// composite literal; variadic "..." is followed by
 			// a type or ")", never "]".
 			if prev == token.ELLIPSIS {
-				ellipsis = true
+				ellipsis = len(braces)
 			}
 
 		case token.LBRACE:
 			if prev == token.STRUCT || prev == token.INTERFACE {
 				pos = -1 // type body: preserve (don't consume ellipsis)
-			} else if ellipsis {
+			} else if len(braces) == ellipsis {
 				pos = -1 // [...]T literal body: preserve
-				ellipsis = false
+				ellipsis = -1
 			}
 			braces = append(braces, pos)
 

@@ -236,6 +236,22 @@ func TestLoadSource_ErrorParity(t *testing.T) {
 	mustContain(t, snap, "package example.com/v/a illTyped=true")
 }
 
+// A dependency's length-elided array whose element type spans lines keeps
+// its length: a root that sizes an array by it or indexes it type-checks
+// as with go/packages.
+func TestLoadSource_ElidedArrayLengthParity(t *testing.T) {
+	root := t.TempDir()
+	writeFiles(t, root, map[string]string{
+		"go.mod": "module example.com/m\n\ngo 1.22\n",
+		"dep/d.go": "package dep\n\nvar Table = [...]struct {\n\tName string\n\tN    int\n}{{\"a\", 1}, {\"b\", 2}, {\"c\", 3}}\n\n" +
+			"var Hooks = [...]interface{ Run(); Stop() }{nil, nil}\n",
+		"root/r.go": "package root\n\nimport \"example.com/m/dep\"\n\nvar seen [len(dep.Table) + len(dep.Hooks)]bool\n\n" +
+			"func Last() string { seen[4] = true; return dep.Table[2].Name }\n",
+	})
+	snap := assertLoadersAgree(t, func() *packages.Config { return sourceLoaderConfig(root, nil) }, "./root")
+	mustContain(t, snap, "package example.com/m/root illTyped=false", "func example.com/m/root.Last ")
+}
+
 // The one intended difference: dependency function bodies are not
 // type-checked, so an error confined to them no longer makes the root
 // ill-typed. go/packages fails the root; loadSource analyzes it.

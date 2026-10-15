@@ -100,6 +100,28 @@ func TestPurgeFuncBodiesCases(t *testing.T) {
 			in:   "package p\nvar X, Y = [...]int{1}, T{2}\n",
 			want: "package p\nvar X, Y = [...]int{1}, T{}\n",
 		},
+		// Semicolons in the element type's own body, written or inserted
+		// at a newline, do not end the "[...]".
+		{
+			name: "auto-sized array of a struct over several lines",
+			in:   "package p\nvar X = [...]struct {\n\tA int\n\tB int\n}{{1, 2}, {3, 4}}\nvar Y = T{2}\n",
+			want: "package p\nvar X = [...]struct {\n\tA int\n\tB int\n}{{1, 2}, {3, 4}}\nvar Y = T{}\n",
+		},
+		{
+			name: "auto-sized array of an interface",
+			in:   "package p\nvar X = [...]interface{ M(); N() }{nil, nil}\n",
+			want: "package p\nvar X = [...]interface{ M(); N() }{nil, nil}\n",
+		},
+		{
+			name: "auto-sized array of a nested struct",
+			in:   "package p\nvar X = [...]struct{ A struct{ B int; C int }; D int }{{}, {}}\n",
+			want: "package p\nvar X = [...]struct{ A struct{ B int; C int }; D int }{{}, {}}\n",
+		},
+		{
+			name: "auto-sized array in a function body",
+			in:   "package p\nfunc F() { x := [...]struct{ A int; B int }{{}}; _ = x }\nvar Y = T{2}\n",
+			want: "package p\nfunc F() {}\nvar Y = T{}\n",
+		},
 		// An unbalanced "}" is ignored rather than crashing the scanner.
 		{
 			name: "stray closing brace",
