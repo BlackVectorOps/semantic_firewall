@@ -3,14 +3,17 @@
 Written at the end of a long session for the next agent. Read all of it
 before touching anything. **Delete `.claude/handoff/` before PR #39 merges.**
 
-## Where things stand (session 2, head `bc91411`)
+## Where things stand (session 3, head `9f23f48`)
 
 - Repo `BlackVectorOps/semantic_firewall`, Go module `.../v5`, Go 1.26.3.
 - Work branch `ccr-33d08e80-zi15zu`, draft **PR #39** (title still says WIP).
   Session 2 worked on `ccr-2e562674-eku5cl` first, opened PR #40, then the
   user said to move to #39: #39's branch was fast-forwarded and #40 closed.
   If your session is assigned another branch, ask before pushing to #39's.
-- CI green on every commit through `bc91411`. Working tree clean.
+- CI green on every commit through `9f23f48`. Working tree clean.
+- Session 3 (this one): noise evaluation, loader speed (own design, the
+  user's request), persistent type cache, import pruning, `go.work`
+  honored. Details in "Loader speed work" and "Workspaces" below.
 - `.Jules/` deleted at the user's request (main deleted it too).
 
 ### Session 2: hardening pass, two files at a time
@@ -40,16 +43,23 @@ Done (see commit messages for full lists):
 Mutation status: pairs 1, 2 and 3 closed. `deps.go` (575 mutants on
 `dea05fc`): every survivor is in the accepted classes below.
 
-Next, in order:
+Next, in order (the user asked "are we ready for review or merge"; the
+answer was: not until these four pairs are done):
 1. Pair 4 `api/risk.go`+`api/batch.go`: a hunter was running when the
    session ended; its results are lost. Relaunch it (prompt: scoring vs
    README, withoutModuleTargets key parsing incl. "(.error).Error" and
    module-prefix paths, batch == separate diffs, races with -race,
    panics; CalculateTopologyDelta has no caller and 0% coverage). Also
-   mutate `raisesTLSVersion` (added in pair 2).
-2. Pair 5 `diff/loader.go`+`purge.go`, pair 6 `api/diff.go`+
-   `cli/diff_logic.go` (readDiffInput error paths), pair 7 the rest
-   (fingerprinter, package_functions, cli/deps, cmd/sfw/main).
+   mutate `raisesTLSVersion` (added in pair 2). batch.go's session-3 code
+   (pathResolver/keepFiles use, the fingerprint filter) is already
+   mutation-closed; the rest of the file is not.
+2. Pair 5: `diff/loader.go` is closed (session 3, all survivors speed-only
+   or equivalent, listed below); `purge.go` (copied from x/tools) remains.
+3. Pair 6 `api/diff.go`+`cli/diff_logic.go` (readDiffInput error paths;
+   inFile/pathResolver already closed), pair 7 the rest (fingerprinter:
+   its session-3 code FingerprintPackagesWhere, functionPosition,
+   WorkspaceFile/HardenedEnvFor is closed; package_functions, cli/deps,
+   cmd/sfw/main).
 3. Done in session 2: the noise evaluation. `eval_compare.py` (several sfw
    builds on the same pairs per commit) and `analyze.py` here; run with Go
    >= the repos' go lines first on PATH (the container's default `go` was
@@ -59,9 +69,15 @@ Next, in order:
    alerts), every alert judged in that commit message. ErrorExits stays
    a label. Remaining branch false positives: functions moved across
    files (batch mode could pair them; not built).
-4. Open question for the user: a tree with `go.work` is analyzed with
-   GOWORK=off (documented as a limit). Fail instead, or honor it?
-5. Deferred, reported to the user: share the check-helper search across
+4. Decided in session 3: `go.work` is honored (see Workspaces below).
+5. Before PR #39 leaves draft (ask the user first): refresh its title and
+   body (still "WIP"; lists the loader as remaining; does not mention the
+   type cache, import pruning, workspaces, batch speedups, or the two
+   documented divergences from go/packages: errors only a dependency's
+   bodies would see, including in packages only bodies import). Before
+   merge: delete `.claude/handoff/`. At release the user bumps
+   `SFW_VERSION`/README pins and publishes the tag.
+6. Deferred, reported to the user: share the check-helper search across
    functions (needs a per-package cache, outside one pair); settings set
    through a field's address (`flag.BoolVar(&cfg.InsecureSkipVerify..)`);
    func-typed fields (`Transport.DialContext`); a generic function alone.
@@ -188,6 +204,21 @@ payload, releasing a payload; typecache.go executableID internals,
 digest read error, a body without its NUL (nil payload anyway),
 CreateTemp as root, Close/Rename chaining, removing an already renamed
 temp file, length/touch/trim boundaries.
+Workspaces (session 3, `46a2a59`, `a6e1702`, `9f23f48`; the user chose
+to honor go.work): `diff.WorkspaceFile` finds the governing go.work as the
+go command does but stops at the first `.git` entry (the Action's base
+worktree sits inside the head's checkout); every loader env passes it as
+GOWORK (`HardenedEnvFor`). deps diff treats the workspace's other modules
+as local replacements named `use ./dir` from the go.work, so a `use` of
+a directory taking a dependency's path reads `v1.0.0 -> use ./shadow`;
+a `go work vendor` tree loads from the workspace vendor dir.
+`SandboxExec` mounts the go.work's directory. The Action's deps mode now
+also triggers on go.work/go.work.sum and runs `go mod download` with the
+same bounded search (unbounded, the base download found the head's
+go.work, fetched nothing, and deps diff failed; an Action test proves
+it). Accepted mutants: WorkspaceFile's Abs error (Getwd), workspacePath's
+ToSlash (Linux), SandboxExec's workspace mount forced on (mounts the cwd,
+already mounted).
 Next levers, measured: `diffResults` runs pairs serially (0.37 s of the
 batch); GC is ~25% of CPU (GOGC=200 gives 5-15%); `BuildSSAFromPackages`
 builds root packages one at a time; API-closure import pruning would skip
