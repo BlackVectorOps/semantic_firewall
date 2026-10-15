@@ -154,12 +154,28 @@ Accepted equivalent mutants: parse-ahead scheduling (loader.go
 dropping the syntax (memory), the `strictMode` literal `false` in
 api/diff.go and api/batch.go (strict mode only panics on an SSA
 instruction type the canonicalizer does not handle; it handles all).
-Next levers, measured: dependency declarations are 45% of a single
-diff's CPU (a persistent cross-process cache would remove them, but a
-type cache is attack surface for a security tool: decide with the
-user); `diffResults` runs pairs serially (0.37 s of the batch); GC is
-~25% of CPU (GOGC=200 gives 5-15%); `BuildSSAFromPackages` builds root
-packages one at a time.
+Persistent type cache (`pkg/diff/typecache.go`, user approved the
+design: "local run gets the cache with sfw writing the entries"):
+content-addressed entries (executable hash, path/name/sizes/Go
+version/GODEBUG, file SHA-256s, import keys) of shared dependencies,
+gcexportdata payload + SHA-256, decoded against the package's transitive
+imports and rejected if it refers to anything else. Never stores a
+package with errors or an ill-typed import (a bug the tests caught: go/types
+reports nothing for uses of invalid types). Phases in `prepareStored`:
+digests in parallel, keys, entries fetched in parallel (a miss starts
+parsing). Policy (`internal/cli/typecache.go`, called from main): on/off
+via SFW_TYPE_CACHE, default on only at a terminal outside CI; gVisor
+workers see it read-only at /sfwtypes (`internal/sandbox`), so sandboxed
+code can never write an entry. Warm single pbs diff ~30% faster (CLI
+1.7 s -> 1.19 s on the post-restart VM); outputs identical in every mode.
+Accepted mutants: read's length boundary (an empty payload never
+decodes), touch boundary, the export error check (gcexportdata.Write does
+not fail even on invalid types), Close-error handling; CreateTemp failure
+is tested only as non-root (CI).
+Next levers, measured: `diffResults` runs pairs serially (0.37 s of the
+batch); GC is ~25% of CPU (GOGC=200 gives 5-15%); `BuildSSAFromPackages`
+builds root packages one at a time; API-closure import pruning would skip
+~45% of dependency packages but only 14-36% of bytes.
 
 Action (`action.yml`): `mode: deps`, and diff mode uses one
 `sfw diff --batch`. Tested by `internal/actiontest`.
