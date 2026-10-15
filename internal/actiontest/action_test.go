@@ -23,6 +23,16 @@ var (
 	buildErr  error
 )
 
+// TestMain removes the sfw build of sfwOnPath when the tests are done; each
+// run would otherwise leave its binary in the temp directory.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if binDir != "" {
+		os.RemoveAll(binDir)
+	}
+	os.Exit(code)
+}
+
 // sfwOnPath builds sfw once and returns a directory holding an `sfw`
 // wrapper that runs it with --no-sandbox (the test host has no runsc).
 func sfwOnPath(t *testing.T) string {
