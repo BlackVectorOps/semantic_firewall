@@ -161,6 +161,9 @@ func (s *typeStore) path(key string) string {
 	return filepath.Join(s.dir, key[:2], key)
 }
 
+// readEntry is os.ReadFile; tests slow it down.
+var readEntry = os.ReadFile
+
 // exportMu serializes encoding and decoding: decoding may add objects to
 // the packages it is given.
 var exportMu sync.Mutex
@@ -174,7 +177,7 @@ var exportMu sync.Mutex
 // needed import paths, each followed by a newline, a NUL byte, and the
 // export data.
 func (s *typeStore) read(key string) (needed []string, payload []byte) {
-	data, err := os.ReadFile(s.path(key))
+	data, err := readEntry(s.path(key))
 	if err != nil || len(data) < len(entryMagic)+sha256.Size || string(data[:len(entryMagic)]) != entryMagic {
 		return nil, nil
 	}

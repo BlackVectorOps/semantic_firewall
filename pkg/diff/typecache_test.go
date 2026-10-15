@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -646,5 +647,32 @@ func TestTypeCache_EntriesRecordNeededImports(t *testing.T) {
 	}
 	if s.misses.Load() != 1 {
 		t.Errorf("%d misses; want 1, dep", s.misses.Load())
+	}
+}
+
+// Every entry read a load starts, including those of packages it turns
+// out not to need, ends before the load returns. Here the reads that find
+// no entry, those of packages no load needed (compress/bzip2), are slow.
+func TestTypeCache_PrefetchesEndWithTheLoad(t *testing.T) {
+	root := cachedModule(t)
+	s := newStore(t, true)
+	withStore(t, s)
+	snapshotOf(t, root, "./r")
+
+	var started, ended atomic.Int64
+	readEntry = func(name string) ([]byte, error) {
+		if _, err := os.Stat(name); err == nil {
+			return os.ReadFile(name)
+		}
+		started.Add(1)
+		defer ended.Add(1)
+		time.Sleep(2 * time.Second)
+		return os.ReadFile(name)
+	}
+	t.Cleanup(func() { readEntry = os.ReadFile })
+	freshProcess(s)
+	snapshotOf(t, root, "./r")
+	if got, want := ended.Load(), started.Load(); got != want || want == 0 {
+		t.Errorf("%d of %d entry reads had ended when the load returned", got, want)
 	}
 }

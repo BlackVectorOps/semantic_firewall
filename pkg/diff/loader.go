@@ -96,6 +96,7 @@ func loadSource(cfg *packages.Config, patterns ...string) ([]*packages.Package, 
 		}(r)
 	}
 	wg.Wait()
+	l.prefetches.Wait()
 	return roots, nil
 }
 
@@ -169,11 +170,13 @@ var sharedFset = token.NewFileSet()
 var cpuTokens = make(chan struct{}, runtime.GOMAXPROCS(0))
 
 type sourceLoader struct {
-	// store is the persistent type cache, or nil.
-	store   *typeStore
-	overlay map[string][]byte
-	roots   map[*packages.Package]bool
-	state   map[*packages.Package]*loadState
+	// store is the persistent type cache, or nil; prefetches counts the
+	// entries prepareStored is reading.
+	store      *typeStore
+	prefetches sync.WaitGroup
+	overlay    map[string][]byte
+	roots      map[*packages.Package]bool
+	state      map[*packages.Package]*loadState
 
 	// rootFiles caches root parses by filename: a file compiled into two
 	// roots (a package and its test variant) is parsed once, as
@@ -360,8 +363,14 @@ func (l *sourceLoader) prepareStored(roots []*packages.Package) {
 	for _, p := range shared {
 		l.keyStored(p)
 	}
+	// Some of these packages no load may need; the load still waits for
+	// every read before it returns.
 	for _, p := range shared {
-		go l.fetchStored(p)
+		l.prefetches.Add(1)
+		go func(p *packages.Package) {
+			defer l.prefetches.Done()
+			l.fetchStored(p)
+		}(p)
 	}
 }
 
