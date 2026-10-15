@@ -725,9 +725,9 @@ func TestTypeCache_ImportWithListErrorsHasNoKey(t *testing.T) {
 	})
 	pinnedModules(t, root, map[string]map[string]string{
 		"example.com/x@v1.0.0": {
-			"go.mod": "module example.com/x\n\ngo 1.22\n",
-			"a/a.go": "package a\n\nimport \"example.com/x/b\"\n\ntype A struct{ B b.B }\n",
-			"b/b.go": "package b\n\nimport \"example.com/x/never\"\n\ntype B struct{ N never.T }\n",
+			"go.mod":     "module example.com/x\n\ngo 1.22\n",
+			"a/a.go":     "package a\n\nimport \"example.com/x/b\"\n\ntype A struct{ B b.B }\n",
+			"b/b.go":     "package b\n\nimport \"example.com/x/never\"\n\ntype B struct{ N never.T }\n",
 			"never/n.go": "//go:build never\n\npackage never\n\ntype T int\n",
 		},
 	})
