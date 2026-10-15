@@ -6,6 +6,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +21,7 @@ import (
 
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff/internal/purge"
 )
 
 // loaderSnapshot renders what the analysis derives from a load: every root
@@ -808,5 +812,106 @@ func TestLoadSource_SharedDependenciesNeverImportARoot(t *testing.T) {
 		if imp.Path() == "strconv" && imp != strconvRoot.Types {
 			t.Errorf("reflect was checked against another load's strconv")
 		}
+	}
+}
+
+// A dependency's check needs the imports its declarations name, with
+// function bodies purged: a type, a constant, a signature, an embedded
+// field, a constraint, a variable's initializer, a dot import, and an
+// import whose package has no name. An import named only in a body, a
+// function literal's body, or a blank import, is not needed.
+func TestDeclaredImports(t *testing.T) {
+	src := `package p
+
+import (
+	"bytes"
+	"context"
+	. "errors"
+	"io"
+	ospkg "os"
+	"strings"
+	"time"
+	_ "embed"
+	"example.com/noname"
+	"example.com/unknown/alias"
+	"sync"
+	"unicode"
+	"net"
+)
+
+type T struct {
+	io.Reader
+	d time.Duration
+}
+
+const Max = len("x") + int(unicode.MaxASCII)
+
+var Upper = strings.ToUpper("a")
+
+var Run = func() { _ = net.Dial }
+
+func F(ctx context.Context) ospkg.FileMode { var b bytes.Buffer; _ = b; return 0 }
+
+func G[S ~[]E, E comparable](s S) {}
+
+type L struct{ mu sync.Mutex }
+
+var e = New("x")
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "p.go", purge.PurgeFuncBodies([]byte(src)), parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &packages.Package{Imports: map[string]*packages.Package{}}
+	for _, path := range []string{"bytes", "context", "errors", "io", "os", "strings", "time", "embed", "sync", "unicode", "net"} {
+		p.Imports[path] = &packages.Package{PkgPath: path, Name: filepath.Base(path)}
+	}
+	p.Imports["example.com/noname"] = &packages.Package{PkgPath: "example.com/noname"}
+	got := strings.Join(declaredImports(p, []*ast.File{f}), " ")
+	want := "context errors example.com/noname io os strings sync time unicode"
+	if got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+}
+
+// A package a dependency imports only for its function bodies is never
+// loaded: not parsed, not checked, not ill-typed for its importers. Here
+// it has an error in its declarations, which go/packages reports through
+// the dependency to the root; loadSource does not, as with any error that
+// only a dependency's bodies would see. A single import declaration left
+// empty is dropped, a grouped one keeps its needed import.
+func TestLoadSource_BodyOnlyImportsAreNotLoaded(t *testing.T) {
+	root := t.TempDir()
+	writeFiles(t, root, map[string]string{
+		"go.mod":         "module example.com/m\n\ngo 1.22\n",
+		"broken/b.go":    "package broken\n\nvar X undefinedType\n\nfunc Use() {}\n",
+		"dep/single.go":  "package dep\n\nimport \"example.com/m/broken\"\n\nfunc Body() { broken.Use() }\n",
+		"dep/grouped.go": "package dep\n\nimport (\n\t\"os/exec\"\n\t\"strings\"\n)\n\nvar Up = strings.ToUpper(\"a\")\n\nfunc Run() { exec.Command(\"x\") }\n",
+		"root/r.go":      "package root\n\nimport (\n\t\"net\"\n\n\t\"example.com/m/dep\"\n)\n\nfunc R(a string) {\n\tif dep.Up != \"\" {\n\t\tnet.Dial(\"tcp\", a)\n\t}\n}\n",
+	})
+	want, err := packages.Load(sourceLoaderConfig(root, nil), "./root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, loaderSnapshot(t, want), "package example.com/m/root illTyped=true")
+
+	roots, err := loadSource(sourceLoaderConfig(root, nil), "./root")
+	if err != nil || len(roots) != 1 {
+		t.Fatalf("%v %v", roots, err)
+	}
+	snap := loaderSnapshot(t, roots)
+	mustContain(t, snap, "package example.com/m/root illTyped=false", "func example.com/m/root.R ", "\"net.Dial\":\"network\"")
+	dep := roots[0].Imports["example.com/m/dep"]
+	if dep.Types == nil || dep.IllTyped || dep.Types.Scope().Lookup("Up") == nil {
+		t.Fatalf("dep: types %v, ill-typed %v, errors %v", dep.Types, dep.IllTyped, dep.Errors)
+	}
+	for _, path := range []string{"example.com/m/broken", "os/exec"} {
+		if dep.Imports[path].Types != nil {
+			t.Errorf("%s, imported only for dep's bodies, was loaded", path)
+		}
+	}
+	if dep.Imports["strings"].Types == nil {
+		t.Errorf("strings, which dep's declarations use, was not loaded")
 	}
 }

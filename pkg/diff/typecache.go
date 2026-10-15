@@ -34,7 +34,7 @@ const TypeCacheEnvVar = "SFW_TYPE_CACHE"
 
 // typeCacheFormat is part of every key; change it when the entry format
 // or what an entry holds changes.
-const typeCacheFormat = "sfw-types-1"
+const typeCacheFormat = "sfw-types-2"
 
 // entryMagic starts every entry file, before the payload's SHA-256.
 const entryMagic = "sfw-types\n"
@@ -165,17 +165,31 @@ func (s *typeStore) path(key string) string {
 // the packages it is given.
 var exportMu sync.Mutex
 
-// read returns the payload of the entry stored under key, or nil when
-// there is none or it fails its checksum. A writable cache records the use
-// in the entry's time, at most once per touchInterval.
-func (s *typeStore) read(key string) []byte {
+// read returns the needed imports and export data of the entry stored
+// under key, or a nil payload when there is none, it fails its checksum or
+// it is malformed. A writable cache records the use in the entry's time,
+// at most once per touchInterval.
+//
+// An entry is entryMagic, the SHA-256 of its body, and the body: the
+// needed import paths, each followed by a newline, a NUL byte, and the
+// export data.
+func (s *typeStore) read(key string) (needed []string, payload []byte) {
 	data, err := os.ReadFile(s.path(key))
 	if err != nil || len(data) < len(entryMagic)+sha256.Size || string(data[:len(entryMagic)]) != entryMagic {
-		return nil
+		return nil, nil
 	}
-	sum, payload := data[len(entryMagic):len(entryMagic)+sha256.Size], data[len(entryMagic)+sha256.Size:]
-	if got := sha256.Sum256(payload); !bytes.Equal(sum, got[:]) {
-		return nil
+	sum, body := data[len(entryMagic):len(entryMagic)+sha256.Size], data[len(entryMagic)+sha256.Size:]
+	if got := sha256.Sum256(body); !bytes.Equal(sum, got[:]) {
+		return nil, nil
+	}
+	paths, payload, ok := bytes.Cut(body, []byte{0})
+	if !ok {
+		return nil, nil
+	}
+	for _, path := range strings.SplitAfter(string(paths), "\n") {
+		if path != "" {
+			needed = append(needed, strings.TrimSuffix(path, "\n"))
+		}
 	}
 	if s.writable {
 		now := time.Now()
@@ -183,19 +197,13 @@ func (s *typeStore) read(key string) []byte {
 			os.Chtimes(s.path(key), now, now)
 		}
 	}
-	return payload
+	return needed, payload
 }
 
-// decode returns the types in payload for p, decoded against the packages
-// p imports, directly or not, or nil. A decoded package that refers to any
-// other package than those is rejected.
-func decode(payload []byte, p *packages.Package) *types.Package {
-	view := make(map[string]*types.Package)
-	packages.Visit([]*packages.Package{p}, nil, func(q *packages.Package) {
-		if q != p {
-			view[q.PkgPath] = q.Types
-		}
-	})
+// decode returns the types in payload for p, decoded against view, the
+// packages p's check depends on by path, or nil. A decoded package that
+// refers to any other package than those is rejected.
+func decode(payload []byte, p *packages.Package, view map[string]*types.Package) *types.Package {
 	given := make(map[string]*types.Package, len(view))
 	for path, pkg := range view {
 		given[path] = pkg
@@ -214,13 +222,17 @@ func decode(payload []byte, p *packages.Package) *types.Package {
 	return pkg
 }
 
-// save stores pkg under key, when the cache is writable. The entry appears
-// whole or not at all.
-func (s *typeStore) save(key string, pkg *types.Package) {
+// save stores pkg, whose check needed the imports at needed, under key,
+// when the cache is writable. The entry appears whole or not at all.
+func (s *typeStore) save(key string, needed []string, pkg *types.Package) {
 	if !s.writable {
 		return
 	}
 	var payload bytes.Buffer
+	for _, path := range needed {
+		payload.WriteString(path + "\n")
+	}
+	payload.WriteByte(0)
 	exportMu.Lock()
 	err := gcexportdata.Write(&payload, sharedFset, pkg)
 	exportMu.Unlock()

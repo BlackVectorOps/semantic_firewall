@@ -798,7 +798,8 @@ scanner, err := pebbledb.NewPebbleScanner("signatures.db", pebbledb.DefaultPebbl
 - a batch's files are listed with one `go list` run over their directories. `go/packages` runs one per file; it builds the same packages for each file, and picks the same ones for a file outside any listed package;
 - the packages being diffed are parsed with comments and fully type-checked, with the same `types.Config` as `go/packages`;
 - their dependencies are parsed with function bodies removed (`PurgeFuncBodies`, copied from x/tools' gopls), without comments or object resolution, and type-checked without bodies;
-- every file is parsed as soon as `go list` returns, while type-checking waits for each package's imports;
+- a dependency's imports that no declaration names, which only its function bodies use, are not loaded at all. A dependency is parsed as soon as a load needs it, and its parse decides which of its imports are needed. This skips about 45% of the dependency packages; gin's diffs get about 19% faster;
+- the diffed packages' files are parsed as soon as `go list` returns, while type-checking waits for each package's imports;
 - standard-library packages, and module-cache packages not replaced by a local directory, are type-checked once per process and shared by both trees and all batch groups. The cache key covers the package path and name, type sizes, Go version, file paths and the keys of its imports;
 - only the diffed files' functions are fingerprinted.
 
@@ -812,7 +813,7 @@ Those shared dependencies can also be kept between runs, in a cache that `sfw` a
 
 A hit therefore means the same source bytes checked by the same program. Even under the same module version, an edited file misses.
 
-- **Which packages are stored:** only those without errors and without an ill-typed import.
+- **Which packages are stored:** only those without errors and without an ill-typed import. An entry also records which imports its package's declarations need, so a warm run skips the others without parsing.
 - **Damaged entries:** an entry failing its checksum, or decoding to anything but its own package against the packages it imports, is recomputed.
 - **Location:** `sfw/types` in the user cache directory, private to the user. Entries unused for a week are removed.
 - **Speed:** a warm cache makes the pocketbase diff above about 30% faster.
@@ -831,7 +832,7 @@ The cache is off by default in automation for a reason: a pull request's code ma
 
 A worker in the gVisor sandbox sees the cache read-only. Entries come from runs outside a sandbox: `--no-sandbox`, or a host without `runsc`. Code running in the sandbox can leave nothing behind for a later analysis to trust.
 
-The only output difference from `go/packages` is that a type error inside a dependency's function body is not reported, since bodies are not checked. `pkg/diff` tests compare the two loaders' functions, fingerprints and full topologies on fixtures for modules, tests, overlays, type errors, cgo, build tags, replacements, vendoring, cross-package generics and Go versions, and, with `SFW_PARITY_CORPUS` set, on a corpus of cloned projects. `SFW_LOADER=packages` selects `go/packages`. A module with an import cycle falls back to it. `sfw check`, `scan` and `deps diff` use `go/packages`.
+The only output difference from `go/packages` concerns errors that only a dependency's function bodies would see. Neither a type error inside a body nor an error in a package that only the bodies import is reported, since bodies are not checked. `pkg/diff` tests compare the two loaders' functions, fingerprints and full topologies on fixtures for modules, tests, overlays, type errors, cgo, build tags, replacements, vendoring, cross-package generics and Go versions, and, with `SFW_PARITY_CORPUS` set, on a corpus of cloned projects. `SFW_LOADER=packages` selects `go/packages`. A module with an import cycle falls back to it. `sfw check`, `scan` and `deps diff` use `go/packages`.
 
 A function with more than 5000 blocks (`MaxFunctionBlocks`) is not canonicalized. Its fingerprint is a SHA-256 over the raw SSA, which is sensitive to renames.
 

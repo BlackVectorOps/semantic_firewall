@@ -99,7 +99,8 @@ func cachedModule(t *testing.T) string {
 	pinnedModules(t, root, map[string]map[string]string{
 		"example.com/dep@v1.0.0": {
 			"go.mod": "module example.com/dep\n\ngo 1.22\n",
-			"dep.go": "package dep\n\nimport \"strings\"\n\nconst On = false\n\n" +
+			"dep.go": "package dep\n\nimport (\n\t\"compress/bzip2\"\n\t\"io\"\n\t\"strings\"\n)\n\nconst On = false\n\n" +
+				"func Unzip(r io.Reader) io.Reader { return bzip2.NewReader(r) }\n\n" +
 				"func Map[A, B any](xs []A, f func(A) B) []B {\n\tout := make([]B, 0, len(xs))\n\tfor _, x := range xs {\n\t\tout = append(out, f(x))\n\t}\n\treturn out\n}\n\n" +
 				"func Trim(s string) string { return strings.TrimSpace(s) }\n\n" +
 				"type List[T any] struct{ items []T }\n\nfunc (l *List[T]) Push(v T) { l.items = append(l.items, v) }\n",
@@ -425,20 +426,26 @@ func TestTypeCache_DecodeChecksItsPackage(t *testing.T) {
 	if bufio == nil {
 		t.Fatal("bufio was not loaded")
 	}
-	payload := s.read(storedKeyOf("bufio"))
+	_, payload := s.read(storedKeyOf("bufio"))
 	if payload == nil {
 		t.Fatal("no entry for bufio")
 	}
-	if decode(payload, bufio) == nil {
+	view := make(map[string]*types.Package)
+	packages.Visit([]*packages.Package{bufio}, nil, func(q *packages.Package) {
+		if q != bufio && q.Types != nil {
+			view[q.PkgPath] = q.Types
+		}
+	})
+	if decode(payload, bufio, view) == nil {
 		t.Errorf("bufio's entry did not decode for bufio")
 	}
-	if decode(payload, &packages.Package{PkgPath: "bufio", Name: "other"}) != nil {
+	if decode(payload, &packages.Package{PkgPath: "bufio", Name: "other"}, view) != nil {
 		t.Errorf("bufio's entry decoded for a package of another name")
 	}
-	if decode(payload, &packages.Package{PkgPath: "bufio", Name: "bufio"}) != nil {
+	if decode(payload, bufio, map[string]*types.Package{}) != nil {
 		t.Errorf("bufio's entry decoded without the packages it refers to")
 	}
-	if decode(payload[:len(payload)/2], bufio) != nil {
+	if decode(payload[:len(payload)/2], bufio, view) != nil {
 		t.Errorf("half an entry decoded")
 	}
 }
@@ -498,9 +505,9 @@ func TestTypeStore_TrimAndTouch(t *testing.T) {
 	write := func(name string, age time.Duration) string {
 		f := filepath.Join(s.dir, name[:2], name)
 		os.MkdirAll(filepath.Dir(f), 0o700)
-		payload := []byte("payload")
-		sum := sha256.Sum256(payload)
-		if err := os.WriteFile(f, append(append([]byte(entryMagic), sum[:]...), payload...), 0o600); err != nil {
+		body := []byte("\x00payload")
+		sum := sha256.Sum256(body)
+		if err := os.WriteFile(f, append(append([]byte(entryMagic), sum[:]...), body...), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		os.Chtimes(f, now.Add(-age), now.Add(-age))
@@ -531,7 +538,7 @@ func TestTypeStore_TrimAndTouch(t *testing.T) {
 	for _, writable := range []bool{false, true} {
 		s.writable = writable
 		os.Chtimes(recent, now.Add(-touchInterval-time.Hour), now.Add(-touchInterval-time.Hour))
-		if s.read("aarecent") == nil {
+		if _, payload := s.read("aarecent"); payload == nil {
 			t.Fatal("entry not read")
 		}
 		info, _ := os.Stat(recent)
@@ -571,7 +578,7 @@ func TestTypeStore_SaveToUnwritableDirectory(t *testing.T) {
 	}
 	os.Chmod(shard, 0o500)
 	t.Cleanup(func() { os.Chmod(shard, 0o700) })
-	s.save(key, types.NewPackage("example.com/p", "p"))
+	s.save(key, nil, types.NewPackage("example.com/p", "p"))
 	if files, _ := os.ReadDir(shard); len(files) != 0 {
 		t.Errorf("wrote %v", files)
 	}
@@ -585,9 +592,59 @@ func TestTypeStore_FailedSaveLeavesNothing(t *testing.T) {
 	if err := os.MkdirAll(s.path(key), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	s.save(key, types.NewPackage("example.com/p", "p"))
+	s.save(key, nil, types.NewPackage("example.com/p", "p"))
 	files, _ := os.ReadDir(filepath.Dir(s.path(key)))
 	if len(files) != 1 || !files[0].IsDir() {
 		t.Errorf("left %v; want only the directory", files)
+	}
+}
+
+// An entry records the imports its package's declarations need, so a
+// load in a new process skips the others without parsing: dep imports
+// compress/bzip2 for a function body only. An entry naming an import its
+// package does not have is a miss.
+func TestTypeCache_EntriesRecordNeededImports(t *testing.T) {
+	root := cachedModule(t)
+	want := goPackagesSnapshot(t, root, "./r")
+	s := newStore(t, true)
+	withStore(t, s)
+	snapshotOf(t, root, "./r")
+	key := storedKeyOf("example.com/dep")
+	if needed, payload := s.read(key); payload == nil || strings.Join(needed, " ") != "io" {
+		t.Fatalf("dep's entry records %q (payload %v); want io", needed, payload != nil)
+	}
+
+	freshProcess(s)
+	roots, err := loadSource(sourceLoaderConfig(root, nil), "./r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := firstDifference(want, loaderSnapshot(t, roots)); d != "" {
+		t.Fatalf("warm load differs from go/packages: %s", d)
+	}
+	if s.misses.Load() != 0 {
+		t.Errorf("%d misses", s.misses.Load())
+	}
+	if bz := roots[0].Imports["example.com/dep"].Imports["compress/bzip2"]; bz.Types != nil {
+		t.Errorf("compress/bzip2, needed by no declaration, was loaded")
+	}
+
+	// Rewrite dep's entry to also name an import dep does not have.
+	f := entries(t, s)[key]
+	data, err := os.ReadFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := append([]byte("example.com/nosuch\n"), data[len(entryMagic)+sha256.Size:]...)
+	sum := sha256.Sum256(body)
+	if err := os.WriteFile(f, append(append([]byte(entryMagic), sum[:]...), body...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	freshProcess(s)
+	if d := firstDifference(want, snapshotOf(t, root, "./r")); d != "" {
+		t.Fatalf("load with the bad entry differs from go/packages: %s", d)
+	}
+	if s.misses.Load() != 1 {
+		t.Errorf("%d misses; want 1, dep", s.misses.Load())
 	}
 }

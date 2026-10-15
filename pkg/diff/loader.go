@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -185,8 +186,10 @@ type loadState struct {
 	once sync.Once
 	// key identifies a shareable dependency; "" when it may not be reused.
 	key string
-	// decls is a dependency's parse when it is not shareable.
+	// decls and need are a dependency's parse and needed imports when it
+	// is not shareable.
 	decls parsedDeclarations
+	need  neededPaths
 }
 
 type parsedFile struct {
@@ -195,25 +198,142 @@ type parsedFile struct {
 	err   error
 }
 
-// parseAhead starts parsing every file the load will type-check: the
-// roots' files, and the dependencies' unless an earlier load has checked
-// them. Parsing needs no types, so it need not wait, as type-checking
-// does, until a package's imports are checked. With a persistent type
-// cache, prepareStored starts parsing the shared dependencies it misses.
+// parseAhead starts parsing the roots' files: parsing needs no types, so
+// it need not wait, as type-checking does, until the imports are checked.
+// A dependency is parsed as soon as a load needs it (see neededImports).
 func (l *sourceLoader) parseAhead(roots []*packages.Package) {
-	packages.Visit(roots, nil, func(p *packages.Package) {
-		switch {
-		case p.PkgPath == "unsafe":
-		case l.roots[p]:
+	for _, p := range roots {
+		if p.PkgPath != "unsafe" {
 			for _, name := range p.CompiledGoFiles {
 				go l.parseRoot(name)
 			}
-		case l.state[p].key == "":
-			go l.state[p].decls.parse(l, p)
-		case l.store == nil:
-			go depCache.entry(l.state[p].key).decls.parse(l, p)
 		}
+	}
+}
+
+// neededImports returns the import paths a check of the dependency p
+// needs: those its declarations name (see declaredImports). The packages
+// it imports only for its function bodies are not loaded at all. A
+// shared dependency's cache entry records them; otherwise p is parsed for
+// them, once.
+func (l *sourceLoader) neededImports(p *packages.Package) []string {
+	st := l.state[p]
+	need, decls := &st.need, &st.decls
+	if st.key != "" {
+		e := depCache.entry(st.key)
+		need, decls = &e.need, &e.decls
+	}
+	need.once.Do(func() {
+		if st.key != "" && l.store != nil && len(p.Errors) == 0 {
+			l.fetchStored(p)
+			if stored := l.storedOf(p); stored.payload != nil {
+				need.paths = stored.needed
+				return
+			}
+		}
+		decls.parse(l, p)
+		need.paths = declaredImports(p, decls.syntax)
 	})
+	return need.paths
+}
+
+// neededView returns, by path, the packages the check of the dependency p
+// depends on: its needed imports, theirs, and so on. The load of p waited
+// for each, and no other: another package of the load may be checking
+// right now one that p imports only for its bodies.
+func (l *sourceLoader) neededView(p *packages.Package) map[string]*types.Package {
+	view := make(map[string]*types.Package)
+	var walk func(q *packages.Package)
+	walk = func(q *packages.Package) {
+		for _, path := range l.neededImports(q) {
+			imp := q.Imports[path]
+			if _, seen := view[imp.PkgPath]; seen || imp.PkgPath == "unsafe" {
+				continue
+			}
+			view[imp.PkgPath] = imp.Types
+			walk(imp)
+		}
+	}
+	walk(p)
+	return view
+}
+
+// neededPaths is the paths neededImports returns for a package, once.
+type neededPaths struct {
+	once  sync.Once
+	paths []string
+}
+
+// declaredImports returns, sorted, the paths of p's imports that its
+// files, parsed with function bodies purged, can use: those whose name
+// appears as an identifier outside the import declarations, dot imports,
+// and imports whose package has no name. With the bodies gone, any other
+// import serves the bodies only. A blank import declares no name.
+func declaredImports(p *packages.Package, files []*ast.File) []string {
+	used := make(map[string]bool)
+	for _, f := range files {
+		names := make(map[string]bool)
+		ast.Inspect(f, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok {
+				names[id.Name] = true
+			}
+			_, spec := n.(*ast.ImportSpec)
+			return !spec
+		})
+		for _, spec := range f.Imports {
+			path, _ := strconv.Unquote(spec.Path.Value)
+			imp := p.Imports[path]
+			if imp == nil {
+				continue // not an import go list resolved; pruneImports keeps it
+			}
+			name := imp.Name
+			if spec.Name != nil {
+				name = spec.Name.Name
+			}
+			if name == "." || name == "" || name != "_" && names[name] {
+				used[path] = true
+			}
+		}
+	}
+	paths := make([]string, 0, len(used))
+	for path := range used {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+// pruneImports removes from files the declarations of p's imports outside
+// needed: no declaration names them, and the check, which skips function
+// bodies, then needs no types for them. Declarations of anything else go
+// list did not resolve stay, for the check to report.
+func pruneImports(p *packages.Package, files []*ast.File, needed []string) {
+	keep := make(map[string]bool, len(needed))
+	for _, path := range needed {
+		keep[path] = true
+	}
+	for _, f := range files {
+		decls := f.Decls[:0]
+		for _, d := range f.Decls {
+			if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.IMPORT {
+				specs := gd.Specs[:0]
+				for _, s := range gd.Specs {
+					path, _ := strconv.Unquote(s.(*ast.ImportSpec).Path.Value)
+					if keep[path] || p.Imports[path] == nil {
+						specs = append(specs, s)
+					}
+				}
+				gd.Specs = specs
+				// An import declaration without specs has no end
+				// (ast.GenDecl.End): drop it.
+				if len(specs) == 0 {
+					continue
+				}
+			}
+			decls = append(decls, d)
+		}
+		f.Decls = decls
+	}
 }
 
 // prepareStored computes the persistent cache key of every shared
@@ -276,26 +396,42 @@ func (l *sourceLoader) keyStored(p *packages.Package) {
 	})
 }
 
-// fetchStored reads p's entry, once, and starts parsing p on a miss.
+// fetchStored reads p's entry, once. An entry naming an import p does not
+// have is a miss.
 func (l *sourceLoader) fetchStored(p *packages.Package) {
 	st := l.storedOf(p)
 	st.fetchOnce.Do(func() {
 		l.keyStored(p)
-		if st.key != "" {
-			st.payload = l.store.read(st.key)
+		if st.key == "" {
+			return
 		}
-		if st.payload == nil {
-			depCache.entry(l.state[p].key).decls.parse(l, p)
+		needed, payload := l.store.read(st.key)
+		for _, path := range needed {
+			if p.Imports[path] == nil {
+				return
+			}
 		}
+		st.needed, st.payload = needed, payload
 	})
 }
 
-// load type-checks p after its imports, once.
+// load type-checks p after the imports its check needs, once: a root's
+// every import, a dependency's needed imports.
 func (l *sourceLoader) load(p *packages.Package) {
 	st := l.state[p]
 	st.once.Do(func() {
+		var imports []*packages.Package
+		if l.roots[p] {
+			for _, imp := range p.Imports {
+				imports = append(imports, imp)
+			}
+		} else {
+			for _, path := range l.neededImports(p) {
+				imports = append(imports, p.Imports[path])
+			}
+		}
 		var wg sync.WaitGroup
-		for _, imp := range p.Imports {
+		for _, imp := range imports {
 			wg.Add(1)
 			go func(imp *packages.Package) {
 				defer wg.Done()
@@ -315,15 +451,8 @@ func (l *sourceLoader) load(p *packages.Package) {
 		} else {
 			l.checkDependency(p, st)
 		}
-		p.IllTyped = len(p.Errors) > 0
-		if !p.IllTyped {
-			for _, imp := range p.Imports {
-				if imp.IllTyped {
-					p.IllTyped = true
-					break
-				}
-			}
-		}
+		p.IllTyped = len(p.Errors) > 0 || anyIllTyped(imports)
+
 	})
 }
 
@@ -393,7 +522,7 @@ func (l *sourceLoader) parseRoot(name string) (*ast.File, error) {
 // an identical earlier load.
 func (l *sourceLoader) checkDependency(p *packages.Package, st *loadState) {
 	if st.key == "" {
-		l.checkDeclarations(p, &st.decls)
+		l.checkDeclarations(p, &st.decls, l.neededImports(p))
 		return
 	}
 	// One computation per key: every load uses the same *types.Package for
@@ -402,11 +531,12 @@ func (l *sourceLoader) checkDependency(p *packages.Package, st *loadState) {
 	// packages that, like their imports, have no errors, so one go list
 	// reports errors for is checked.
 	listErrors := len(p.Errors)
+	needed := l.neededImports(p)
 	c := depCache.do(st.key, func(e *cacheEntry) cachedPackage {
 		if l.store != nil && listErrors == 0 {
 			l.fetchStored(p)
 			if e.stored.payload != nil {
-				t := decode(e.stored.payload, p)
+				t := decode(e.stored.payload, p, l.neededView(p))
 				e.stored.payload = nil
 				if t != nil {
 					l.store.hits.Add(1)
@@ -415,9 +545,9 @@ func (l *sourceLoader) checkDependency(p *packages.Package, st *loadState) {
 			}
 			l.store.misses.Add(1)
 		}
-		l.checkDeclarations(p, &e.decls)
-		if l.store != nil && listErrors == 0 && e.stored.key != "" && len(p.Errors) == 0 && !importsIllTyped(p) {
-			l.store.save(e.stored.key, p.Types)
+		l.checkDeclarations(p, &e.decls, needed)
+		if l.store != nil && listErrors == 0 && e.stored.key != "" && len(p.Errors) == 0 && !anyIllTyped(neededPackages(p, needed)) {
+			l.store.save(e.stored.key, needed, p.Types)
 		}
 		return cachedPackage{types: p.Types, errors: append([]packages.Error(nil), p.Errors[listErrors:]...)}
 	})
@@ -425,25 +555,35 @@ func (l *sourceLoader) checkDependency(p *packages.Package, st *loadState) {
 	p.Errors = append(p.Errors[:listErrors], c.errors...)
 }
 
-// importsIllTyped reports whether any of p's imports, loaded already, is
-// ill-typed: a package checked against one is not stored, though go/types
-// reports no error for its uses of the invalid types.
-func importsIllTyped(p *packages.Package) bool {
-	for _, imp := range p.Imports {
-		if imp.IllTyped {
+// anyIllTyped reports whether any of pkgs is ill-typed. A package checked
+// against one is ill-typed too, though go/types reports no error for its
+// uses of the invalid types, and is not stored.
+func anyIllTyped(pkgs []*packages.Package) bool {
+	for _, p := range pkgs {
+		if p.IllTyped {
 			return true
 		}
 	}
 	return false
 }
 
+// neededPackages returns p's imports at paths.
+func neededPackages(p *packages.Package, paths []string) []*packages.Package {
+	out := make([]*packages.Package, len(paths))
+	for i, path := range paths {
+		out[i] = p.Imports[path]
+	}
+	return out
+}
+
 // checkDeclarations type-checks a dependency's declarations, from its
-// files parsed with their bodies purged.
-func (l *sourceLoader) checkDeclarations(p *packages.Package, decls *parsedDeclarations) {
+// files parsed with their bodies purged, against its needed imports.
+func (l *sourceLoader) checkDeclarations(p *packages.Package, decls *parsedDeclarations, needed []string) {
 	syntax, errs := decls.take(l, p)
 	for _, err := range errs {
 		appendLoadError(p, err)
 	}
+	pruneImports(p, syntax, needed)
 	p.Types = types.NewPackage(p.PkgPath, p.Name)
 	l.typeCheck(p, syntax, nil, true)
 }
@@ -625,6 +765,7 @@ type packageCache struct {
 // cache, and the computed value.
 type cacheEntry struct {
 	decls  parsedDeclarations
+	need   neededPaths
 	stored persisted
 	once   sync.Once
 	value  cachedPackage
@@ -632,13 +773,15 @@ type cacheEntry struct {
 
 // persisted is a shared package's place in the persistent type cache,
 // each part computed once: its files' digests, its key ("" when it has
-// none), and its entry's payload until decoded (nil on a miss).
+// none), and its entry: the needed imports it records and its payload
+// until decoded (nil on a miss).
 type persisted struct {
 	digestOnce sync.Once
 	digests    [][sha256.Size]byte
 	keyOnce    sync.Once
 	key        string
 	fetchOnce  sync.Once
+	needed     []string
 	payload    []byte
 }
 
