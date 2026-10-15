@@ -53,10 +53,12 @@ answer was: not until these four pairs are done):
    to code the constant-len divergence (documented, not fixed).
 3. Pair 6 `api/diff.go`+`cli/diff_logic.go` (DiffWithFS repeats
    readDiffInput's rules: pinned by TestDiffBatch_InputRules's equality;
-   inFile/pathResolver already closed), pair 7 the rest (fingerprinter:
-   its session-3 code FingerprintPackagesWhere, functionPosition,
-   WorkspaceFile/HardenedEnvFor is closed; package_functions, cli/deps,
-   cmd/sfw/main).
+   inFile/pathResolver already closed); then pair 7
+   `diff/fingerprinter.go`+`diff/package_functions.go` (fingerprinter's
+   session-3 code FingerprintPackagesWhere, functionPosition,
+   WorkspaceFile/HardenedEnvFor is closed) and pair 8
+   `internal/cli/deps.go`+`cmd/sfw/main.go` (the user split the old
+   catch-all "pair 7 the rest" into these two).
 3. Done in session 2: the noise evaluation. `eval_compare.py` (several sfw
    builds on the same pairs per commit) and `analyze.py` here; run with Go
    >= the repos' go lines first on PATH (the container's default `go` was
