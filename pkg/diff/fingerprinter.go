@@ -138,12 +138,15 @@ func oversizedFingerprint(fn *ssa.Function) string {
 }
 
 // functionPosition returns the file and line of fn's position, as
-// FingerprintResult reports them.
+// FingerprintResult reports them: where fn is written, whatever a //line
+// directive says. A diff keeps a file's functions by this file, and a
+// directive must not move a function out of the file it is in, nor into
+// another.
 func functionPosition(fn *ssa.Function) (filename string, line int) {
 	if fn.Prog == nil || fn.Prog.Fset == nil {
 		return "", 0
 	}
-	p := fn.Prog.Fset.Position(fn.Pos())
+	p := fn.Prog.Fset.PositionFor(fn.Pos(), false)
 	return p.Filename, p.Line
 }
 

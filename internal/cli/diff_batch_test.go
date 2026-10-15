@@ -122,7 +122,7 @@ func TestBatchMounts(t *testing.T) {
 		t.Skipf("%s has a context root %s above the temp dir", loose, root)
 	}
 	got := batchMounts("pairs", []api.DiffPair{{Old: a, New: b}, {Old: "", New: loose}, {Old: os.DevNull, New: a}})
-	want := []string{"pairs", filepath.Join(dir, "m"), filepath.Join(dir, "loose")}
+	want := []string{"pairs", filepath.Join(dir, "m"), loose}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("batchMounts = %v; want %v", got, want)
 	}

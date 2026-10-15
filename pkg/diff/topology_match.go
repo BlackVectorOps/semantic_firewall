@@ -45,9 +45,11 @@ func MatchFunctionsByTopology(oldResults, newResults []FingerprintResult, thresh
 
 	// Phase 1: Direct matches by Name. Closure names ("F$1", "F$2") only
 	// record creation order, which shifts when a closure is inserted, so
-	// closures are paired by content within their enclosing function instead.
+	// closures are paired by content within their enclosing function
+	// instead; so are a package's declared initializers ("init#1"), which
+	// go/ssa numbers across its files, so another file's init renumbers them.
 	for _, name := range oldNames {
-		if isClosureName(name) {
+		if _, byContent := contentGroup(name); byContent {
 			continue
 		}
 		if newR, ok := newByName[name]; ok {
@@ -195,11 +197,27 @@ func sameFunctionMatch(oldR, newR FingerprintResult) TopologyMatch {
 	}
 }
 
-// isClosureName reports whether a short function name names a closure:
-// one or more "$<n>" suffixes, as go/ssa numbers anonymous functions.
-func isClosureName(name string) bool {
-	_, ok := closureParent(name)
-	return ok
+// contentGroup returns the group within which a function is paired by
+// content, and whether it is: the enclosing named function of a closure,
+// and "init#" for the declared initializers and their closures.
+func contentGroup(name string) (string, bool) {
+	parent, closure := closureParent(name)
+	if !closure {
+		parent = name
+	}
+	if n, ok := strings.CutPrefix(parent, "init#"); ok && isNumber(n) {
+		return "init#", true
+	}
+	return parent, closure
+}
+
+func isNumber(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return s != ""
 }
 
 // closureParent returns the enclosing named function of a closure name
@@ -210,19 +228,15 @@ func closureParent(name string) (string, bool) {
 		return "", false
 	}
 	for _, part := range strings.Split(name[i+1:], "$") {
-		if part == "" {
+		if !isNumber(part) {
 			return "", false
-		}
-		for _, c := range part {
-			if c < '0' || c > '9' {
-				return "", false
-			}
 		}
 	}
 	return name[:i], true
 }
 
-// matchClosures pairs the closures of each enclosing function, in four
+// matchClosures pairs the closures of each enclosing function, and the
+// declared initializers with their closures (see contentGroup), in four
 // passes: identical fingerprints with every literal kept (unchanged
 // closures, however their numbers shifted), identical default fingerprints
 // (closures that changed only a literal), topology similarity of at least
@@ -235,7 +249,7 @@ func matchClosures(oldByName, newByName map[string]FingerprintResult, oldNames, 
 	group := func(names []string) map[string][]string {
 		g := make(map[string][]string)
 		for _, n := range names {
-			if parent, ok := closureParent(n); ok {
+			if parent, ok := contentGroup(n); ok {
 				g[parent] = append(g[parent], n)
 			}
 		}

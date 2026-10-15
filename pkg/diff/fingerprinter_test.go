@@ -256,15 +256,17 @@ func TestFingerprintPackagesWhere_MatchesFilteredResults(t *testing.T) {
 		}
 		if len(files) == 1 && files[0] == "a.go" {
 			names := render(got)
-			if !strings.Contains(names, "example.com/m/p.G$1 a.go:90") || strings.Contains(names, "example.com/m/p.G b.go") ||
+			// The //line directive in b.go names a.go: G's closure is still
+			// b.go's.
+			if !strings.Contains(names, "example.com/m/p.F$1 a.go:4") || strings.Contains(names, "example.com/m/p.G") ||
 				!strings.Contains(names, "example.com/m/p.init -:0") {
-				t.Errorf("keeping a.go: want G's closure and the initializer, not G:\n%s", names)
+				t.Errorf("keeping a.go: want F's closure and the initializer, nothing of G:\n%s", names)
 			}
 		}
 		if len(files) == 1 && files[0] == "b.go" {
 			names := render(got)
-			if !strings.Contains(names, "(example.com/m/p.T).M b.go") || strings.Contains(names, "p.Asm") {
-				t.Errorf("keeping b.go: want T's method and not the body-less Asm:\n%s", names)
+			if !strings.Contains(names, "(example.com/m/p.T).M b.go") || !strings.Contains(names, "example.com/m/p.G$1 b.go:14") || strings.Contains(names, "p.Asm") {
+				t.Errorf("keeping b.go: want T's method and G's closure, not the body-less Asm:\n%s", names)
 			}
 		}
 	}

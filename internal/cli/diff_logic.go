@@ -22,7 +22,15 @@ func RunDiff(oldFile, newFile string, noSandbox bool) error {
 
 	if !noSandbox && !sb.IsSandboxed() {
 		args := []string{cleanOld, cleanNew}
-		return SandboxExec(sb, os.Stdout, os.Stderr, "diff", args, cleanOld, cleanNew)
+		var mounts []string
+		for _, f := range args {
+			// A missing input stands for an absent side and has nothing to
+			// mount.
+			if _, err := os.Stat(f); err == nil {
+				mounts = append(mounts, f)
+			}
+		}
+		return SandboxExec(sb, os.Stdout, os.Stderr, "diff", args, mounts...)
 	}
 
 	return RunDiffLogic(fsys, os.Stdout, cleanOld, cleanNew)
@@ -71,28 +79,56 @@ func RunDiffBatch(pairsFile string, noSandbox bool) error {
 	return RunDiffBatchLogic(fsys, os.Stdout, cleanPairs)
 }
 
-// batchMounts lists what a sandboxed batch needs to see: the pairs file and
-// the context root (see findContextRoot) of every input, or its directory
-// when it has none, each once, rather than each file.
+// batchMounts lists what a sandboxed batch needs to see: the pairs file,
+// the context root (see findContextRoot) of every input, each once rather
+// than each file, and the input itself when it has no root or resolves
+// outside it (a symbolic link to a file elsewhere; the sandbox mounts a
+// link's target at the link's path). A missing input stands for an absent
+// side and has nothing to mount.
 func batchMounts(pairsFile string, pairs []api.DiffPair) []string {
 	inputs := []string{pairsFile}
 	seen := map[string]bool{}
+	add := func(m string) {
+		if !seen[m] {
+			seen[m] = true
+			inputs = append(inputs, m)
+		}
+	}
 	for _, p := range pairs {
 		for _, f := range []string{p.Old, p.New} {
 			if f == "" || f == os.DevNull {
 				continue
 			}
-			m := findContextRoot(f)
-			if m == "" {
-				m = filepath.Dir(f)
+			target, err := filepath.EvalSymlinks(f)
+			if err != nil {
+				continue
 			}
-			if !seen[m] {
-				seen[m] = true
-				inputs = append(inputs, m)
+			root := findContextRoot(f)
+			if root == "" {
+				add(f)
+				continue
+			}
+			add(root)
+			if !inDir(target, root) {
+				add(f)
 			}
 		}
 	}
 	return inputs
+}
+
+// inDir reports whether path, with its links resolved, is inside dir with
+// its links resolved.
+func inDir(path, dir string) bool {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = real
+	}
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // RunDiffBatchLogic prints the JSON array of api.DiffBatch results for the

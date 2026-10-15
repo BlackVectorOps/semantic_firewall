@@ -223,7 +223,7 @@ The package `init` function is diffed like any other. Swapping an import changes
 
 ### Files
 
-The diff reports the functions declared in the given file, closures included, plus the package's synthesized `init`. That function has no source file and runs every file's package-level initializers. The package's other files are loaded for type-checking but their functions are not reported.
+The diff reports the functions declared in the given file, closures included, plus the package's synthesized `init`. That function has no source file and runs every file's package-level initializers. The package's other files are loaded for type-checking but their functions are not reported. A function belongs to the file it is written in: a `//line` directive changes the position the compiler reports, not which file's diff the function is in.
 
 A file that the host build excludes is loaded under a configuration that includes it:
 - **`_test.go` file:** loaded with the package's tests.
@@ -243,6 +243,8 @@ Reported names are relative to the function's own package: `F`, `(*T).M`, `F$1`.
    3. `TopologySimilarity` of at least 0.6, best first;
    4. equal names.
    A pair whose names differ is reported as `F$1 → F$2` and keeps its own status; it is not `renamed`.
+
+   Declared `init` functions are paired the same way, together with their closures: `go/ssa` numbers them (`init#1`, `init#2`) across the package's files, so another file's new `init` renumbers them.
 3. The remaining functions are paired only if their fuzzy hashes are identical and their `TopologySimilarity` is at least 0.6 (`DefaultTopologyMatchThreshold`). Pairs are assigned greedily, highest similarity first.
 
 Unpaired functions are reported as `added` or `removed`. Because the fuzzy hash must match exactly, a rename combined with one added `if` changes the `BR` bucket and is reported as remove + add, even at similarity 0.92.
@@ -1105,7 +1107,7 @@ The OCI spec sets:
 | Namespaces | pid, network, ipc, uts, mount, user |
 | Resources | memory 512 MiB, CPU shares 1024, pids 64 |
 | Environment | `GOPROXY=off`, `GOPATH=/tmp/gopath`, `HOME=/tmp`, `GOCACHE=/tmp/gocache`, `GOMODCACHE=/gomodcache` |
-| Read-only mounts | the `sfw` binary, system library directories, `GOROOT`, the host module cache at `/gomodcache`, the working directory, the inputs, and each input's `go.mod`/`.git` root |
+| Read-only mounts | the `sfw` binary, system library directories, `GOROOT`, the host module cache at `/gomodcache`, the working directory, the inputs, each input's `go.mod`/`.git` root and the module root the go command uses (the nearest `go.mod`, past a `.git`), and the governing `go.work`'s directory. A batch mounts each input's root once, and an input itself only when it has no root or is a link out of it; a missing input is an absent side and is not mounted |
 | Writable mounts | `/tmp` and `/dev` (tmpfs) |
 
 Limitations:

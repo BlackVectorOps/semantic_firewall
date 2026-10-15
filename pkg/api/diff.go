@@ -2,9 +2,7 @@ package api
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
@@ -27,34 +25,9 @@ func Diff(oldPath, newPath string) (*models.DiffOutput, error) {
 // identical to Diff otherwise.
 func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, error) {
 	processFile := func(path string) ([]diff.FingerprintResult, error) {
-		if path == "" {
-			return []diff.FingerprintResult{}, nil
-		}
-		info, statErr := fsys.Stat(path)
-		if statErr != nil {
-			// A missing file is a valid "no functions" case (added/removed
-			// file). Any other stat error must surface so we never
-			// dereference the nil FileInfo below.
-			if os.IsNotExist(statErr) {
-				return []diff.FingerprintResult{}, nil
-			}
-			return nil, fmt.Errorf("failed to stat %s: %w", path, statErr)
-		}
-		if info.Size() > models.MaxSourceFileSize {
-			return nil, fmt.Errorf("file %s exceeds maximum analysis size of %d bytes", path, models.MaxSourceFileSize)
-		}
-		content, err := fsys.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		// An empty input (an empty file, or /dev/null standing in for the
-		// missing side of an added or deleted file) has no functions.
-		if len(strings.TrimSpace(string(content))) == 0 {
-			return []diff.FingerprintResult{}, nil
-		}
-		absPath, err := fsys.Abs(path)
-		if err != nil {
-			absPath = path
+		content, absPath, err := readDiffInput(fsys, path)
+		if err != nil || content == nil {
+			return []diff.FingerprintResult{}, err
 		}
 		paths := pathResolver{}
 		results, err := diff.FingerprintSourceWhere(absPath, string(content), ir.DefaultLiteralPolicy, false, paths.keepFiles(absPath))
@@ -90,7 +63,8 @@ func diffResults(oldPath, newPath string, oldResults, newResults []diff.Fingerpr
 		oldResults, newResults, models.DefaultTopologyMatchThreshold,
 	)
 
-	var functionDiffs []models.FunctionDiff
+	// An empty diff lists no functions as [], not null.
+	functionDiffs := []models.FunctionDiff{}
 	var topologyMatches []models.TopologyMatchInfo
 	preserved, modified, renamed, highRisk := 0, 0, 0, 0
 

@@ -28,6 +28,29 @@ func (rs RealSandboxer) Run(ctx context.Context, cfg sandbox.Config, stdout, std
 	return sandbox.Run(ctx, cfg, stdout, stderr)
 }
 
+// moduleRootOf returns the directory of the go.mod the go command finds for
+// path: the nearest in path's directory or above it, or "" when there is
+// none.
+func moduleRootOf(path string) string {
+	dir, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	if fi, err := os.Stat(dir); err == nil && !fi.IsDir() {
+		dir = filepath.Dir(dir)
+	}
+	for {
+		if fi, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil && !fi.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
 // Walks up the directory tree to find the context root for a file.
 // It looks for go.mod, .git, or specific worktree patterns.
 func findContextRoot(path string) string {
@@ -109,6 +132,12 @@ func SandboxExec(sb Sandboxer, stdout, stderr io.Writer, command string, args []
 		// the toolchain sees the 'go.mod' and '.git' at the root.
 		if root := findContextRoot(p); root != "" {
 			addMount(root)
+		}
+		// The go command takes the nearest go.mod as the module, past a
+		// .git entry that ends findContextRoot's search (a submodule
+		// without a go.mod is part of the module around it).
+		if mod := moduleRootOf(p); mod != "" {
+			addMount(mod)
 		}
 		// A go.work above the module governs its build (see
 		// diff.WorkspaceFile): its directory, which holds the modules the

@@ -159,8 +159,12 @@ func fingerprintFiles(fsys FileSystem, paths []string) map[string]fileResult {
 
 // readDiffInput applies Diff's input rules to one path: an empty path or a
 // missing file has no functions (nil content, nil error), as has a file
-// with only whitespace; any other stat or read error, or a file over
-// models.MaxSourceFileSize, is an error.
+// with only whitespace (an empty file, or /dev/null standing in for the
+// absent side of an added or removed file); any other stat or read error,
+// or a file over models.MaxSourceFileSize, is an error. abs is the file's
+// absolute path, which the loader reports its functions under: from the
+// FileSystem, or from the working directory when the FileSystem gives no
+// absolute path.
 func readDiffInput(fsys FileSystem, path string) (content []byte, abs string, err error) {
 	if path == "" {
 		return nil, "", nil
@@ -182,9 +186,10 @@ func readDiffInput(fsys FileSystem, path string) (content []byte, abs string, er
 	if len(strings.TrimSpace(string(content))) == 0 {
 		return nil, "", nil
 	}
-	abs, err = fsys.Abs(path)
-	if err != nil {
-		abs = path
+	if abs, err = fsys.Abs(path); err != nil || !filepath.IsAbs(abs) {
+		if abs, err = filepath.Abs(path); err != nil {
+			return nil, "", fmt.Errorf("failed to resolve %s: %w", path, err)
+		}
 	}
 	return content, abs, nil
 }
