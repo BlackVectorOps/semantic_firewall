@@ -60,6 +60,7 @@ func loadSource(cfg *packages.Config, patterns ...string) ([]*packages.Package, 
 		return nil, err
 	}
 	l := &sourceLoader{
+		store:     activeTypeStore(),
 		overlay:   cfg.Overlay,
 		roots:     make(map[*packages.Package]bool, len(roots)),
 		state:     make(map[*packages.Package]*loadState),
@@ -81,6 +82,9 @@ func loadSource(cfg *packages.Config, patterns ...string) ([]*packages.Package, 
 			l.state[p].key = l.dependencyKey(p)
 		}
 	})
+	if l.store != nil {
+		l.prepareStored(roots)
+	}
 	l.parseAhead(roots)
 	var wg sync.WaitGroup
 	for _, r := range roots {
@@ -164,6 +168,8 @@ var sharedFset = token.NewFileSet()
 var cpuTokens = make(chan struct{}, runtime.GOMAXPROCS(0))
 
 type sourceLoader struct {
+	// store is the persistent type cache, or nil.
+	store   *typeStore
 	overlay map[string][]byte
 	roots   map[*packages.Package]bool
 	state   map[*packages.Package]*loadState
@@ -192,7 +198,8 @@ type parsedFile struct {
 // parseAhead starts parsing every file the load will type-check: the
 // roots' files, and the dependencies' unless an earlier load has checked
 // them. Parsing needs no types, so it need not wait, as type-checking
-// does, until a package's imports are checked.
+// does, until a package's imports are checked. With a persistent type
+// cache, prepareStored starts parsing the shared dependencies it misses.
 func (l *sourceLoader) parseAhead(roots []*packages.Package) {
 	packages.Visit(roots, nil, func(p *packages.Package) {
 		switch {
@@ -203,8 +210,82 @@ func (l *sourceLoader) parseAhead(roots []*packages.Package) {
 			}
 		case l.state[p].key == "":
 			go l.state[p].decls.parse(l, p)
-		default:
+		case l.store == nil:
 			go depCache.entry(l.state[p].key).decls.parse(l, p)
+		}
+	})
+}
+
+// prepareStored computes the persistent cache key of every shared
+// dependency and reads its entry, starting to parse the dependency when
+// there is none: first every file's digest, at once, then the keys, then
+// every entry, at once. Only decoding an entry waits,
+// as type-checking does, until the package's imports are loaded.
+func (l *sourceLoader) prepareStored(roots []*packages.Package) {
+	var shared []*packages.Package
+	packages.Visit(roots, nil, func(p *packages.Package) {
+		if !l.roots[p] && l.state[p].key != "" && len(p.Errors) == 0 {
+			shared = append(shared, p)
+		}
+	})
+	var wg sync.WaitGroup
+	for _, p := range shared {
+		wg.Add(1)
+		go func(p *packages.Package) {
+			defer wg.Done()
+			l.digestStored(p)
+		}(p)
+	}
+	wg.Wait()
+	for _, p := range shared {
+		l.keyStored(p)
+	}
+	for _, p := range shared {
+		go l.fetchStored(p)
+	}
+}
+
+// storedOf returns the persistent cache state of the shared dependency p.
+func (l *sourceLoader) storedOf(p *packages.Package) *persisted {
+	return &depCache.entry(l.state[p].key).stored
+}
+
+// digestStored hashes p's files, once.
+func (l *sourceLoader) digestStored(p *packages.Package) {
+	st := l.storedOf(p)
+	st.digestOnce.Do(func() {
+		cpuTokens <- struct{}{}
+		st.digests = l.store.digests(p)
+		<-cpuTokens
+	})
+}
+
+// keyStored computes p's key, once, from its imports' keys. A package go
+// list reports errors for has none.
+func (l *sourceLoader) keyStored(p *packages.Package) {
+	st := l.storedOf(p)
+	st.keyOnce.Do(func() {
+		l.digestStored(p)
+		st.key = l.store.key(p, st.digests, func(imp *packages.Package) string {
+			if len(imp.Errors) > 0 {
+				return ""
+			}
+			l.keyStored(imp)
+			return l.storedOf(imp).key
+		})
+	})
+}
+
+// fetchStored reads p's entry, once, and starts parsing p on a miss.
+func (l *sourceLoader) fetchStored(p *packages.Package) {
+	st := l.storedOf(p)
+	st.fetchOnce.Do(func() {
+		l.keyStored(p)
+		if st.key != "" {
+			st.payload = l.store.read(st.key)
+		}
+		if st.payload == nil {
+			depCache.entry(l.state[p].key).decls.parse(l, p)
 		}
 	})
 }
@@ -317,14 +398,43 @@ func (l *sourceLoader) checkDependency(p *packages.Package, st *loadState) {
 	}
 	// One computation per key: every load uses the same *types.Package for
 	// a key, so a reused package and the imports it was checked against are
-	// the same objects as this load's.
+	// the same objects as this load's. The persistent type cache holds only
+	// packages that, like their imports, have no errors, so one go list
+	// reports errors for is checked.
 	listErrors := len(p.Errors)
-	c := depCache.do(st.key, func(decls *parsedDeclarations) cachedPackage {
-		l.checkDeclarations(p, decls)
+	c := depCache.do(st.key, func(e *cacheEntry) cachedPackage {
+		if l.store != nil && listErrors == 0 {
+			l.fetchStored(p)
+			if e.stored.payload != nil {
+				t := decode(e.stored.payload, p)
+				e.stored.payload = nil
+				if t != nil {
+					l.store.hits.Add(1)
+					return cachedPackage{types: t}
+				}
+			}
+			l.store.misses.Add(1)
+		}
+		l.checkDeclarations(p, &e.decls)
+		if l.store != nil && listErrors == 0 && e.stored.key != "" && len(p.Errors) == 0 && !importsIllTyped(p) {
+			l.store.save(e.stored.key, p.Types)
+		}
 		return cachedPackage{types: p.Types, errors: append([]packages.Error(nil), p.Errors[listErrors:]...)}
 	})
 	p.Types = c.types
 	p.Errors = append(p.Errors[:listErrors], c.errors...)
+}
+
+// importsIllTyped reports whether any of p's imports, loaded already, is
+// ill-typed: a package checked against one is not stored, though go/types
+// reports no error for its uses of the invalid types.
+func importsIllTyped(p *packages.Package) bool {
+	for _, imp := range p.Imports {
+		if imp.IllTyped {
+			return true
+		}
+	}
+	return false
 }
 
 // checkDeclarations type-checks a dependency's declarations, from its
@@ -511,11 +621,25 @@ type packageCache struct {
 }
 
 // cacheEntry is one key's package: the parse its computation starts from,
-// which parseAhead may begin early, and the computed value.
+// which parseAhead may begin early, its place in the persistent type
+// cache, and the computed value.
 type cacheEntry struct {
-	decls parsedDeclarations
-	once  sync.Once
-	value cachedPackage
+	decls  parsedDeclarations
+	stored persisted
+	once   sync.Once
+	value  cachedPackage
+}
+
+// persisted is a shared package's place in the persistent type cache,
+// each part computed once: its files' digests, its key ("" when it has
+// none), and its entry's payload until decoded (nil on a miss).
+type persisted struct {
+	digestOnce sync.Once
+	digests    [][sha256.Size]byte
+	keyOnce    sync.Once
+	key        string
+	fetchOnce  sync.Once
+	payload    []byte
 }
 
 // entry returns key's entry, adding it if there is none.
@@ -530,12 +654,11 @@ func (c *packageCache) entry(key string) *cacheEntry {
 	return e
 }
 
-// do returns the value cached for key, computing it with compute from the
-// entry's parse if no load has: concurrent callers for one key wait for a
-// single computation.
-func (c *packageCache) do(key string, compute func(*parsedDeclarations) cachedPackage) cachedPackage {
+// do returns the value cached for key, computing it with compute if no
+// load has: concurrent callers for one key wait for a single computation.
+func (c *packageCache) do(key string, compute func(*cacheEntry) cachedPackage) cachedPackage {
 	e := c.entry(key)
-	e.once.Do(func() { e.value = compute(&e.decls) })
+	e.once.Do(func() { e.value = compute(e) })
 	return e.value
 }
 
