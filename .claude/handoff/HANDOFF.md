@@ -3,17 +3,18 @@
 Written at the end of a long session for the next agent. Read all of it
 before touching anything. **Delete `.claude/handoff/` before PR #39 merges.**
 
-## Where things stand (session 3, head `9f23f48`)
+## Where things stand (session 3, head `36a68c9`)
 
 - Repo `BlackVectorOps/semantic_firewall`, Go module `.../v5`, Go 1.26.3.
 - Work branch `ccr-33d08e80-zi15zu`, draft **PR #39** (title still says WIP).
   Session 2 worked on `ccr-2e562674-eku5cl` first, opened PR #40, then the
   user said to move to #39: #39's branch was fast-forwarded and #40 closed.
   If your session is assigned another branch, ask before pushing to #39's.
-- CI green on every commit through `9f23f48`. Working tree clean.
+- CI green on every commit through `36a68c9`. Working tree clean.
 - Session 3 (this one): noise evaluation, loader speed (own design, the
   user's request), persistent type cache, import pruning, `go.work`
-  honored. Details in "Loader speed work" and "Workspaces" below.
+  honored, pair 4. Details in "Loader speed work", "Workspaces" and
+  "Pair 4" below.
 - `.Jules/` deleted at the user's request (main deleted it too).
 
 ### Session 2: hardening pass, two files at a time
@@ -45,17 +46,12 @@ Mutation status: pairs 1, 2 and 3 closed. `deps.go` (575 mutants on
 
 Next, in order (the user asked "are we ready for review or merge"; the
 answer was: not until these four pairs are done):
-1. Pair 4 `api/risk.go`+`api/batch.go`: a hunter was running when the
-   session ended; its results are lost. Relaunch it (prompt: scoring vs
-   README, withoutModuleTargets key parsing incl. "(.error).Error" and
-   module-prefix paths, batch == separate diffs, races with -race,
-   panics; CalculateTopologyDelta has no caller and 0% coverage). Also
-   mutate `raisesTLSVersion` (added in pair 2). batch.go's session-3 code
-   (pathResolver/keepFiles use, the fingerprint filter) is already
-   mutation-closed; the rest of the file is not.
+1. Done in session 3: pair 4 `api/risk.go`+`api/batch.go` (`4e6f2a4`,
+   `19ae6d8`, `473c660`, `36a68c9`; see "Pair 4" below).
 2. Pair 5: `diff/loader.go` is closed (session 3, all survivors speed-only
    or equivalent, listed below); `purge.go` (copied from x/tools) remains.
-3. Pair 6 `api/diff.go`+`cli/diff_logic.go` (readDiffInput error paths;
+3. Pair 6 `api/diff.go`+`cli/diff_logic.go` (DiffWithFS repeats
+   readDiffInput's rules: pinned by TestDiffBatch_InputRules's equality;
    inFile/pathResolver already closed), pair 7 the rest (fingerprinter:
    its session-3 code FingerprintPackagesWhere, functionPosition,
    WorkspaceFile/HardenedEnvFor is closed; package_functions, cli/deps,
@@ -70,13 +66,11 @@ answer was: not until these four pairs are done):
    a label. Remaining branch false positives: functions moved across
    files (batch mode could pair them; not built).
 4. Decided in session 3: `go.work` is honored (see Workspaces below).
-5. Before PR #39 leaves draft (ask the user first): refresh its title and
-   body (still "WIP"; lists the loader as remaining; does not mention the
-   type cache, import pruning, workspaces, batch speedups, or the two
-   documented divergences from go/packages: errors only a dependency's
-   bodies would see, including in packages only bodies import). Before
-   merge: delete `.claude/handoff/`. At release the user bumps
-   `SFW_VERSION`/README pins and publishes the tag.
+5. PR #39's title and body were refreshed in session 3 (the user asked);
+   keep its "Remaining" list current as pairs close. It stays a draft
+   until the user says otherwise. Before merge: delete `.claude/handoff/`.
+   At release the user bumps `SFW_VERSION`/README pins and publishes the
+   tag.
 6. Deferred, reported to the user: share the check-helper search across
    functions (needs a per-package cache, outside one pair); settings set
    through a field's address (`flag.BoolVar(&cfg.InsecureSkipVerify..)`);
@@ -219,6 +213,41 @@ go.work, fetched nothing, and deps diff failed; an Action test proves
 it). Accepted mutants: WorkspaceFile's Abs error (Getwd), workspacePath's
 ToSlash (Linux), SandboxExec's workspace mount forced on (mounts the cwd,
 already mounted).
+Pair 4 (session 3): the session-2 hunter's reproducers survived in its
+worktree; a new hunter found five more. All ten fixed, each with a test
+that fails on the old code:
+- Unguarded: a new target fires when every old call of its class was
+  guarded (guarded exec.Command swapped for unguarded os.StartProcess
+  scored 5). A new version past the 2000-block guard limit reports
+  GuardsUnknown(target), +10 (padding hid a deleted guard, scored 9).
+- raisesTLSVersion excuses a new weak bound only if the lower old bound
+  is gone (a second config lowered beside a kept TLS 1.0 one was hidden).
+- hmac.Equal <-> subtle.ConstantTimeCompare is the same check.
+- Check keys split before type arguments (a generic interface's check
+  swapped to a no-op package read as ReplacedCheck, 0).
+- equalButFirstCase compares first runes, not bytes (non-ASCII names).
+- CalculateTopologyDelta agrees with Diff for added/removed functions
+  (addedDelta/removedDelta shared with diff.go).
+- batch: a file keeps only its own packages' functions (a //line decoy
+  in another package replaced a changed function: the Action uses batch);
+  groups also key on the governing go.work (a submodule's .git stops
+  Diff's search); a non-disk FileSystem loads each file on its own.
+- actiontest now removes its 46 MB sfw build (24 leaked runs filled the
+  disk together with the mutation tool's build cache: give mutate its own
+  GOCACHE and delete it after each file).
+A replay of all 1,950 files (776 commits, 10 repos) through dc19ef3 and
+the fixed build is byte-identical: no new alerts. gin's deps upgrade is
+identical too (1 alert: go-urn's generated tables as Obfuscation:HIGH).
+Mutation (`-base 778bf19^`, whole files, survivors retested on full
+suites): accepted equivalents in risk.go: the structural cap boundary
+(9 stays 9), `ownModule != ""` forced (no capability key has an empty
+package), matchingCheck's "same" flag beside an empty match (the caller
+tests the match first), packageBase's `i > 0` (no import path element
+starts with ".v"). In batch.go: path de-duplication, the claim and the
+workspace memo (speed), `len(wellTyped) > 0` (speed), the Abs fallback
+(Getwd), strictMode. Removed as unreachable: guard-map filtering in
+withoutModuleTargets, targetPackage (splitCheckKey's package), an origin
+walk in inFileOf (every fingerprinted function has its package).
 Next levers, measured: `diffResults` runs pairs serially (0.37 s of the
 batch); GC is ~25% of CPU (GOGC=200 gives 5-15%); `BuildSSAFromPackages`
 builds root packages one at a time; API-closure import pruning would skip
@@ -268,10 +297,9 @@ Coverage (user's phone, `-coverpkg=./...`): 68.9% total; branch files
 mostly 90–100%. Real gaps to test:
 - `topology.IsVerificationCall` 55.6% (ed25519, x509, tls, bcrypt,
   filepath.IsLocal branches) — table test it.
-- `api.readDiffInput` 77.8% (stat error, read error, size limit).
+- `api.readDiffInput`: closed in pair 4 (TestDiffBatch_InputRules).
 - `diff/loader.go`: `appendLoadError` 62.5%, `hasImportCycle` 82.4%.
-- `api.CalculateTopologyDelta` / `assessTopologyDelta` 0%: exported API
-  on main with no in-repo caller — keep, add a test.
+- `api.CalculateTopologyDelta`: closed in pair 4.
 - Expected 0%: `RunDiff`, `RunDiffBatch`, `RunDepsDiff` (sandbox branch).
 
 ## Next steps, in order
