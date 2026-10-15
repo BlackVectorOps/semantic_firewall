@@ -130,7 +130,36 @@ type-checking; deps parsed with `PurgeFuncBodies`
 (`pkg/diff/internal/purge`, copied from x/tools); std and module-cache
 deps cached per process. `SFW_LOADER=packages` selects go/packages.
 Parity tests in `pkg/diff/loader_parity_test.go`
-(`SFW_PARITY_CORPUS=<roots>` runs the corpus check).
+(`SFW_PARITY_CORPUS=<roots>` runs the corpus check, which also loads every
+file of each module as one batch).
+
+Loader speed work (session 3; the user asked for our own design, not
+another model's). Measured on a 62-file pocketbase batch
+(`scratchpad/bench`, `-batch pbb.pairs`) and single diffs, outputs
+byte-identical to the pre-change build each step:
+- `loadMetadata`: go/packages ran one `go list -deps` per `file=` query,
+  serially (its TODO "one query per directory"); now one run over the
+  queried directories, roots picked as go/packages picks them, per-file
+  fallback where it would build an ad-hoc package. Batch 13.98 s -> 3.3 s.
+- `inFile` resolved symlinks per function per file (2.7 s CPU);
+  `pathResolver` memoizes.
+- `FingerprintPackagesWhere`: only the diffed files' functions are
+  canonicalized. Batch -> 1.85 s (1.2 s warm in-process).
+- Parse ahead: keys from metadata first, then every root file and
+  uncached dependency parses while imports type-check; a shared dep's
+  parse lives in its `depCache` entry (`sync.Once`). Single pbs diff
+  1.02 -> ~0.85 s; batch is CPU-bound, unchanged.
+Accepted equivalent mutants: parse-ahead scheduling (loader.go
+`l.parseAhead(roots)` and its switch cases; only speed changes), `take`
+dropping the syntax (memory), the `strictMode` literal `false` in
+api/diff.go and api/batch.go (strict mode only panics on an SSA
+instruction type the canonicalizer does not handle; it handles all).
+Next levers, measured: dependency declarations are 45% of a single
+diff's CPU (a persistent cross-process cache would remove them, but a
+type cache is attack surface for a security tool: decide with the
+user); `diffResults` runs pairs serially (0.37 s of the batch); GC is
+~25% of CPU (GOGC=200 gives 5-15%); `BuildSSAFromPackages` builds root
+packages one at a time.
 
 Action (`action.yml`): `mode: deps`, and diff mode uses one
 `sfw diff --batch`. Tested by `internal/actiontest`.
