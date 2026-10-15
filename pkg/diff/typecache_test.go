@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"go/types"
@@ -674,5 +675,104 @@ func TestTypeCache_PrefetchesEndWithTheLoad(t *testing.T) {
 	snapshotOf(t, root, "./r")
 	if got, want := ended.Load(), started.Load(); got != want || want == 0 {
 		t.Errorf("%d of %d entry reads had ended when the load returned", got, want)
+	}
+}
+
+// A load in a new process parses no shared dependency: each of its files
+// is read once, for its digest. A cold load reads them again to parse.
+func TestTypeCache_WarmLoadParsesNoSharedDependency(t *testing.T) {
+	root := cachedModule(t)
+	s := newStore(t, true)
+	withStore(t, s)
+	var mu sync.Mutex
+	reads := map[string]int{}
+	readSourceFile = func(name string) ([]byte, error) {
+		mu.Lock()
+		reads[name]++
+		mu.Unlock()
+		return os.ReadFile(name)
+	}
+	t.Cleanup(func() { readSourceFile = os.ReadFile })
+	twice := func() int {
+		n := 0
+		for _, c := range reads {
+			if c > 1 {
+				n++
+			}
+		}
+		return n
+	}
+	snapshotOf(t, root, "./r")
+	if twice() == 0 {
+		t.Fatalf("the cold load read no file twice")
+	}
+	reads = map[string]int{}
+	freshProcess(s)
+	snapshotOf(t, root, "./r")
+	if n := twice(); n != 0 || len(reads) == 0 {
+		t.Errorf("the warm load read %d files twice (of %d read)", n, len(reads))
+	}
+}
+
+// A shared dependency an import of which go list reports errors for has no
+// key: it is neither looked up nor stored. Here b imports a package whose
+// only file the default build excludes, and a imports b.
+func TestTypeCache_ImportWithListErrorsHasNoKey(t *testing.T) {
+	root := t.TempDir()
+	writeFiles(t, root, map[string]string{
+		"go.mod":    "module example.com/m\n\ngo 1.22\n\nrequire example.com/x v1.0.0\n",
+		"root/r.go": "package root\n\nimport \"example.com/x/a\"\n\nvar R a.A\n",
+	})
+	pinnedModules(t, root, map[string]map[string]string{
+		"example.com/x@v1.0.0": {
+			"go.mod": "module example.com/x\n\ngo 1.22\n",
+			"a/a.go": "package a\n\nimport \"example.com/x/b\"\n\ntype A struct{ B b.B }\n",
+			"b/b.go": "package b\n\nimport \"example.com/x/never\"\n\ntype B struct{ N never.T }\n",
+			"never/n.go": "//go:build never\n\npackage never\n\ntype T int\n",
+		},
+	})
+	want := goPackagesSnapshot(t, root, "./root")
+	mustContain(t, want, "package example.com/m/root illTyped=true")
+	s := newStore(t, true)
+	withStore(t, s)
+	for run := 0; run < 2; run++ {
+		freshProcess(s)
+		if d := firstDifference(want, snapshotOf(t, root, "./root")); d != "" {
+			t.Fatalf("run %d differs from go/packages: %s", run, d)
+		}
+		if key := storedKeyOf("example.com/x/a"); key != "" {
+			t.Errorf("run %d: a, whose import b has errors, has key %s", run, key)
+		}
+	}
+}
+
+// An entry that passes its checksum but decodes to another package is a
+// miss: here bufio's entry carries io's export data.
+func TestTypeCache_EntryForAnotherPackageIsAMiss(t *testing.T) {
+	root := cachedModule(t)
+	want := goPackagesSnapshot(t, root, "./r")
+	s := newStore(t, true)
+	withStore(t, s)
+	snapshotOf(t, root, "./r")
+	body := func(path string) []byte {
+		data, err := os.ReadFile(entries(t, s)[storedKeyOf(path)])
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		return data[len(entryMagic)+sha256.Size:]
+	}
+	bufioNeeded, _, _ := bytes.Cut(body("bufio"), []byte{0})
+	_, ioExport, _ := bytes.Cut(body("io"), []byte{0})
+	forged := append(append(bufioNeeded, 0), ioExport...)
+	sum := sha256.Sum256(forged)
+	if err := os.WriteFile(entries(t, s)[storedKeyOf("bufio")], append(append([]byte(entryMagic), sum[:]...), forged...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	freshProcess(s)
+	if d := firstDifference(want, snapshotOf(t, root, "./r")); d != "" {
+		t.Fatalf("load with the forged entry differs from go/packages: %s", d)
+	}
+	if s.misses.Load() != 1 {
+		t.Errorf("%d misses; want 1, bufio", s.misses.Load())
 	}
 }

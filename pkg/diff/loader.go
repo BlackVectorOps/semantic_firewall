@@ -273,7 +273,7 @@ type neededPaths struct {
 // and imports whose package has no name. With the bodies gone, any other
 // import serves the bodies only. A blank import declares no name.
 func declaredImports(p *packages.Package, files []*ast.File) []string {
-	used := make(map[string]bool)
+	used := make(map[string]struct{})
 	for _, f := range files {
 		names := make(map[string]bool)
 		ast.Inspect(f, func(n ast.Node) bool {
@@ -294,7 +294,7 @@ func declaredImports(p *packages.Package, files []*ast.File) []string {
 				name = spec.Name.Name
 			}
 			if name == "." || name == "" || name != "_" && names[name] {
-				used[path] = true
+				used[path] = struct{}{}
 			}
 		}
 	}
