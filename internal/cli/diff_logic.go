@@ -15,8 +15,8 @@ import (
 // -- Public API --
 
 func RunDiff(oldFile, newFile string, noSandbox bool) error {
-	cleanOld := filepath.Clean(oldFile)
-	cleanNew := filepath.Clean(newFile)
+	cleanOld := cleanDiffPath(oldFile)
+	cleanNew := cleanDiffPath(newFile)
 	sb := RealSandboxer{}
 	fsys := RealFileSystem{}
 
@@ -26,6 +26,16 @@ func RunDiff(oldFile, newFile string, noSandbox bool) error {
 	}
 
 	return RunDiffLogic(fsys, os.Stdout, cleanOld, cleanNew)
+}
+
+// cleanDiffPath cleans a diff input's path. An empty path stays empty: it
+// stands for the absent side of an added or removed file, where a cleaned
+// one would name the current directory.
+func cleanDiffPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	return filepath.Clean(p)
 }
 
 // -- Core Logic --

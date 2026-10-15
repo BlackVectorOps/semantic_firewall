@@ -127,3 +127,43 @@ func TestBatchMounts(t *testing.T) {
 		t.Errorf("batchMounts = %v; want %v", got, want)
 	}
 }
+
+// An empty path is the absent side of an added or removed file for sfw diff
+// too, as in a pairs file: it is not cleaned into the current directory.
+func TestRunDiff_EmptyPathIsAbsent(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "a.go")
+	if err := os.WriteFile(file, []byte("package p\n\nfunc F() int { return 1 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = stdout })
+	errs := []error{RunDiff("", file, true), RunDiff(file, "", true)}
+	w.Close()
+	os.Stdout = stdout
+	var out bytes.Buffer
+	if _, err := out.ReadFrom(r); err != nil {
+		t.Fatal(err)
+	}
+	dec := json.NewDecoder(&out)
+	for i, want := range []string{models.StatusAdded, models.StatusRemoved} {
+		var d models.DiffOutput
+		if errs[i] != nil {
+			t.Fatalf("diff %d: %v", i, errs[i])
+		}
+		if err := dec.Decode(&d); err != nil {
+			t.Fatalf("diff %d output: %v", i, err)
+		}
+		found := false
+		for _, f := range d.Functions {
+			found = found || f.Function == "F" && f.Status == want
+		}
+		if !found {
+			t.Errorf("diff %d: %+v; want F %s", i, d.Functions, want)
+		}
+	}
+}
