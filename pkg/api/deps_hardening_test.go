@@ -409,9 +409,11 @@ func TestDepsDiff_InventoryEdges(t *testing.T) {
 	}
 	tree := func(v string) string {
 		return appTree(t, imports, deps, map[string]string{
-			"lib/native/n/n.go":                    "package n\n\nfunc N() int { return 1 }\n",
-			"lib/native/n/bad.go":                  "//go:build ignore\n\npackage n\n\nfunc ( // " + v + "\n",
-			"lib/native/n/n_" + other + "_test.go": "package n\n\nimport _ \"unsafe\"\n\n//go:linkname nt runtime.nanotime\nfunc nt() int64 // " + v + "\n",
+			"lib/native/n/n.go": "package n\n\nfunc N() int { return 1 }\n",
+			// The import block does not parse; a partial parse still holds "C".
+			"lib/native/n/bad.go":                  "//go:build ignore\n\npackage n\n\nimport \"C\"\n\nimport ( // " + v + "\n",
+			"lib/native/n/n_" + other + "_test.go": "package n\n\nimport _ \"unsafe\"\n\n//go:linkname nt" + v + " runtime.nanotime\nfunc nt" + v + "() int64\n",
+			"lib/native/n/z_" + other + ".c":       "//go:linkname nt" + v + " runtime.nanotime\nint z;\n",
 			"lib/native/c/c.go":                    "package c\n\n// #cgo LDFLAGS: -L${SRCDIR}/../objs\nimport \"C\"\n",
 			"lib/native/c/plain.go":                "package c\n\nfunc C() int { return 1 }\n",
 			"lib/native/objs/pe":                   pe(0x40, "PE\x00\x00"+v, 0x48),
@@ -434,12 +436,13 @@ func TestDepsDiff_InventoryEdges(t *testing.T) {
 
 	got := unanalyzedKeys(findModule(t, depsDiff(t, oldDir, newDir), "example.com/native"))
 	want := map[string]int{
-		"excluded-go modified n/bad.go": 5,
-		"object modified objs/pe":       20,
-		"object modified objs/pe64":     20,
-		"other modified objs/badsig":    5,
-		"other modified objs/far":       5,
-		"other modified objs/mzshort":   5,
+		"excluded-go modified n/bad.go":  5,
+		"c modified n/z_" + other + ".c": 5,
+		"object modified objs/pe":        20,
+		"object modified objs/pe64":      20,
+		"other modified objs/badsig":     5,
+		"other modified objs/far":        5,
+		"other modified objs/mzshort":    5,
 	}
 	for k, risk := range want {
 		if r, ok := got[k]; !ok || r != risk {
@@ -447,7 +450,7 @@ func TestDepsDiff_InventoryEdges(t *testing.T) {
 		}
 	}
 	if len(got) != len(want) {
-		t.Errorf("unanalyzed = %v; want exactly %v (no pipes, dangling links, .git, tests or compiled files)", got, want)
+		t.Errorf("unanalyzed = %v; want exactly %v (no pipes, dangling links, .git, tests, compiled files, or linknames of tests and C files)", got, want)
 	}
 }
 

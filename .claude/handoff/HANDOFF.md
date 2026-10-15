@@ -37,27 +37,22 @@ Done (see commit messages for full lists):
   linknames from parsed comments of all package files keyed by package,
   method-set entry points, init boundary in reach, SCC-memoized reach.
 
-Mutation status: pairs 1 and 2 closed (remaining survivors are the
-equivalent classes below). **`deps.go` mutation ran to completion on
-`033d245`**; its result is in `mut-deps.txt` here (deps.go is unchanged
-since, so `-retest mut-deps.txt` matches by line). Survivors are not yet
-triaged. To recheck after adding tests:
-`mut -pkgs ./pkg/api -files 'deps\.go$' -run TestDepsDiff -timeout 5m -retest .claude/handoff/mut-deps.txt`.
+Mutation status: pairs 1, 2 and 3 closed. `deps.go` (575 mutants on
+`dea05fc`): every survivor is in the accepted classes below.
 
 Next, in order:
-1. Triage the `deps.go` survivors in `mut-deps.txt`.
-2. Pair 4 `api/risk.go`+`api/batch.go`: a hunter was running when the
+1. Pair 4 `api/risk.go`+`api/batch.go`: a hunter was running when the
    session ended; its results are lost. Relaunch it (prompt: scoring vs
    README, withoutModuleTargets key parsing incl. "(.error).Error" and
    module-prefix paths, batch == separate diffs, races with -race,
    panics; CalculateTopologyDelta has no caller and 0% coverage). Also
    mutate `raisesTLSVersion` (added in pair 2).
-3. Pair 5 `diff/loader.go`+`purge.go`, pair 6 `api/diff.go`+
+2. Pair 5 `diff/loader.go`+`purge.go`, pair 6 `api/diff.go`+
    `cli/diff_logic.go` (readDiffInput error paths), pair 7 the rest
    (fingerprinter, package_functions, cli/deps, cmd/sfw/main).
-4. Open question for the user: a tree with `go.work` is analyzed with
+3. Open question for the user: a tree with `go.work` is analyzed with
    GOWORK=off (documented as a limit). Fail instead, or honor it?
-5. Deferred, reported to the user: share the check-helper search across
+4. Deferred, reported to the user: share the check-helper search across
    functions (needs a per-package cache, outside one pair); settings set
    through a field's address (`flag.BoolVar(&cfg.InsecureSkipVerify..)`);
    func-typed fields (`Transport.DialContext`); a generic function alone.
@@ -160,7 +155,13 @@ buffer reuse (`g.stack`); early `break`s that only save work; the
 `owner != ""` guard on allocations; defensive checks in `structField` and
 `declaringType` (SSA FieldAddr invariants, nil field package) and its
 same-package fast path; the 4-hop bound in `isErrorExit`; purge
-`ellipsis = false` on `;` and `top < 0`.
+`ellipsis = false` on `;` and `top < 0`. In `deps.go`: the callee,
+direct-target and reach caches; the SSA-build recover; `p.Module != nil`;
+max boundaries; `strictMode` (both trees use the same mode); the
+`followed` filter where components are built (the merge filters again);
+the regular-file fast path of `isRegular`; WalkDir, open and read errors
+and `defer Close` (root cannot provoke them); `ParseFile` returning nil
+(never, for a file that can be read).
 
 Coverage (user's phone, `-coverpkg=./...`): 68.9% total; branch files
 mostly 90–100%. Real gaps to test:
