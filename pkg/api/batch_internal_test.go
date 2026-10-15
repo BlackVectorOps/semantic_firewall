@@ -141,6 +141,12 @@ func TestDiffBatch_GroupFailuresFallBack(t *testing.T) {
 		{"load error", func() {
 			loadFiles = func(string, map[string][]byte) ([]*packages.Package, error) { return nil, os.ErrPermission }
 		}},
+		{"load error with packages", func() {
+			loadFiles = func(root string, overlay map[string][]byte) ([]*packages.Package, error) {
+				pkgs, _ := origLoad(root, overlay)
+				return pkgs, os.ErrPermission
+			}
+		}},
 		{"fingerprinting panics", func() {
 			fingerprintPackages = func([]*packages.Package, ir.LiteralPolicy, bool, func(string) bool) ([]diff.FingerprintResult, error) {
 				panic("boom")
@@ -168,6 +174,28 @@ func TestDiffBatch_GroupFailuresFallBack(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A panic while fingerprinting a file on its own fails that file's pair
+// only, with the panic in its error.
+func TestDiffBatch_SingleFilePanic(t *testing.T) {
+	dir := t.TempDir()
+	loose := filepath.Join(dir, "loose.go")
+	if err := os.WriteFile(loose, []byte("package p\n\nfunc F() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := fingerprintSource
+	t.Cleanup(func() { fingerprintSource = orig })
+	fingerprintSource = func(string, string, ir.LiteralPolicy, bool, func(string) bool) ([]diff.FingerprintResult, error) {
+		panic("boom")
+	}
+	out := DiffBatch([]DiffPair{{Old: loose, New: loose}, {Old: "", New: ""}})
+	if want := "failed to process old file: panic while fingerprinting " + loose + ": boom"; out[0].ErrorMessage != want {
+		t.Errorf("error %q; want %q", out[0].ErrorMessage, want)
+	}
+	if out[1].ErrorMessage != "" {
+		t.Errorf("an empty pair failed too: %q", out[1].ErrorMessage)
 	}
 }
 

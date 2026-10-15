@@ -179,6 +179,25 @@ import "os"
 func die(msg string) { println(msg); os.Exit(1) }
 func Purge(dir string, ok bool) { if !ok { die("forbidden") }; os.RemoveAll(dir) }
 `},
+		{name: "a guarded call swapped for an unguarded one of its class", fn: "Run", label: "Unguarded(os.StartProcess)", high: true,
+			oldSrc: `package p
+import ("errors";"os/exec")
+func Run(script string, isAdmin bool) error {
+	if !isAdmin { return errors.New("forbidden") }
+	return exec.Command("sh", "-c", script).Run()
+}
+`,
+			newSrc: `package p
+import "os"
+func Run(script string, isAdmin bool) error {
+	_, err := os.StartProcess("/bin/sh", []string{"sh", "-c", script}, &os.ProcAttr{})
+	return err
+}
+`},
+		{name: "guard deleted in a function grown past the guard analysis", fn: "Purge", label: "GuardsUnknown(os.RemoveAll)", high: true,
+			oldSrc: guardedPurge,
+			newSrc: "package p\nimport \"os\"\nfunc Purge(dir string, isAdmin bool) error {\n\terr, n := os.RemoveAll(dir), 0\n" +
+				strings.Repeat("\tif isAdmin { n++ }\n", 1100) + "\t_ = n\n\treturn err\n}\n"},
 		{name: "WriteHeader of a nil constant", fn: "F", label: "Unguarded",
 			oldSrc: `package p
 type Header map[string]string
@@ -348,6 +367,12 @@ func Open(p string) (*os.File, error) { f, err := os.Open(p); if os.IsPermission
 import ("errors";"io/fs";"os")
 func Open(p string) (*os.File, error) { f, err := os.Open(p); if errors.Is(err, fs.ErrPermission) { return nil, nil }; return f, err }
 `},
+		{name: "hmac.Equal replaced by subtle.ConstantTimeCompare", fn: "Handle", label: "RemovedCheck",
+			oldSrc: checkedMAC,
+			newSrc: `package p
+import ("crypto/subtle";"errors")
+func Handle(mac, want []byte) error { if subtle.ConstantTimeCompare(mac, want) != 1 { return errors.New("bad mac") }; return nil }
+`},
 	})
 }
 
@@ -378,6 +403,9 @@ func TestDiffRisk_WeakenedSecurity(t *testing.T) {
 		{name: "a legacy TLS minimum raised", fn: "Cfg", label: "WeakenedSecurity",
 			oldSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS10} }\n",
 			newSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS11} }\n"},
+		{name: "a second config lowered beside a kept legacy minimum", fn: "Cfgs", label: "WeakenedSecurity(crypto/tls.Config.MinVersion=TLS1.1)", high: true,
+			oldSrc: "package p\nimport \"crypto/tls\"\nfunc Cfgs() (*tls.Config, *tls.Config) { return &tls.Config{MinVersion: tls.VersionTLS10}, &tls.Config{MinVersion: tls.VersionTLS12} }\n",
+			newSrc: "package p\nimport \"crypto/tls\"\nfunc Cfgs() (*tls.Config, *tls.Config) { return &tls.Config{MinVersion: tls.VersionTLS10}, &tls.Config{MinVersion: tls.VersionTLS11} }\n"},
 		{name: "a legacy TLS maximum lowered", fn: "Cfg", label: "WeakenedSecurity(crypto/tls.Config.MaxVersion=TLS1.0)", high: true,
 			oldSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { return &tls.Config{MaxVersion: tls.VersionTLS11} }\n",
 			newSrc: "package p\nimport \"crypto/tls\"\nfunc Cfg() *tls.Config { return &tls.Config{MaxVersion: tls.VersionTLS10} }\n"},

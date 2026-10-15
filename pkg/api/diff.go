@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 
@@ -159,16 +158,9 @@ func diffResults(oldPath, newPath string, oldResults, newResults []diff.Fingerpr
 	for _, r := range addedFuncs {
 		risk := models.BaseRiskAddedFunc
 		delta := models.TopoDeltaNew
-
-		fn := r.GetSSAFunction()
-		if fn != nil {
-			topo := topology.ExtractTopology(fn)
-			if topo != nil {
-				a := assessTopologyDeltaFor(nil, topo, profile)
-				if len(a.labels) > 0 {
-					delta = a.delta()
-				}
-				risk = a.score(models.BaseRiskAddedFunc)
+		if fn := r.GetSSAFunction(); fn != nil {
+			if topo := topology.ExtractTopology(fn); topo != nil {
+				delta, risk = addedDelta(topo, profile)
 			}
 		}
 
@@ -191,20 +183,13 @@ func diffResults(oldPath, newPath string, oldResults, newResults []diff.Fingerpr
 			Status:         models.StatusRemoved,
 			OldFingerprint: r.Fingerprint,
 		}
-		// Deleting a function is usually neutral, but deleting one that
-		// performed a verification (a validator, a signature check) removes
-		// that check from every caller.
 		if fn := r.GetSSAFunction(); fn != nil {
-			if topo := topology.ExtractTopology(fn); topo != nil && len(topo.Checks) > 0 {
-				checks := make([]string, 0, len(topo.Checks))
-				for c := range topo.Checks {
-					checks = append(checks, c)
-				}
-				sort.Strings(checks)
-				d.TopologyDelta = fmt.Sprintf("RemovedCheck(%s)", strings.Join(checks, ","))
-				d.RiskScore = models.RiskScoreHigh
-				highRisk++
+			if topo := topology.ExtractTopology(fn); topo != nil {
+				d.TopologyDelta, d.RiskScore = removedDelta(topo)
 			}
+		}
+		if d.RiskScore >= models.RiskScoreHigh {
+			highRisk++
 		}
 		functionDiffs = append(functionDiffs, d)
 	}

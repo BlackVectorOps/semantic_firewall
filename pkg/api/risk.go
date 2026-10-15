@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"sort"
@@ -67,18 +68,46 @@ func (r riskAssessment) delta() string {
 	return strings.Join(r.labels, ", ")
 }
 
-// CalculateTopologyDelta diffs two function topologies and returns a short
-// human label plus a heuristic risk score. A nil oldT means the function is
-// new. Newly reached capabilities (process execution, raw syscalls, plugins,
-// network, reflective invocation, filesystem mutation), new goroutines and
-// obfuscation each reach models.RiskScoreHigh on their own; ordinary call,
-// loop and branch churn is capped below it. Removing structure is neutral.
+// CalculateTopologyDelta diffs two function topologies and returns the
+// topology_delta and risk_score Diff reports for the change. A nil oldT
+// means the function was added, a nil newT that it was removed. Newly
+// reached capabilities (process execution, raw syscalls, plugins, network,
+// reflective invocation, filesystem mutation), new goroutines, obfuscation
+// and the deletion signals each reach models.RiskScoreHigh on their own;
+// ordinary call, loop and branch churn is capped below it. Removing
+// structure is neutral, except a check.
 func CalculateTopologyDelta(oldT, newT *topology.FunctionTopology) (string, int) {
-	if newT == nil {
+	switch {
+	case newT == nil && oldT == nil:
 		return models.TopoDeltaUnknown, 0
+	case newT == nil:
+		return removedDelta(oldT)
+	case oldT == nil:
+		return addedDelta(newT, riskProfile{})
 	}
-	r := assessTopologyDelta(oldT, newT)
+	r := assessTopologyDeltaFor(oldT, newT, riskProfile{})
 	return r.delta(), r.score(0)
+}
+
+// addedDelta scores an added function with topology t.
+func addedDelta(t *topology.FunctionTopology, profile riskProfile) (string, int) {
+	r := assessTopologyDeltaFor(nil, t, profile)
+	if len(r.labels) == 0 {
+		return models.TopoDeltaNew, r.score(models.BaseRiskAddedFunc)
+	}
+	return r.delta(), r.score(models.BaseRiskAddedFunc)
+}
+
+// removedDelta scores a removed function with topology t. Deleting a
+// function is usually neutral, but deleting one that performed a
+// verification (a validator, a signature check) removes that check from
+// every caller.
+func removedDelta(t *topology.FunctionTopology) (string, int) {
+	if len(t.Checks) == 0 {
+		return "", 0
+	}
+	checks := slices.Sorted(maps.Keys(t.Checks))
+	return fmt.Sprintf("RemovedCheck(%s)", strings.Join(checks, ",")), models.RiskScoreHigh
 }
 
 // riskProfile adjusts scoring to where the diffed code comes from. The zero
@@ -92,10 +121,6 @@ type riskProfile struct {
 	// labelGoroutines reports a new goroutine without charging for it. In a
 	// dependency, what a goroutine can reach is scored by the reach analysis.
 	labelGoroutines bool
-}
-
-func assessTopologyDelta(oldT, newT *topology.FunctionTopology) riskAssessment {
-	return assessTopologyDeltaFor(oldT, newT, riskProfile{})
 }
 
 func assessTopologyDeltaFor(oldT, newT *topology.FunctionTopology, profile riskProfile) riskAssessment {
@@ -154,16 +179,30 @@ func assessTopologyDeltaFor(oldT, newT *topology.FunctionTopology, profile riskP
 
 	// A capability call that every old reference made under a condition now
 	// has a reference that runs unconditionally: its guard was deleted, or
-	// the call was moved out of it.
+	// the call was moved out of it. A target the old version did not call
+	// counts when every old call of its class was guarded: swapping a
+	// guarded exec.Command for an unguarded os.StartProcess deletes the same
+	// guard. A new version too large for the guard analysis records no
+	// guards; growing a function must not hide a deleted guard, so a call
+	// the old version guarded is then GuardsUnknown, charged the same.
+	guardedClass := guardedClasses(oldT)
 	var unguarded []string
-	for target, newGuards := range newT.CapabilityGuards {
-		if oldGuards, ok := oldT.CapabilityGuards[target]; ok && oldGuards > 0 && newGuards == 0 {
+	for target, class := range newT.Capabilities {
+		wasGuarded := guardedClass[class]
+		if g, ok := oldT.CapabilityGuards[target]; ok {
+			wasGuarded = g > 0
+		}
+		if g, ok := newT.CapabilityGuards[target]; wasGuarded && (newT.CapabilityGuards == nil || ok && g == 0) {
 			unguarded = append(unguarded, target)
 		}
 	}
 	if len(unguarded) > 0 {
+		label := "Unguarded"
+		if newT.CapabilityGuards == nil {
+			label = "GuardsUnknown"
+		}
 		sort.Strings(unguarded)
-		r.labels = append(r.labels, fmt.Sprintf("Unguarded(%s)", strings.Join(unguarded, ",")))
+		r.labels = append(r.labels, fmt.Sprintf("%s(%s)", label, strings.Join(unguarded, ",")))
 		r.escalation += models.RiskScoreHigh
 	}
 
@@ -171,7 +210,7 @@ func assessTopologyDeltaFor(oldT, newT *topology.FunctionTopology, profile riskP
 	// removal weakens disappears ("-" prefix).
 	var weakened []string
 	for s := range newT.WeakSettings {
-		if !oldT.WeakSettings[s] && !raisesTLSVersion(s, oldT.WeakSettings) {
+		if !oldT.WeakSettings[s] && !raisesTLSVersion(s, oldT.WeakSettings, newT.WeakSettings) {
 			weakened = append(weakened, s)
 		}
 	}
@@ -189,7 +228,8 @@ func assessTopologyDeltaFor(oldT, newT *topology.FunctionTopology, profile riskP
 	// A removed verification call is how a guard gets deleted: a MAC or
 	// signature check, certificate verification, a password comparison.
 	// A check that reappears under the same name with only its first
-	// letter's case changed (an exported rename) is the same check. One
+	// letter's case changed (an exported rename) is the same check, and so
+	// is subtle.ConstantTimeCompare in place of hmac.Equal or back. One
 	// that reappears under the same name in a package of the same name at
 	// another path (a module's new major version, a fork, a library that
 	// moved) is labelled ReplacedCheck without points: the code still
@@ -206,10 +246,10 @@ func assessTopologyDeltaFor(oldT, newT *topology.FunctionTopology, profile riskP
 		if newT.Checks[target] {
 			continue
 		}
-		switch match, samePackage := matchingCheck(target, addedChecks); {
+		switch match, same := matchingCheck(target, addedChecks); {
 		case match == "":
 			removedChecks = append(removedChecks, target)
-		case !samePackage:
+		case !same:
 			replacedChecks = append(replacedChecks, target+"->"+match)
 		}
 	}
@@ -290,13 +330,13 @@ func assessTopologyDeltaFor(oldT, newT *topology.FunctionTopology, profile riskP
 	return r
 }
 
-// callTargetsOf prefers the import-path-qualified targets and falls back to
-// the package-name call profile for topologies built without them.
 // raisesTLSVersion reports whether s, a weak TLS version bound
 // ("crypto/tls.Config.MinVersion=TLS1.1"), replaces an old weak bound on
 // the same field that was no higher: raising a legacy minimum from TLS 1.0
-// to 1.1 leaves it weak, but weakens nothing.
-func raisesTLSVersion(s string, old map[string]bool) bool {
+// to 1.1 leaves it weak, but weakens nothing. An old bound the new version
+// still sets was not replaced: s is then another config's bound, lowered
+// from a secure version.
+func raisesTLSVersion(s string, old, current map[string]bool) bool {
 	field, version, ok := strings.Cut(s, "=")
 	if !ok || (field != "crypto/tls.Config.MinVersion" && field != "crypto/tls.Config.MaxVersion") {
 		return false
@@ -306,7 +346,7 @@ func raisesTLSVersion(s string, old map[string]bool) bool {
 		return false
 	}
 	for o := range old {
-		if oField, oVersion, _ := strings.Cut(o, "="); oField == field {
+		if oField, oVersion, _ := strings.Cut(o, "="); oField == field && !current[o] {
 			if ov, ok := tlsVersionNumber(oVersion); ok && ov <= v {
 				return true
 			}
@@ -331,14 +371,19 @@ func tlsVersionNumber(s string) (int64, bool) {
 }
 
 // matchingCheck returns the first of candidates that is check key old
-// under another spelling, and whether it is in the same package: the same
-// receiver and name but for the case of their first letters, in the same
-// package or in a package whose path ends in the same name, ignoring major
-// version suffixes ("/v3", ".v2"). A verification primitive matches only
-// itself: a function of another package named Equal is no hmac.Equal.
-func matchingCheck(old string, candidates []string) (match string, samePackage bool) {
+// under another spelling, and whether it is the same check rather than a
+// replacement: the same receiver and name but for the case of their first
+// letters, in the same package (the same check) or in a package whose path
+// ends in the same name, ignoring major version suffixes ("/v3", ".v2"). A
+// verification primitive matches only itself and its equivalent, the same
+// check: a function of another package named Equal is no hmac.Equal, but
+// subtle.ConstantTimeCompare is.
+func matchingCheck(old string, candidates []string) (match string, same bool) {
 	pkg, recv, name := splitCheckKey(old)
 	if topology.IsVerificationCall(pkg, recv, name) {
+		if eq := equivalentPrimitive[old]; slices.Contains(candidates, eq) {
+			return eq, true
+		}
 		return "", false
 	}
 	for _, c := range candidates {
@@ -354,6 +399,14 @@ func matchingCheck(old string, candidates []string) (match string, samePackage b
 		}
 	}
 	return "", false
+}
+
+// equivalentPrimitive pairs verification primitives that decide the same
+// thing: hmac.Equal is subtle.ConstantTimeCompare's result on equal-length
+// inputs, and ConstantTimeCompare returns 0 for unequal lengths.
+var equivalentPrimitive = map[string]string{
+	"crypto/hmac.Equal":                 "crypto/subtle.ConstantTimeCompare",
+	"crypto/subtle.ConstantTimeCompare": "crypto/hmac.Equal",
 }
 
 // splitCheckKey splits a Checks key, "pkg.Name" or "(pkg.Recv).Name".
@@ -392,6 +445,25 @@ func lowerFirst(s string) string {
 	return strings.ToLower(s[:1]) + s[1:]
 }
 
+// guardedClasses returns the capability classes all of whose targets in t
+// have a guard count of at least 1.
+func guardedClasses(t *topology.FunctionTopology) map[string]bool {
+	guarded, open := make(map[string]bool), make(map[string]bool)
+	for target, class := range t.Capabilities {
+		if g, ok := t.CapabilityGuards[target]; ok && g > 0 {
+			guarded[class] = true
+		} else {
+			open[class] = true
+		}
+	}
+	for class := range open {
+		delete(guarded, class)
+	}
+	return guarded
+}
+
+// callTargetsOf prefers the import-path-qualified targets and falls back to
+// the package-name call profile for topologies built without them.
 func callTargetsOf(t *topology.FunctionTopology) map[string]int {
 	if t.CallTargets != nil {
 		return t.CallTargets
