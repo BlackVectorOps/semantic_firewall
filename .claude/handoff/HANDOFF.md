@@ -3,18 +3,18 @@
 Written at the end of a long session for the next agent. Read all of it
 before touching anything. **Delete `.claude/handoff/` before PR #39 merges.**
 
-## Where things stand (session 3, head `36a68c9`)
+## Where things stand (session 3, head `40dbfdc`)
 
 - Repo `BlackVectorOps/semantic_firewall`, Go module `.../v5`, Go 1.26.3.
 - Work branch `ccr-33d08e80-zi15zu`, draft **PR #39** (title still says WIP).
   Session 2 worked on `ccr-2e562674-eku5cl` first, opened PR #40, then the
   user said to move to #39: #39's branch was fast-forwarded and #40 closed.
   If your session is assigned another branch, ask before pushing to #39's.
-- CI green on every commit through `36a68c9`. Working tree clean.
+- CI green on every commit through `49f8c2b`. Working tree clean.
 - Session 3 (this one): noise evaluation, loader speed (own design, the
   user's request), persistent type cache, import pruning, `go.work`
-  honored, pair 4. Details in "Loader speed work", "Workspaces" and
-  "Pair 4" below.
+  honored, pairs 4 and 5. Details in "Loader speed work", "Workspaces",
+  "Pair 4" and "Pair 5" below.
 - `.Jules/` deleted at the user's request (main deleted it too).
 
 ### Session 2: hardening pass, two files at a time
@@ -48,8 +48,9 @@ Next, in order (the user asked "are we ready for review or merge"; the
 answer was: not until these four pairs are done):
 1. Done in session 3: pair 4 `api/risk.go`+`api/batch.go` (`4e6f2a4`,
    `19ae6d8`, `473c660`, `36a68c9`; see "Pair 4" below).
-2. Pair 5: `diff/loader.go` is closed (session 3, all survivors speed-only
-   or equivalent, listed below); `purge.go` (copied from x/tools) remains.
+2. Done in session 3: pair 5 `diff/loader.go`+`purge.go` (`f2fb53c`,
+   `49f8c2b`, `40dbfdc`; see "Pair 5" below). Open for the user: whether
+   to code the constant-len divergence (documented, not fixed).
 3. Pair 6 `api/diff.go`+`cli/diff_logic.go` (DiffWithFS repeats
    readDiffInput's rules: pinned by TestDiffBatch_InputRules's equality;
    inFile/pathResolver already closed), pair 7 the rest (fingerprinter:
@@ -248,6 +249,24 @@ workspace memo (speed), `len(wellTyped) > 0` (speed), the Abs fallback
 (Getwd), strictMode. Removed as unreachable: guard-map filtering in
 withoutModuleTargets, targetPackage (splitCheckKey's package), an origin
 walk in inFileOf (every fingerprinted function has its package).
+Pair 5 (session 3): purge.go is no longer verbatim x/tools (header says
+how). Fixed: a pending "[...]" was forgotten at semicolons inside the
+element type's own struct/interface body (also upstream, x/tools
+v0.48.0), so a dependency's multi-line `[...]struct{...}{...}` table
+became [0]T and a root indexing it was ill-typed; the "[...]" now
+records its brace depth. Purged regions keep their line breaks
+(dependency errors named wrong lines). loadMetadata lists a batch file by
+file when the batched graph has a go list error (a module missing from
+the cache got a made-up file and a "redeclared" error). Documented, not
+coded (README "Loading", loadSource doc): errors inside a dependency's
+composite literals, or in a package only they name, are not reported
+(tested); `len`/`cap` of a sized array literal holding a call becomes
+constant (contrived: `1 << len([8]int{f()})`), which can fail a constant
+check where go/packages loads. Fixing that needs the original source
+re-checked with imports pruning dropped: put to the user. Mutation:
+purge.go's only survivor is `top < 0` -> `<= 0` (no token at 0); the
+changed loader lines all killed. Corpus parity: chi, gin, echo, casbin,
+cobra, pocketbase identical (4,753 functions).
 Next levers, measured: `diffResults` runs pairs serially (0.37 s of the
 batch); GC is ~25% of CPU (GOGC=200 gives 5-15%); `BuildSSAFromPackages`
 builds root packages one at a time; API-closure import pruning would skip
