@@ -61,7 +61,7 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 		if err != nil {
 			return nil, err
 		}
-		return inFile(results, absPath), nil
+		return inFile(results, absPath, pathResolver{}), nil
 	}
 
 	// Load the two versions at the same time; report the old side's error
@@ -299,24 +299,31 @@ func literalsUnchanged(oldFn, newFn *ssa.Function) bool {
 // report its siblings' changes. Functions without a source file (the
 // synthesized package initializer, which runs every file's package-level
 // initializers) are kept so a payload in a package-level variable is never
-// hidden.
-func inFile(results []diff.FingerprintResult, path string) []diff.FingerprintResult {
-	want := filepath.Clean(path)
-	if resolved, err := filepath.EvalSymlinks(want); err == nil {
-		want = resolved
-	}
+// hidden. Paths are compared cleaned and with symbolic links resolved.
+func inFile(results []diff.FingerprintResult, path string, paths pathResolver) []diff.FingerprintResult {
+	want := paths.resolve(path)
 	kept := results[:0:0]
 	for _, r := range results {
-		file := r.Filename
-		if file != "" {
-			file = filepath.Clean(file)
-			if resolved, err := filepath.EvalSymlinks(file); err == nil {
-				file = resolved
-			}
-		}
-		if file == "" || file == want {
+		if r.Filename == "" || paths.resolve(r.Filename) == want {
 			kept = append(kept, r)
 		}
 	}
 	return kept
+}
+
+// pathResolver cleans a path and resolves its symbolic links once per
+// distinct path: every function of a file names the same path, and a batch
+// filters one package's functions for each of its files.
+type pathResolver map[string]string
+
+func (r pathResolver) resolve(path string) string {
+	resolved, ok := r[path]
+	if !ok {
+		resolved = filepath.Clean(path)
+		if real, err := filepath.EvalSymlinks(resolved); err == nil {
+			resolved = real
+		}
+		r[path] = resolved
+	}
+	return resolved
 }

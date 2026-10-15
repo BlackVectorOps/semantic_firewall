@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 
@@ -167,5 +168,65 @@ func TestDiffBatch_GroupFailuresFallBack(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// inFile keeps the functions of the file at path, matched cleaned and
+// through symbolic links either way, and the functions without a file.
+// Each distinct path is resolved once: a later change to a link does not
+// change an answer already given.
+func TestInFile_ResolvesEachPathOnce(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	results := []diff.FingerprintResult{
+		{FunctionName: "A", Filename: filepath.Join(real, "a.go")},
+		{FunctionName: "init"},
+		{FunctionName: "B", Filename: filepath.Join(link, "b.go")},
+		{FunctionName: "A2", Filename: filepath.Join(link, ".", "a.go")},
+	}
+	names := func(rs []diff.FingerprintResult) string {
+		var out []string
+		for _, r := range rs {
+			out = append(out, r.FunctionName)
+		}
+		return strings.Join(out, " ")
+	}
+	for _, f := range []string{"a.go", "b.go"} {
+		if err := os.WriteFile(filepath.Join(real, f), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths := pathResolver{}
+	if got := names(inFile(results, filepath.Join(link, "a.go"), paths)); got != "A init A2" {
+		t.Errorf("a.go through the link: got %q, want %q", got, "A init A2")
+	}
+	if got := names(inFile(results, filepath.Join(real, "b.go"), paths)); got != "init B" {
+		t.Errorf("b.go: got %q, want %q", got, "init B")
+	}
+
+	// Point the link elsewhere: paths answers as before, a new resolver
+	// sees the change.
+	other := filepath.Join(root, "other")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, link); err != nil {
+		t.Fatal(err)
+	}
+	if got := names(inFile(results, filepath.Join(real, "b.go"), paths)); got != "init B" {
+		t.Errorf("b.go, cached: got %q, want %q", got, "init B")
+	}
+	if got := names(inFile(results, filepath.Join(real, "b.go"), pathResolver{})); got != "init" {
+		t.Errorf("b.go, fresh: got %q, want %q", got, "init")
 	}
 }

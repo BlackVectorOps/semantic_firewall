@@ -206,12 +206,13 @@ func fingerprintGroup(root string, files []pendingFile) map[string]fileResult {
 	if err == nil && len(wellTyped) > 0 {
 		results, err = fingerprintPackagesSafely(wellTyped)
 	}
+	paths := pathResolver{}
 	for _, f := range files {
 		if err != nil || !diff.PackagesContain(wellTyped, f.abs) {
 			out[f.path] = fingerprintOne(f)
 			continue
 		}
-		out[f.path] = fileResult{results: inFileOf(results, f.abs, packagesOf(wellTyped, f.abs))}
+		out[f.path] = fileResult{results: inFileOf(results, f.abs, packagesOf(wellTyped, f.abs), paths)}
 	}
 	return out
 }
@@ -236,7 +237,7 @@ func fingerprintOne(f pendingFile) (res fileResult) {
 	if err != nil {
 		return fileResult{err: err}
 	}
-	return fileResult{results: inFile(results, f.abs)}
+	return fileResult{results: inFile(results, f.abs, pathResolver{})}
 }
 
 // packagesOf returns the type-checked packages among pkgs that compile the
@@ -255,8 +256,8 @@ func packagesOf(pkgs []*packages.Package, abs string) map[*types.Package]bool {
 // functions declared in the file at path, and the functions without a
 // source file (the synthesized package initializer) of the file's own
 // packages only.
-func inFileOf(results []diff.FingerprintResult, path string, own map[*types.Package]bool) []diff.FingerprintResult {
-	kept := inFile(results, path)
+func inFileOf(results []diff.FingerprintResult, path string, own map[*types.Package]bool, paths pathResolver) []diff.FingerprintResult {
+	kept := inFile(results, path, paths)
 	out := kept[:0:0]
 	for _, r := range kept {
 		if r.Filename == "" {
