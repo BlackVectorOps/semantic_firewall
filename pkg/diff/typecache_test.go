@@ -2,6 +2,7 @@ package diff
 
 import (
 	"crypto/sha256"
+	"fmt"
 	"go/types"
 	"os"
 	"path/filepath"
@@ -467,6 +468,20 @@ func TestOpenTypeStore(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(rw.dir, "trim.txt")); err != nil {
 		t.Errorf("opening a writable cache did not trim it: %v", err)
+	}
+	orig := executableID
+	executableID = func() (string, error) { return "", os.ErrPermission }
+	if s := openTypeStore("rw:" + filepath.Join(dir, "unhashed")); s != nil {
+		t.Errorf("a cache opened without the executable's hash")
+	}
+	executableID = orig
+	if _, err := os.Stat(filepath.Join(dir, "unhashed")); !os.IsNotExist(err) {
+		t.Errorf("a cache that did not open created its directory")
+	}
+	exe, _ := os.Executable()
+	data, _ := os.ReadFile(exe)
+	if id, err := executableID(); err != nil || id != fmt.Sprintf("%x", sha256.Sum256(data)) {
+		t.Errorf("executableID: %s %v; want the SHA-256 of %s", id, err, exe)
 	}
 	blocked := filepath.Join(dir, "file")
 	os.WriteFile(blocked, nil, 0o600)

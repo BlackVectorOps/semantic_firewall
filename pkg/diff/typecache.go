@@ -89,8 +89,10 @@ func openTypeStore(setting string) *typeStore {
 	return s
 }
 
-// executableID returns the SHA-256 of the running executable.
-func executableID() (string, error) {
+// executableID returns the SHA-256 of the running executable; tests make
+// it fail. Without it no cache opens: its entries could have been written
+// by another version of sfw.
+var executableID = func() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", err
