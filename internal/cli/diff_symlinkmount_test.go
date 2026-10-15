@@ -94,4 +94,12 @@ func TestInDir(t *testing.T) {
 			t.Errorf("inDir(%q, %q) = %v; want %v", c.path, dir, got, c.in)
 		}
 	}
+	// A directory named through a link is the directory it links to.
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	if !inDir(filepath.Join(dir, "a.go"), link) {
+		t.Errorf("inDir(%q, %q) = false; want true", filepath.Join(dir, "a.go"), link)
+	}
 }

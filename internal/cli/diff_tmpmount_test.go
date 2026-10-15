@@ -14,7 +14,7 @@ import (
 // the sandboxed batch runs like the single diff of the
 // same pair (the fake runsc succeeds, so RunDiffBatch returns nil).
 func TestRunDiffBatch_SandboxedFilesDirectlyInTmp(t *testing.T) {
-	fakeRunsc(t)
+	fakeRunsc(t, 0)
 	write := func(pattern, src string) string {
 		f, err := os.CreateTemp("/tmp", pattern)
 		if err != nil {

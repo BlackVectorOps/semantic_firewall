@@ -30,14 +30,12 @@ func (rs RealSandboxer) Run(ctx context.Context, cfg sandbox.Config, stdout, std
 
 // moduleRootOf returns the directory of the go.mod the go command finds for
 // path: the nearest in path's directory or above it, or "" when there is
-// none.
+// none. A file's path has no go.mod in it; the walk goes on to its
+// directory.
 func moduleRootOf(path string) string {
 	dir, err := filepath.Abs(path)
 	if err != nil {
 		return ""
-	}
-	if fi, err := os.Stat(dir); err == nil && !fi.IsDir() {
-		dir = filepath.Dir(dir)
 	}
 	for {
 		if fi, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil && !fi.IsDir() {
@@ -136,9 +134,7 @@ func SandboxExec(sb Sandboxer, stdout, stderr io.Writer, command string, args []
 		// The go command takes the nearest go.mod as the module, past a
 		// .git entry that ends findContextRoot's search (a submodule
 		// without a go.mod is part of the module around it).
-		if mod := moduleRootOf(p); mod != "" {
-			addMount(mod)
-		}
+		addMount(moduleRootOf(p))
 		// A go.work above the module governs its build (see
 		// diff.WorkspaceFile): its directory, which holds the modules the
 		// workspace uses, must be visible too.

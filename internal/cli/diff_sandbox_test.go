@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,20 +11,46 @@ import (
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/api"
 )
 
-// fakeRunsc puts a "runsc" that is /bin/true first on PATH, so the real
-// sandbox.Run builds and validates the OCI spec for the mounts it is given
-// and then "runs" successfully without starting anything.
-func fakeRunsc(t *testing.T) {
+// fakeRunsc puts a "runsc" first on PATH that saves the OCI spec the real
+// sandbox.Run builds and validates, and exits with status exit, without
+// starting anything. It returns the path the spec is saved to, which does
+// not exist until the sandbox runs. Without a runsc, sandbox.Run would run
+// the test binary itself.
+func fakeRunsc(t *testing.T, exit int) string {
 	t.Helper()
-	if _, err := os.Stat("/bin/true"); err != nil {
-		t.Skip("/bin/true not available")
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available")
 	}
 	bin := t.TempDir()
-	if err := os.Symlink("/bin/true", filepath.Join(bin, sandbox.RuntimeBinary)); err != nil {
+	spec := filepath.Join(bin, "spec.json")
+	script := fmt.Sprintf("#!/bin/sh\nwhile [ $# -gt 0 ]; do\n\tif [ \"$1\" = --bundle ]; then cp \"$2/config.json\" %q; fi\n\tshift\ndone\nexit %d\n", spec, exit)
+	if err := os.WriteFile(filepath.Join(bin, sandbox.RuntimeBinary), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv(sandbox.EnvSandboxID, "")
+	return spec
+}
+
+// sandboxSpec reads the spec fakeRunsc saved: the worker's arguments and
+// the mount destinations.
+func sandboxSpec(t *testing.T, spec string) (args, mounts []string) {
+	t.Helper()
+	data, err := os.ReadFile(spec)
+	if err != nil {
+		t.Fatalf("the sandbox did not run: %v", err)
+	}
+	var s struct {
+		Process struct{ Args []string }
+		Mounts  []struct{ Destination string }
+	}
+	if err := json.Unmarshal(data, &s); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range s.Mounts {
+		mounts = append(mounts, m.Destination)
+	}
+	return s.Process.Args, mounts
 }
 
 // `diff` treats a missing input file as an empty file (README, Commands;
@@ -33,7 +61,7 @@ func fakeRunsc(t *testing.T) {
 // the sandboxed `sfw diff missing.go new.go` runs (here
 // the fake runsc succeeds, so RunDiff returns nil), as `--no-sandbox` does.
 func TestRunDiff_SandboxedMissingSide(t *testing.T) {
-	fakeRunsc(t)
+	fakeRunsc(t, 0)
 	dir := t.TempDir()
 	writeFile := func(name, src string) string {
 		p := filepath.Join(dir, name)
@@ -69,7 +97,7 @@ func TestRunDiff_SandboxedMissingSide(t *testing.T) {
 //
 // the sandboxed batch runs (the fake runsc succeeds).
 func TestRunDiffBatch_SandboxedMissingSideWithoutRoot(t *testing.T) {
-	fakeRunsc(t)
+	fakeRunsc(t, 0)
 	dir := t.TempDir()
 	newFile := filepath.Join(dir, "new", "x.go")
 	if err := os.MkdirAll(filepath.Dir(newFile), 0o755); err != nil {
