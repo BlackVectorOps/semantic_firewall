@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/BlackVectorOps/semantic_firewall/v5/internal/sandbox"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff"
 )
 
 // Implements the Sandboxer interface using the internal sandbox package.
@@ -108,6 +109,12 @@ func SandboxExec(sb Sandboxer, stdout, stderr io.Writer, command string, args []
 		// the toolchain sees the 'go.mod' and '.git' at the root.
 		if root := findContextRoot(p); root != "" {
 			addMount(root)
+		}
+		// A go.work above the module governs its build (see
+		// diff.WorkspaceFile): its directory, which holds the modules the
+		// workspace uses, must be visible too.
+		if work := diff.WorkspaceFile(p); work != "" {
+			addMount(filepath.Dir(work))
 		}
 	}
 

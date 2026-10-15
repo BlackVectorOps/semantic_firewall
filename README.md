@@ -438,7 +438,14 @@ These appear in `CallSignatures` but not in `CallTargets`, so they never reach t
 
 `sfw deps diff <old-dir> <new-dir>` compares the third-party code compiled into two trees of a module, such as a pull request's base and head. Each tree is loaded with `./...` and the [loader environment](#fingerprint-pipeline), so every module either build needs must already be in the module cache: run `go mod download` in both trees first.
 
-A module is compared when its version or replacement differs between the trees, or when its code can change without either: it is replaced by a local directory in both, or vendored. A tree with `vendor/modules.txt` is loaded with `-mod=vendor`, as the go command builds it, so an edit to a vendored copy is compared like any other change. A module in only one tree is `added` or `removed`. A module both trees use at the same version is still reported, as `updated`, when the new tree builds packages of it the old one did not: those are new code.
+A module is compared when its version or replacement differs between the trees, or when its code can change without either. That covers three cases:
+- it is replaced by a local directory in both trees;
+- it is a module of the tree's workspace;
+- it is vendored.
+
+A tree with `vendor/modules.txt`, or in a workspace one vendored by `go work vendor`, is loaded with `-mod=vendor`, as the go command builds it. An edit to a vendored copy is therefore compared like any other change.
+
+A module in only one tree is `added` or `removed`. A module both trees use at the same version is still reported, as `updated`, when the new tree builds packages of it the old one did not: those are new code.
 
 Example: `example.com/app` replaces `example.com/codec` with `../codec`. The new `codec` hides a beacon behind its existing exported `Decode` and adds a `//go:linkname` directive:
 
@@ -512,11 +519,20 @@ For each compared module:
 
 A module's `risk_score` is the highest of its changes, and `high_risk_changes` counts those scoring 10 or more. An `added` module, and the packages the new tree newly builds from a module at an unchanged version, list the capability classes their entry points can reach (`capabilities`), initializers that reach any (`reach`), and their new `syso`, `object` and `linkname` files.
 
+**Workspaces.** A tree builds with the `go.work` that governs it, as the go command does: the first `go.work` in the module's directory or a parent. The search stops at the repository's root, the first directory with a `.git` entry, so a tree checked out inside another does not take the outer tree's workspace.
+
+The workspace's other modules are compared like local replacements, named by their path from the `go.work`. A `use` of a directory whose `go.mod` takes a dependency's path makes the go command build that directory instead of the dependency. It is reported as that dependency replaced, for example `v1.0.0 -> use ./shadow`, with the directory's function diffs.
+
 Limits:
 - **cgo:** the loader disables cgo. A dependency package with no Go files left without cgo fails to load, and `sfw deps diff` exits 1. C code is hashed, not analyzed.
 - **Load errors are fatal:** any package error in either tree (a missing module, a type error) fails the command, rather than producing a partial diff.
-- **Workspaces:** the loader sets `GOWORK=off`, so a tree whose build uses a `go.work` file is analyzed as its module alone.
-- **Sandbox mounts:** under the sandbox, only the trees, their module and `.git` roots and the module cache are visible; a local `replace` directory outside them does not load. Use `--no-sandbox` for such a tree.
+- **Sandbox mounts:** under the sandbox, the following are visible, and nothing else:
+  - the trees;
+  - their module and `.git` roots;
+  - the directory of the `go.work` that governs them;
+  - the module cache.
+
+  A local `replace` or a `use` directory outside these does not load. Use `--no-sandbox` for such a tree.
 
 ## sfw audit
 
@@ -767,7 +783,8 @@ scanner, err := pebbledb.NewPebbleScanner("signatures.db", pebbledb.DefaultPebbl
 ┌────────────────────────────────────────────────────────────────┐
 │ golang.org/x/tools/go/packages.Load, then go/ssa build         │
 │ loader env: CGO_ENABLED=0 GOPROXY=off GOTOOLCHAIN=local        │
-│             GOFLAGS=-mod=readonly GOWORK=off GONOSUMDB=*       │
+│             GOFLAGS=-mod=readonly GONOSUMDB=*                  │
+│             GOWORK=<the governing go.work, or off>             │
 └────────────────────────────────┬───────────────────────────────┘
                                  │ *ssa.Function
 ┌────────────────────────────────┴───────────────────────────────┐
@@ -1121,7 +1138,7 @@ The Action does the following before running `sfw`:
 
 `diff` and `audit` analyze every `.go` file changed between a base and `HEAD`, and ignore `path`. The base is `origin/<base branch>` for a pull request, the `before` commit for a push, and `HEAD~1` otherwise. `diff` mode passes all changed files (except `_test.go`, `_generated.go` and `vendor/` files) to one [`sfw diff --batch`](#batch-mode) run, and fails the job if any file could not be diffed.
 
-`deps` mode runs [`sfw deps diff`](#sfw-deps-diff) on the base and `HEAD` versions of the module at `path`, which must contain `go.mod` in both. It runs only when a `go.mod` or `go.sum` changed; otherwise `result` is `{}`. It first runs `go mod download` in both trees (this fetches and verifies module zips against `go.sum`; it runs no code). With `fail-on-alert`, the job fails when `high_risk_changes` is above 0.
+`deps` mode runs [`sfw deps diff`](#sfw-deps-diff) on the base and `HEAD` versions of the module at `path`, which must contain `go.mod` in both. It runs only when a `go.mod`, `go.sum`, `go.work` or `go.work.sum` changed; otherwise `result` is `{}`. It first runs `go mod download` in both trees, each with the workspace that governs it. This fetches and verifies module zips against `go.sum` and runs no code. With `fail-on-alert`, the job fails when `high_risk_changes` is above 0.
 
 | Input | Default | Purpose |
 |-------|---------|---------|

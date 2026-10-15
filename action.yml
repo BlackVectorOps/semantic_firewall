@@ -195,7 +195,9 @@ runs:
         # grep -c prints 0 and exits 1 when nothing matches; `|| true` keeps
         # that single 0 instead of appending a second one.
         GO_FILE_COUNT=$(git diff --name-only "$BASE_REF" "$HEAD_REF" 2>/dev/null | grep -c '\.go$' || true)
-        MOD_FILE_COUNT=$(git diff --name-only "$BASE_REF" "$HEAD_REF" 2>/dev/null | grep -cE '(^|/)go\.(mod|sum)$' || true)
+        # A go.work redirects modules like a replace does, so its changes
+        # count too.
+        MOD_FILE_COUNT=$(git diff --name-only "$BASE_REF" "$HEAD_REF" 2>/dev/null | grep -cE '(^|/)go\.(mod|sum|work|work\.sum)$' || true)
         if [[ "$MOD_FILE_COUNT" -gt 0 ]]; then
           echo "has_mod_changes=true" >> "$GITHUB_OUTPUT"
         else
@@ -381,9 +383,22 @@ runs:
               fi
               # sfw loads with GOPROXY=off, so fetch both build lists first.
               # Downloading only fetches and verifies module zips against
-              # go.sum; it runs no code.
+              # go.sum; it runs no code. Each tree builds with the go.work
+              # above it, but the search stops at the tree's root (a .git
+              # entry), as sfw's does: the base worktree sits inside the
+              # head's checkout and must not take its workspace.
+              governing_work() {
+                local d
+                d=$(cd "$1" && pwd)
+                while :; do
+                  if [[ -f "$d/go.work" ]]; then printf '%s' "$d/go.work"; return; fi
+                  if [[ -e "$d/.git" ]] || [[ "$d" == "/" ]]; then printf 'off'; return; fi
+                  d=$(dirname "$d")
+                done
+              }
               for root in "$OLD_ROOT" "$TARGET_PATH"; do
-                if ! (cd "$root" && go mod download); then
+                work=$(governing_work "$root")
+                if ! (cd "$root" && GOWORK="$work" go mod download); then
                   echo "::error::go mod download failed in ${root}"
                   exit 1
                 fi

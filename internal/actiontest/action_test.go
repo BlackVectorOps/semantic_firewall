@@ -3,7 +3,9 @@
 package actiontest
 
 import (
+	"archive/zip"
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -406,10 +408,138 @@ func TestActionDepsMode(t *testing.T) {
 			t.Errorf("exit %d, result %q, high-risk-changes %q; want 0, {}, 0\n%s", res.exitCode, res.outputs["result"], res.outputs["high-risk-changes"], res.log)
 		}
 	})
+	t.Run("a go.work that redirects a dependency fails", func(t *testing.T) {
+		repo := gitRepo(t, map[string]string{
+			"go.work":            "go 1.22\n\nuse (\n\t./app\n\t./lib\n)\n",
+			"app/go.mod":         "module example.com/app\n\ngo 1.22\n",
+			"app/main.go":        "package main\n\nimport _ \"example.com/lib/codec\"\n\nfunc main() {}\n",
+			"lib/go.mod":         "module example.com/lib\n\ngo 1.22\n",
+			"lib/codec/codec.go": codecV1,
+		}, map[string]*string{
+			"go.work":               str("go 1.22\n\nuse (\n\t./app\n\t./shadow\n)\n"),
+			"shadow/go.mod":         str("module example.com/lib\n\ngo 1.22\n"),
+			"shadow/codec/codec.go": str(beacon),
+		})
+		res := runAction(t, repo, map[string]string{"INPUT_MODE": "deps", "INPUT_PATH": "app", "INPUT_FAIL_ON_ALERT": "true"})
+		if res.exitCode == 0 || res.outputs["high-risk-changes"] == "0" || !strings.Contains(res.outputs["result"], `"new_version": "use ./shadow"`) && !strings.Contains(res.outputs["result"], `"new_version":"use ./shadow"`) {
+			t.Errorf("exit %d, high-risk-changes %q, result %s; want a failure naming use ./shadow\n%s", res.exitCode, res.outputs["high-risk-changes"], res.outputs["result"], res.log)
+		}
+	})
+	t.Run("a go.work the change adds fails", func(t *testing.T) {
+		repo := gitRepo(t, map[string]string{
+			"app/go.mod":  "module example.com/app\n\ngo 1.22\n",
+			"app/main.go": "package main\n\nfunc main() {}\n",
+		}, map[string]*string{
+			"go.work":               str("go 1.22\n\nuse (\n\t./app\n\t./shadow\n)\n"),
+			"app/main.go":           str("package main\n\nimport _ \"example.com/lib/codec\"\n\nfunc main() {}\n"),
+			"shadow/go.mod":         str("module example.com/lib\n\ngo 1.22\n"),
+			"shadow/codec/codec.go": str("package codec\n\nimport \"net\"\n\nfunc init() { net.Dial(\"tcp\", \"203.0.113.7:443\") }\n"),
+		})
+		res := runAction(t, repo, map[string]string{"INPUT_MODE": "deps", "INPUT_PATH": "app", "INPUT_FAIL_ON_ALERT": "true"})
+		if res.exitCode == 0 || res.outputs["high-risk-changes"] == "0" || !strings.Contains(res.outputs["result"], "use ./shadow") {
+			t.Errorf("exit %d, high-risk-changes %q, result %s; want a failure naming use ./shadow\n%s", res.exitCode, res.outputs["high-risk-changes"], res.outputs["result"], res.log)
+		}
+	})
+	t.Run("a go.work the change adds over a base with dependencies", func(t *testing.T) {
+		// The base worktree sits inside the head's checkout. Searching on
+		// past its root, go mod download would take the head's go.work,
+		// which does not use the base module, and fetch nothing for it.
+		proxy, cache := fileProxy(t, "example.com/dep", "v1.0.0", map[string]string{
+			"go.mod": "module example.com/dep\n\ngo 1.22\n",
+			"dep.go": "package dep\n\nconst D = 1\n",
+		})
+		env := []string{"GOPROXY=" + proxy, "GOSUMDB=off", "GOFLAGS=-mod=mod", "GOWORK=off"}
+		appMod := "module example.com/app\n\ngo 1.22\n\nrequire example.com/dep v1.0.0\n"
+		sum := goSum(t, appMod, "package main\n\nimport _ \"example.com/dep\"\n\nfunc main() {}\n", env)
+		repo := gitRepo(t, map[string]string{
+			"app/go.mod":  appMod,
+			"app/go.sum":  sum,
+			"app/main.go": "package main\n\nimport _ \"example.com/dep\"\n\nfunc main() {}\n",
+		}, map[string]*string{
+			// The head drops dep, so only the base's download fetches it.
+			"go.work":               str("go 1.22\n\nuse (\n\t./app\n\t./shadow\n)\n"),
+			"app/go.mod":            str("module example.com/app\n\ngo 1.22\n"),
+			"app/go.sum":            nil,
+			"app/main.go":           str("package main\n\nimport _ \"example.com/lib/codec\"\n\nfunc main() {}\n"),
+			"shadow/go.mod":         str("module example.com/lib\n\ngo 1.22\n"),
+			"shadow/codec/codec.go": str("package codec\n\nimport \"net\"\n\nfunc init() { net.Dial(\"tcp\", \"203.0.113.7:443\") }\n"),
+		})
+		res := runAction(t, repo, map[string]string{"INPUT_MODE": "deps", "INPUT_PATH": "app", "INPUT_FAIL_ON_ALERT": "true",
+			"GOPROXY": proxy, "GOSUMDB": "off", "GOMODCACHE": cache})
+		if strings.Contains(res.log, "sfw deps diff failed") || !strings.Contains(res.outputs["result"], "use ./shadow") || res.exitCode == 0 {
+			t.Errorf("exit %d, result %s; want the redirect reported and a failure\n%s", res.exitCode, res.outputs["result"], res.log)
+		}
+	})
 	t.Run("path that is not a module root fails", func(t *testing.T) {
 		res := runAction(t, depsRepo(t, codecV1, benign, true), map[string]string{"INPUT_MODE": "deps", "INPUT_PATH": "lib/codec", "INPUT_FAIL_ON_ALERT": "true"})
 		if res.exitCode == 0 || !strings.Contains(res.log, "needs 'path' to be a module root") {
 			t.Errorf("exit %d; want a module-root error\n%s", res.exitCode, res.log)
 		}
 	})
+}
+
+// fileProxy serves one module version from a file:// GOPROXY and returns
+// the proxy's URL and an empty module cache for the run to fill.
+func fileProxy(t *testing.T, mod, version string, files map[string]string) (proxy, cache string) {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, filepath.FromSlash(mod), "@v")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, src := range files {
+		w, err := zw.Create(mod + "@" + version + "/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Write([]byte(src))
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string]string{
+		version + ".zip":  buf.String(),
+		version + ".mod":  files["go.mod"],
+		version + ".info": fmt.Sprintf(`{"Version":%q}`, version),
+		"list":            version + "\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache = t.TempDir()
+	t.Cleanup(func() {
+		// The module cache is read-only; make it removable.
+		filepath.Walk(cache, func(p string, _ os.FileInfo, _ error) error { os.Chmod(p, 0o755); return nil })
+	})
+	return "file://" + filepath.ToSlash(root), cache
+}
+
+// goSum returns the go.sum of a module with the given go.mod and main.go,
+// as go mod tidy writes it in env, with a module cache of its own.
+func goSum(t *testing.T, goMod, mainGo string, env []string) string {
+	t.Helper()
+	dir, cache := t.TempDir(), t.TempDir()
+	t.Cleanup(func() {
+		filepath.Walk(cache, func(p string, _ os.FileInfo, _ error) error { os.Chmod(p, 0o755); return nil })
+	})
+	env = append(env, "GOMODCACHE="+cache)
+	for name, src := range map[string]string{"go.mod": goMod, "main.go": mainGo} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "mod", "tidy")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), env...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
+	sum, err := os.ReadFile(filepath.Join(dir, "go.sum"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(sum)
 }
