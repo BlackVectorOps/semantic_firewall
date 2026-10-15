@@ -172,6 +172,22 @@ Accepted mutants: read's length boundary (an empty payload never
 decodes), touch boundary, the export error check (gcexportdata.Write does
 not fail even on invalid types), Close-error handling; CreateTemp failure
 is tested only as non-root (CI).
+Import pruning (`neededImports`, `declaredImports`, `pruneImports`): a
+dependency loads only the imports its purged declarations name; parsing
+is discovery-driven (parseAhead covers roots only). gin single diffs ~19%
+faster, pocketbase ~4%, batch ~3%; outputs identical; corpus parity
+holds. Divergence (README): a package only a dependency's bodies import
+cannot make roots ill-typed. Cache entries (format 2) store the needed
+list. Two races found and fixed (decode's view = needed closure only;
+loadSource waits for prefetches). Mutation over typecache.go + loader.go
+vs f9412f4: remaining survivors are all speed-only or equivalent:
+loader.go parseAhead's unsafe check, shared-vs-own parse of needed,
+neededView's visited/unsafe skip, prepareStored's filter and phases,
+Once-guarded digest/key/fetch calls already done, decode of a nil
+payload, releasing a payload; typecache.go executableID internals,
+digest read error, a body without its NUL (nil payload anyway),
+CreateTemp as root, Close/Rename chaining, removing an already renamed
+temp file, length/touch/trim boundaries.
 Next levers, measured: `diffResults` runs pairs serially (0.37 s of the
 batch); GC is ~25% of CPU (GOGC=200 gives 5-15%); `BuildSSAFromPackages`
 builds root packages one at a time; API-closure import pruning would skip
