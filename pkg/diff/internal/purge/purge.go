@@ -2,6 +2,7 @@
 // The package clause and doc comment differ, and so does the tracking of
 // "[...]": upstream forgets it at any semicolon, including those inside
 // the element type's struct or interface body, and purges the literal.
+// Deleted regions keep their line breaks, so errors keep their lines.
 
 // Copyright 2023 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
@@ -27,8 +28,9 @@ import (
 // reduces the amount of work required to parse the top-level
 // declarations.
 //
-// PurgeFuncBodies does not preserve newlines or position information.
-// Also, if the input is invalid, parsing the output of
+// PurgeFuncBodies keeps the line breaks of what it deletes, so every
+// line keeps its number; only columns after a deletion on its line move.
+// If the input is invalid, parsing the output of
 // PurgeFuncBodies may result in a different tree due to its effects
 // on parser error recovery.
 func PurgeFuncBodies(src []byte) []byte {
@@ -93,6 +95,7 @@ func PurgeFuncBodies(src []byte) []byte {
 					start := file.Offset(top)
 					end := file.Offset(pos)
 					out.Write(src[cursor : start+len("{")])
+					out.Write(bytes.Repeat([]byte("\n"), bytes.Count(src[start:end], []byte("\n"))))
 					cursor = end
 				}
 			}

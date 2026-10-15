@@ -35,7 +35,8 @@ const LoaderEnvVar = "SFW_LOADER"
 // errors and the same IllTyped propagation. Dependencies differ in three
 // ways, none of which is visible through the roots' syntax or types:
 //
-//   - their function bodies are removed from the source before parsing
+//   - their function bodies, and the contents of composite literals other
+//     than [...]T arrays, are removed from the source before parsing
 //     (purge.PurgeFuncBodies) and are not type-checked;
 //   - they have no Syntax or TypesInfo, so SSA treats them like packages
 //     loaded from export data;
@@ -44,8 +45,10 @@ const LoaderEnvVar = "SFW_LOADER"
 //     process (the standard library, an unchanged third-party module)
 //     reuses that load's *types.Package.
 //
-// Because dependency bodies are not checked, an error confined to a
-// dependency's function bodies no longer makes the roots ill-typed. All
+// Because they are not checked, an error confined to a dependency's
+// function bodies or composite literals no longer makes the roots
+// ill-typed; and len or cap of a sized array literal whose elements made it
+// non-constant becomes constant, which can fail a constant check. All
 // loads share one token.FileSet, so packages reused across loads keep
 // valid positions.
 func loadSource(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
@@ -137,6 +140,20 @@ func loadMetadata(meta *packages.Config, patterns []string) ([]*packages.Package
 	// A run that fails lists no package, so every query takes the per-file
 	// load below, which reports the failure.
 	pkgs, _ := listPackages(meta, listed...)
+	// For a package go list cannot load (a module missing from the
+	// cache), go/packages takes a file from the error's position only when
+	// the error's import stack ends at the package, and the stack depends
+	// on the run's patterns. The per-file runs list such a graph as
+	// go/packages does.
+	listErr := false
+	packages.Visit(pkgs, nil, func(p *packages.Package) {
+		for _, e := range p.Errors {
+			listErr = listErr || e.Kind == packages.ListError
+		}
+	})
+	if listErr {
+		return listPackages(meta, patterns...)
+	}
 	inDir := make(map[string][]*packages.Package)
 	for _, p := range pkgs {
 		inDir[p.Dir] = append(inDir[p.Dir], p)

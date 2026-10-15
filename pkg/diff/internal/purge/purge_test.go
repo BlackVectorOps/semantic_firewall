@@ -129,6 +129,12 @@ func TestPurgeFuncBodiesCases(t *testing.T) {
 			in:   "package p\nvar X [...]int\nvar Y = T{2}\n",
 			want: "package p\nvar X [...]int\nvar Y = T{}\n",
 		},
+		// Deleted regions keep their line breaks.
+		{
+			name: "line breaks kept",
+			in:   "package p\nfunc F() {\n\tx()\n\ty()\n}\nvar V = T{\n\t1,\n}\n",
+			want: "package p\nfunc F() {\n\n\n}\nvar V = T{\n\n}\n",
+		},
 		// An unbalanced "}" is ignored rather than crashing the scanner.
 		{
 			name: "stray closing brace",

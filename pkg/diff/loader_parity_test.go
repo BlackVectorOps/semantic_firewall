@@ -274,6 +274,80 @@ func TestLoadSource_DependencyBodyErrorIsNotChecked(t *testing.T) {
 	mustContain(t, loaderSnapshot(t, got), "func example.com/m/root.R ")
 }
 
+// So are errors inside a dependency's package-level composite literals,
+// whose contents are purged too, and errors of a package that only such a
+// literal names, which is pruned: both loaders differ as documented.
+func TestLoadSource_DependencyLiteralErrorIsNotChecked(t *testing.T) {
+	root := t.TempDir()
+	writeFiles(t, root, map[string]string{
+		"go.mod":        "module example.com/m\n\ngo 1.22\n",
+		"table/t.go":    "package table\n\nvar Table = map[string]int{\"a\": undefinedThing}\n\nfunc Get() int { return 1 }\n",
+		"broken/b.go":   "package broken\n\nvar X undefinedType\n\nfunc Use() {}\n",
+		"handlers/h.go": "package handlers\n\nimport \"example.com/m/broken\"\n\nvar Handlers = map[string]func(){\"use\": broken.Use}\n\nfunc Get() int { return 1 }\n",
+		"r1/r.go":       "package r1\n\nimport \"example.com/m/table\"\n\nfunc R() int { return table.Get() }\n",
+		"r2/r.go":       "package r2\n\nimport \"example.com/m/handlers\"\n\nfunc R() int { return handlers.Get() }\n",
+	})
+	t.Setenv(LoaderEnvVar, "")
+	for _, pkg := range []string{"./r1", "./r2"} {
+		old, err := packages.Load(sourceLoaderConfig(root, nil), pkg)
+		if err != nil || len(old) != 1 || !old[0].IllTyped {
+			t.Fatalf("%s: go/packages: %v; want the root ill-typed through its dependency", pkg, err)
+		}
+		got, err := loadSource(sourceLoaderConfig(root, nil), pkg)
+		if err != nil || len(got) != 1 || got[0].IllTyped || len(got[0].Errors) != 0 {
+			t.Fatalf("%s: loadSource: %v; want a clean root", pkg, err)
+		}
+	}
+}
+
+// A dependency's error keeps its line: purged bodies keep their line
+// breaks, so an ill-typed root's error names the line go/packages names.
+func TestLoadSource_DependencyErrorPositions(t *testing.T) {
+	root := t.TempDir()
+	writeFiles(t, root, map[string]string{
+		"go.mod":    "module example.com/m\n\ngo 1.22\n",
+		"dep/d.go":  "package dep\n\nfunc Helper() int {\n\tx := 1\n\tx++\n\tx++\n\treturn x\n}\n\nvar Broken undefinedType\n",
+		"root/r.go": "package root\n\nimport \"example.com/m/dep\"\n\nfunc R() any { return dep.Broken }\n",
+	})
+	file := filepath.Join(root, "root", "r.go")
+	src, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := func(loader string) string {
+		t.Setenv(LoaderEnvVar, loader)
+		_, err := FingerprintSource(file, string(src), ir.DefaultLiteralPolicy)
+		if err == nil {
+			t.Fatalf("loader %q: no error for an ill-typed root", loader)
+		}
+		return err.Error()
+	}
+	want, got := fingerprint("packages"), fingerprint("")
+	if want != got || !strings.Contains(got, "dep/d.go:10:12: undefined: undefinedType") {
+		t.Errorf("errors:\n  go/packages: %s\n  loadSource:  %s\nwant both at dep/d.go:10:12", want, got)
+	}
+}
+
+// A module missing from the module cache: go list's errors depend on the
+// patterns of its run, so a batch is listed file by file, as go/packages
+// lists it, and the roots get go/packages' errors.
+func TestLoadMetadata_UnloadableModule(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFiles(t, root, map[string]string{
+		"go.mod":       "module example.com/m\n\ngo 1.22\n\nrequire example.com/sm v1.0.0\n",
+		"go.sum":       "example.com/sm v1.0.0 h1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nexample.com/sm v1.0.0/go.mod h1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n",
+		"r.go":         "package top\n\nimport (\n\t\"example.com/m/file\"\n\t\"example.com/sm\"\n)\n\nvar _ = file.F\nvar _ = sm.S\n\nfunc R() {}\n",
+		"file/file.go": "package file\n\nimport \"example.com/sm\"\n\nvar F = sm.S\n",
+		"ast/a.go":     "package ast\n\nimport \"example.com/m/file\"\n\nvar A = file.F\n",
+	})
+	snap := assertLoadersAgree(t, func() *packages.Config { return sourceLoaderConfig(root, nil) },
+		"file="+filepath.Join(root, "ast", "a.go"), "file="+filepath.Join(root, "r.go"))
+	mustContain(t, snap, "package example.com/m illTyped=true", "could not import example.com/sm")
+}
+
 // cgo is never run: CGO_ENABLED=0 excludes cgo files from the compiled
 // file set, so neither loader invokes the C compiler, even for a cgo file
 // whose preamble cannot compile.
