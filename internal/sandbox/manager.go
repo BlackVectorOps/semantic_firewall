@@ -33,7 +33,12 @@ const (
 	CPUShares     = 1024
 	PidsMax       = 64
 	EnvSandboxID  = "SFW_SANDBOX_ID"
-	RuntimeBinary = "runsc"
+	// EnvTypeCache is diff.TypeCacheEnvVar: "rw:DIR" or "ro:DIR" names the
+	// persistent type cache.
+	EnvTypeCache = "SFW_TYPE_CACHE"
+	// typeCacheMount is where a sandbox sees the type cache, read-only.
+	typeCacheMount = "/sfwtypes"
+	RuntimeBinary  = "runsc"
 )
 
 // Checks if the current process is already running inside the sandbox.
@@ -224,14 +229,26 @@ func generateSpec(ctx context.Context, cfg Config, selfExe string) (*Spec, error
 		}
 	}
 
+	// A sandboxed worker reads the persistent type cache but never writes
+	// it: code that ran inside the sandbox must leave nothing behind for a
+	// later analysis to trust. Entries come from runs outside a sandbox.
+	typeCache := "off"
+	if _, dir, ok := strings.Cut(os.Getenv(EnvTypeCache), ":"); ok && filepath.IsAbs(dir) {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			mounts = append(mounts, Mount{Destination: typeCacheMount, Type: "bind", Source: dir, Options: []string{"ro", "rbind"}})
+			typeCache = "ro:" + typeCacheMount
+		}
+	}
+
 	// Define Reserved Paths to prevent shadowing critical sandbox infrastructure via user input.
 	reservedPaths := map[string]bool{
-		"/app/sfw":    true,
-		"/proc":       true,
-		"/sys":        true,
-		"/dev":        true,
-		"/tmp":        true,
-		"/gomodcache": true,
+		"/app/sfw":     true,
+		"/proc":        true,
+		"/sys":         true,
+		"/dev":         true,
+		"/tmp":         true,
+		"/gomodcache":  true,
+		typeCacheMount: true,
 	}
 
 	// Bind User Inputs
@@ -279,6 +296,7 @@ func generateSpec(ctx context.Context, cfg Config, selfExe string) (*Spec, error
 		"HOME=/tmp",
 		"GOPROXY=off", // Enforce Air Gap
 		fmt.Sprintf("%s=1", EnvSandboxID),
+		EnvTypeCache + "=" + typeCache,
 	}
 	env = append(env, envCaches...)
 

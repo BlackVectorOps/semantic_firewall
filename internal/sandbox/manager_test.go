@@ -433,3 +433,53 @@ func TestHelperProcess(t *testing.T) {
 	}
 	os.Exit(0)
 }
+
+// The persistent type cache named by EnvTypeCache, writable or not, is
+// mounted read-only and named read-only to the worker; without an
+// existing absolute directory there is none; no input may take its path.
+func TestGenerateSpec_TypeCache(t *testing.T) {
+	restoreExec := replaceExecFunc(func(ctx context.Context, cmd string, args ...string) *exec.Cmd {
+		return mockHelperCommand(ctx, "true")
+	})
+	defer restoreExec()
+	t.Setenv("GOROOT", "")
+	t.Setenv("GOMODCACHE", "")
+	dir := t.TempDir()
+	for setting, mounted := range map[string]bool{
+		"rw:" + dir:                          true,
+		"ro:" + dir:                          true,
+		"off":                                false,
+		"":                                   false,
+		"rw:" + filepath.Join(dir, "absent"): false,
+		"rw:relative":                        false,
+	} {
+		t.Setenv(EnvTypeCache, setting)
+		spec, err := generateSpec(context.Background(), Config{Args: []string{"diff"}, WorkDir: "/tmp"}, "/bin/mock_sfw")
+		if err != nil {
+			t.Fatalf("%q: %v", setting, err)
+		}
+		var mount *Mount
+		for i, m := range spec.Mounts {
+			if m.Destination == typeCacheMount {
+				mount = &spec.Mounts[i]
+			}
+		}
+		wantEnv := EnvTypeCache + "=off"
+		if mounted {
+			wantEnv = EnvTypeCache + "=ro:" + typeCacheMount
+			if mount == nil || mount.Source != dir || !slices.Contains(mount.Options, "ro") {
+				t.Errorf("%q: mount %+v; want %s read-only at %s", setting, mount, dir, typeCacheMount)
+			}
+		} else if mount != nil {
+			t.Errorf("%q: mounted %+v", setting, mount)
+		}
+		if !slices.Contains(spec.Process.Env, wantEnv) {
+			t.Errorf("%q: env %v lacks %s", setting, spec.Process.Env, wantEnv)
+		}
+	}
+
+	t.Setenv(EnvTypeCache, "rw:"+dir)
+	if _, err := generateSpec(context.Background(), Config{Mounts: []string{typeCacheMount}, WorkDir: "/tmp"}, "/bin/mock_sfw"); err == nil || !strings.Contains(err.Error(), "reserved sandbox path") {
+		t.Errorf("an input mounted at %s: %v; want it refused as reserved", typeCacheMount, err)
+	}
+}

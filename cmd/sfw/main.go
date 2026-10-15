@@ -29,6 +29,9 @@ func main() {
 
 	// -- Standard CLI --
 
+	// Decide here, not in a worker: a worker uses what its parent decided.
+	cli.ConfigureTypeCache()
+
 	// Configure help text
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `sfw - Semantic Firewall CLI
