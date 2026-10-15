@@ -50,9 +50,18 @@ Next, in order:
 2. Pair 5 `diff/loader.go`+`purge.go`, pair 6 `api/diff.go`+
    `cli/diff_logic.go` (readDiffInput error paths), pair 7 the rest
    (fingerprinter, package_functions, cli/deps, cmd/sfw/main).
-3. Open question for the user: a tree with `go.work` is analyzed with
+3. Done in session 2: the noise evaluation. `eval_compare.py` (several sfw
+   builds on the same pairs per commit) and `analyze.py` here; run with Go
+   >= the repos' go lines first on PATH (the container's default `go` was
+   1.24, which broke half the loads; GOTOOLCHAIN=local pins PATH's go).
+   Result on 776 loadable commits of the 10 repos: v5.2.0 16 flagged
+   commits, branch 34 before the fixes in `fffe517`, 20 after (46
+   alerts), every alert judged in that commit message. ErrorExits stays
+   a label. Remaining branch false positives: functions moved across
+   files (batch mode could pair them; not built).
+4. Open question for the user: a tree with `go.work` is analyzed with
    GOWORK=off (documented as a limit). Fail instead, or honor it?
-4. Deferred, reported to the user: share the check-helper search across
+5. Deferred, reported to the user: share the check-helper search across
    functions (needs a per-package cache, outside one pair); settings set
    through a field's address (`flag.BoolVar(&cfg.InsecureSkipVerify..)`);
    func-typed fields (`Transport.DialContext`); a generic function alone.
