@@ -194,7 +194,7 @@ func TestFingerprintPackagesWhere_MatchesFilteredResults(t *testing.T) {
 	root := t.TempDir()
 	sources := map[string]string{
 		"p/a.go": "package p\n\nfunc F(x int) int {\n\tg := func() int { return x + 1 }\n\treturn g()\n}\n",
-		"p/b.go": "package p\n\nvar H = func() int { return 2 }\n\ntype T struct{}\n\nfunc (T) M() int { return 3 }\n\n" +
+		"p/b.go": "package p\n\nvar H = func() int { return 2 }\n\ntype T struct{}\n\nfunc (T) M() int { return 3 }\n\nfunc Asm() int\n\n" +
 			"func G() int {\n\tk := 0\n//line a.go:90\n\th := func() int { return k }\n\treturn h()\n}\n",
 	}
 	overlay := map[string][]byte{}
@@ -202,6 +202,7 @@ func TestFingerprintPackagesWhere_MatchesFilteredResults(t *testing.T) {
 		overlay[filepath.Join(root, filepath.FromSlash(name))] = []byte(src)
 	}
 	overlay[filepath.Join(root, "go.mod")] = []byte("module example.com/m\n\ngo 1.22\n")
+	overlay[filepath.Join(root, "p", "asm.s")] = []byte("// Asm's body.\n")
 	for path, src := range overlay {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -211,6 +212,7 @@ func TestFingerprintPackagesWhere_MatchesFilteredResults(t *testing.T) {
 		}
 	}
 	delete(overlay, filepath.Join(root, "go.mod"))
+	delete(overlay, filepath.Join(root, "p", "asm.s"))
 	pkgs, err := diff.LoadFiles(root, overlay)
 	if err != nil {
 		t.Fatal(err)
@@ -257,6 +259,12 @@ func TestFingerprintPackagesWhere_MatchesFilteredResults(t *testing.T) {
 			if !strings.Contains(names, "example.com/m/p.G$1 a.go:90") || strings.Contains(names, "example.com/m/p.G b.go") ||
 				!strings.Contains(names, "example.com/m/p.init -:0") {
 				t.Errorf("keeping a.go: want G's closure and the initializer, not G:\n%s", names)
+			}
+		}
+		if len(files) == 1 && files[0] == "b.go" {
+			names := render(got)
+			if !strings.Contains(names, "(example.com/m/p.T).M b.go") || strings.Contains(names, "p.Asm") {
+				t.Errorf("keeping b.go: want T's method and not the body-less Asm:\n%s", names)
 			}
 		}
 	}
