@@ -55,7 +55,7 @@ func loadSource(cfg *packages.Config, patterns ...string) ([]*packages.Package, 
 	meta.Mode = packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
 		packages.NeedImports | packages.NeedDeps | packages.NeedModule | packages.NeedTypesSizes
 	meta.Fset = nil
-	roots, err := packages.Load(&meta, patterns...)
+	roots, err := loadMetadata(&meta, patterns)
 	if err != nil {
 		return nil, err
 	}
@@ -84,6 +84,69 @@ func loadSource(cfg *packages.Config, patterns ...string) ([]*packages.Package, 
 		}(r)
 	}
 	wg.Wait()
+	return roots, nil
+}
+
+// listPackages is packages.Load; tests record its calls.
+var listPackages = packages.Load
+
+// loadMetadata returns what packages.Load(meta, patterns...) returns, but
+// answers several file= queries for absolute paths, as LoadFiles makes,
+// with one go list run. go/packages runs go list once per file= query, each
+// over the file's directory and every package it depends on (its own TODO:
+// "Do only one query per directory"), so a batch of n files paid for n full
+// listings. Here one run lists every query's directory, and each query's
+// roots are picked as go/packages picks them: the packages listed for the
+// file's directory with a Go file of the file's base name, in query order.
+// Where go/packages would instead build an ad-hoc package (go list listed
+// nothing for the directory, or a package without Go files), the per-file
+// load decides.
+func loadMetadata(meta *packages.Config, patterns []string) ([]*packages.Package, error) {
+	if len(patterns) < 2 {
+		return listPackages(meta, patterns...)
+	}
+	dirs := make([]string, len(patterns))
+	var listed []string
+	seen := make(map[string]bool)
+	for i, pattern := range patterns {
+		query, file, _ := strings.Cut(pattern, "=")
+		if query != "file" || !filepath.IsAbs(file) {
+			return listPackages(meta, patterns...)
+		}
+		dirs[i] = filepath.Dir(file)
+		if !seen[dirs[i]] {
+			seen[dirs[i]] = true
+			// "pattern=" passes the directory to go list verbatim, as a
+			// file= query passes it.
+			listed = append(listed, "pattern="+dirs[i])
+		}
+	}
+	// A run that fails lists no package, so every query takes the per-file
+	// load below, which reports the failure.
+	pkgs, _ := listPackages(meta, listed...)
+	inDir := make(map[string][]*packages.Package)
+	for _, p := range pkgs {
+		inDir[p.Dir] = append(inDir[p.Dir], p)
+	}
+	var roots []*packages.Package
+	added := make(map[*packages.Package]bool)
+	for i, pattern := range patterns {
+		if len(inDir[dirs[i]]) == 0 {
+			return listPackages(meta, patterns...)
+		}
+		base := filepath.Base(pattern) // "file=" and an absolute path
+		for _, p := range inDir[dirs[i]] {
+			if len(p.GoFiles) == 0 {
+				return listPackages(meta, patterns...)
+			}
+			for _, f := range p.GoFiles {
+				if filepath.Base(f) == base && !added[p] {
+					added[p] = true
+					roots = append(roots, p)
+				}
+			}
+		}
+	}
 	return roots, nil
 }
 

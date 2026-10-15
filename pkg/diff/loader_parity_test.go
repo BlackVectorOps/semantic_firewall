@@ -310,14 +310,22 @@ func TestLoadSource_CorpusParity(t *testing.T) {
 
 			// Each package alone, as a diff loads it: one root, with the
 			// module's other packages loaded as (purged) dependencies.
-			list, err := packages.Load(&packages.Config{Mode: packages.NeedName, Dir: root, Env: GetHardenedEnv()}, "./...")
+			list, err := packages.Load(&packages.Config{Mode: packages.NeedName | packages.NeedFiles, Dir: root, Env: GetHardenedEnv()}, "./...")
 			if err != nil {
 				t.Fatal(err)
 			}
+			var files []string
 			for _, p := range list {
 				assertLoadersAgree(t, func() *packages.Config { return sourceLoaderConfig(root, nil) }, p.PkgPath)
+				for _, f := range p.GoFiles {
+					files = append(files, "file="+f)
+				}
 			}
 			t.Logf("%s: each of %d packages loaded alone identical", root, len(list))
+
+			// Every file at once, as a batch loads them.
+			assertLoadersAgree(t, func() *packages.Config { return sourceLoaderConfig(root, nil) }, files...)
+			t.Logf("%s: its %d files loaded together identical", root, len(files))
 		})
 	}
 }
@@ -557,5 +565,161 @@ func TestLoadSource_EditedReplacementIsReloaded(t *testing.T) {
 	after := assertLoadersAgree(t, func() *packages.Config { return sourceLoaderConfig(root, nil) }, "./root")
 	if strings.Join(before, "\n") == strings.Join(after, "\n") {
 		t.Errorf("the edit to the replacement did not change the result")
+	}
+}
+
+// metadataSnapshot renders the root IDs in order and the metadata of every
+// package they reach.
+func metadataSnapshot(roots []*packages.Package) []string {
+	var ids, all []string
+	for _, r := range roots {
+		ids = append(ids, r.ID)
+	}
+	packages.Visit(roots, nil, func(p *packages.Package) {
+		var imports []string
+		for path, imp := range p.Imports {
+			imports = append(imports, path+"="+imp.ID)
+		}
+		sort.Strings(imports)
+		var module string
+		if p.Module != nil {
+			module = p.Module.Path + "@" + p.Module.Version
+		}
+		all = append(all, fmt.Sprintf("%s name=%s path=%s dir=%s go=%v compiled=%v other=%v ignored=%v errors=%v imports=%v module=%s sizes=%v",
+			p.ID, p.Name, p.PkgPath, p.Dir, p.GoFiles, p.CompiledGoFiles, p.OtherFiles, p.IgnoredFiles, p.Errors, imports, module, p.TypesSizes))
+	})
+	sort.Strings(all)
+	return append([]string{"roots " + strings.Join(ids, " ")}, all...)
+}
+
+// Several file= queries take one go list run over their directories and
+// get the roots go/packages gives, in its order: a package once however
+// many of its files are queried, none for a test file or a file the build
+// excludes, a test file's test variant when tests are loaded. A directory
+// for which go/packages builds an ad-hoc package (one go list lists nothing
+// for, or a package without Go files), a single query, a relative path and
+// any other pattern take the per-file load.
+func TestLoadMetadata_FileQueries(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	writeFiles(t, outside, map[string]string{"o.go": "package o\n"})
+	writeFiles(t, root, map[string]string{
+		"go.mod":             "module example.com/m\n\ngo 1.22\n",
+		"a/a.go":             "package a\n\nimport \"os\"\n\nfunc A() { os.Exit(1) }\n",
+		"a/b.go":             "package a\n\nfunc B() {}\n",
+		"a/a_test.go":        "package a\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {}\n",
+		"b/b.go":             "package b\n\nimport \"example.com/m/a\"\n\nfunc B() { a.B() }\n",
+		"c/c.go":             "package c\n",
+		"c/tagged.go":        "//go:build sfwnever\n\npackage c\n\nfunc T() {}\n",
+		"onlytest/x_test.go": "package onlytest\n\nimport \"testing\"\n\nfunc TestX(t *testing.T) {}\n",
+		"excluded/e.go":      "//go:build sfwnever\n\npackage excluded\n",
+	})
+	file := func(name string) string { return "file=" + filepath.Join(root, filepath.FromSlash(name)) }
+	dir := func(name string) string { return "pattern=" + filepath.Join(root, name) }
+	var calls []string
+	listPackages = func(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
+		calls = append(calls, strings.Join(patterns, " "))
+		return packages.Load(cfg, patterns...)
+	}
+	t.Cleanup(func() { listPackages = packages.Load })
+	overlay := map[string][]byte{filepath.Join(root, "a", "new.go"): []byte("package a\n\nfunc New() {}\n")}
+
+	for _, tc := range []struct {
+		name      string
+		tests     bool
+		patterns  []string
+		wantRoots string
+		wantCalls []string
+	}{
+		{
+			name:      "many files",
+			patterns:  []string{file("b/b.go"), file("a/a.go"), file("a/a_test.go"), file("a/b.go"), file("c/tagged.go"), file("a/new.go"), file("b/b.go")},
+			wantRoots: "roots example.com/m/b example.com/m/a",
+			wantCalls: []string{dir("b") + " " + dir("a") + " " + dir("c")},
+		},
+		{
+			name:      "test variants",
+			tests:     true,
+			patterns:  []string{file("a/a_test.go"), file("b/b.go"), file("a/a.go")},
+			wantRoots: "roots example.com/m/a [example.com/m/a.test] example.com/m/b example.com/m/a",
+			wantCalls: []string{dir("a") + " " + dir("b")},
+		},
+		{
+			name:      "only files nothing compiles",
+			patterns:  []string{file("a/a_test.go"), file("c/tagged.go")},
+			wantRoots: "roots ",
+			wantCalls: []string{dir("a") + " " + dir("c")},
+		},
+		{
+			name:      "a directory with only a test file",
+			patterns:  []string{file("a/a.go"), file("onlytest/x_test.go")},
+			wantRoots: "roots example.com/m/a",
+			wantCalls: []string{dir("a") + " " + dir("onlytest"), file("a/a.go") + " " + file("onlytest/x_test.go")},
+		},
+		{
+			name:      "a directory the build excludes",
+			patterns:  []string{file("excluded/e.go"), file("a/a.go")},
+			wantRoots: "roots command-line-arguments example.com/m/a",
+			wantCalls: []string{dir("excluded") + " " + dir("a"), file("excluded/e.go") + " " + file("a/a.go")},
+		},
+		{
+			name:      "a directory that does not exist",
+			patterns:  []string{file("a/a.go"), file("gone/g.go")},
+			wantRoots: "roots example.com/m/a",
+			wantCalls: []string{dir("a") + " " + dir("gone"), file("a/a.go") + " " + file("gone/g.go")},
+		},
+		{
+			name:      "a directory outside the module",
+			patterns:  []string{file("a/a.go"), "file=" + filepath.Join(outside, "o.go")},
+			wantCalls: []string{dir("a") + " pattern=" + outside, file("a/a.go") + " file=" + filepath.Join(outside, "o.go")},
+		},
+		{
+			name:      "a relative path",
+			patterns:  []string{file("a/a.go"), "file=b/b.go"},
+			wantRoots: "roots example.com/m/a example.com/m/b",
+			wantCalls: []string{file("a/a.go") + " file=b/b.go"},
+		},
+		{
+			name:      "one file",
+			patterns:  []string{file("a/a.go")},
+			wantRoots: "roots example.com/m/a",
+			wantCalls: []string{file("a/a.go")},
+		},
+		{
+			name:      "another pattern",
+			patterns:  []string{file("a/a.go"), "./b"},
+			wantRoots: "roots example.com/m/b example.com/m/a",
+			wantCalls: []string{file("a/a.go") + " ./b"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := sourceLoaderConfig(root, overlay)
+			cfg.Tests = tc.tests
+			cfg.Mode = packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
+				packages.NeedImports | packages.NeedDeps | packages.NeedModule | packages.NeedTypesSizes
+			cfg.Fset = nil
+			want, err := packages.Load(cfg, tc.patterns...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls = nil
+			got, err := loadMetadata(cfg, tc.patterns)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantSnap, gotSnap := metadataSnapshot(want), metadataSnapshot(got)
+			if diff := firstDifference(wantSnap, gotSnap); diff != "" {
+				t.Errorf("loadMetadata differs from go/packages: %s", diff)
+			}
+			if tc.wantRoots != "" && gotSnap[0] != tc.wantRoots {
+				t.Errorf("got %q, want %q", gotSnap[0], tc.wantRoots)
+			}
+			if strings.Join(calls, "\n") != strings.Join(tc.wantCalls, "\n") {
+				t.Errorf("go/packages calls:\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(tc.wantCalls, "\n"))
+			}
+		})
 	}
 }
