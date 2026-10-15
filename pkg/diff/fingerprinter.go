@@ -137,14 +137,18 @@ func oversizedFingerprint(fn *ssa.Function) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func GenerateFingerprint(fn *ssa.Function, policy ir.LiteralPolicy, strictMode bool) FingerprintResult {
-	line := 0
-	filename := ""
-	if fn.Prog != nil && fn.Prog.Fset != nil {
-		p := fn.Prog.Fset.Position(fn.Pos())
-		line = p.Line
-		filename = p.Filename
+// functionPosition returns the file and line of fn's position, as
+// FingerprintResult reports them.
+func functionPosition(fn *ssa.Function) (filename string, line int) {
+	if fn.Prog == nil || fn.Prog.Fset == nil {
+		return "", 0
 	}
+	p := fn.Prog.Fset.Position(fn.Pos())
+	return p.Filename, p.Line
+}
+
+func GenerateFingerprint(fn *ssa.Function, policy ir.LiteralPolicy, strictMode bool) FingerprintResult {
+	filename, line := functionPosition(fn)
 
 	if len(fn.Blocks) > MaxFunctionBlocks {
 		return FingerprintResult{
@@ -185,12 +189,18 @@ func FingerprintSource(filename string, src string, policy ir.LiteralPolicy) ([]
 }
 
 func FingerprintSourceAdvanced(filename string, src string, policy ir.LiteralPolicy, strictMode bool) ([]FingerprintResult, error) {
+	return FingerprintSourceWhere(filename, src, policy, strictMode, nil)
+}
+
+// FingerprintSourceWhere is FingerprintSourceAdvanced restricted as
+// FingerprintPackagesWhere restricts FingerprintPackages.
+func FingerprintSourceWhere(filename string, src string, policy ir.LiteralPolicy, strictMode bool, keep func(filename string) bool) ([]FingerprintResult, error) {
 	initialPkgs, err := loadPackagesFromSource(filename, src)
 	if err != nil {
 		return nil, err
 	}
 
-	return FingerprintPackages(initialPkgs, policy, strictMode)
+	return FingerprintPackagesWhere(initialPkgs, policy, strictMode, keep)
 }
 
 func GetHardenedEnv() []string {
@@ -463,6 +473,15 @@ func customBuildTags(src string) []string {
 }
 
 func FingerprintPackages(initialPkgs []*packages.Package, policy ir.LiteralPolicy, strictMode bool) ([]FingerprintResult, error) {
+	return FingerprintPackagesWhere(initialPkgs, policy, strictMode, nil)
+}
+
+// FingerprintPackagesWhere is FingerprintPackages for the functions whose
+// file, as FingerprintResult.Filename names it, keep accepts, and those
+// without a file; a nil keep accepts every file. The other functions are
+// not canonicalized: a diff of a few files of a large package reads only
+// their functions.
+func FingerprintPackagesWhere(initialPkgs []*packages.Package, policy ir.LiteralPolicy, strictMode bool, keep func(filename string) bool) ([]FingerprintResult, error) {
 	if len(initialPkgs) == 0 {
 		return nil, fmt.Errorf("input packages list is empty")
 	}
@@ -474,6 +493,10 @@ func FingerprintPackages(initialPkgs []*packages.Package, policy ir.LiteralPolic
 
 	var results []FingerprintResult
 	visited := make(map[*ssa.Function]bool)
+	accept := func(fn *ssa.Function) bool {
+		file, _ := functionPosition(fn)
+		return keep == nil || file == "" || keep(file)
+	}
 
 	for _, pkg := range initialPkgs {
 		if pkg.Types == nil {
@@ -488,13 +511,13 @@ func FingerprintPackages(initialPkgs []*packages.Package, policy ir.LiteralPolic
 		for _, member := range ssaPkg.Members {
 			switch mem := member.(type) {
 			case *ssa.Function:
-				processFunctionAndAnons(mem, policy, strictMode, &results, visited)
+				processFunctionAndAnons(mem, policy, strictMode, &results, visited, accept)
 			case *ssa.Type:
 				if named, ok := mem.Type().(*types.Named); ok {
 					for i := 0; i < named.NumMethods(); i++ {
 						m := named.Method(i)
 						if fn := prog.FuncValue(m); fn != nil {
-							processFunctionAndAnons(fn, policy, strictMode, &results, visited)
+							processFunctionAndAnons(fn, policy, strictMode, &results, visited, accept)
 						}
 					}
 				}
@@ -509,7 +532,10 @@ func FingerprintPackages(initialPkgs []*packages.Package, policy ir.LiteralPolic
 	return results, nil
 }
 
-func processFunctionAndAnons(fn *ssa.Function, policy ir.LiteralPolicy, strictMode bool, results *[]FingerprintResult, visited map[*ssa.Function]bool) {
+// processFunctionAndAnons fingerprints fn, when accept accepts it, and its
+// anonymous functions, which accept judges on their own: a //line
+// directive can place a closure in another file than its parent.
+func processFunctionAndAnons(fn *ssa.Function, policy ir.LiteralPolicy, strictMode bool, results *[]FingerprintResult, visited map[*ssa.Function]bool, accept func(*ssa.Function) bool) {
 	if visited[fn] {
 		return
 	}
@@ -519,13 +545,13 @@ func processFunctionAndAnons(fn *ssa.Function, policy ir.LiteralPolicy, strictMo
 		return
 	}
 
-	if len(fn.Blocks) > 0 {
+	if len(fn.Blocks) > 0 && accept(fn) {
 		result := GenerateFingerprint(fn, policy, strictMode)
 		*results = append(*results, result)
 	}
 
 	for _, anon := range fn.AnonFuncs {
-		processFunctionAndAnons(anon, policy, strictMode, results, visited)
+		processFunctionAndAnons(anon, policy, strictMode, results, visited, accept)
 	}
 }
 
