@@ -203,6 +203,49 @@ func FingerprintSourceWhere(filename string, src string, policy ir.LiteralPolicy
 	return FingerprintPackagesWhere(initialPkgs, policy, strictMode, keep)
 }
 
+// WorkspaceFile returns the go.work file that governs builds in dir as the
+// go command finds it, the first in dir or a parent, or "" when there is
+// none. The search stops at the repository's root, the first directory
+// holding a .git entry: a tree checked out inside another must not take
+// the outer tree's workspace.
+func WorkspaceFile(dir string) string {
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	for {
+		if info, err := os.Stat(filepath.Join(dir, "go.work")); err == nil && !info.IsDir() {
+			return filepath.Join(dir, "go.work")
+		}
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			return ""
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// HardenedEnvFor is GetHardenedEnv for loading packages in dir: it uses the
+// workspace that governs dir (see WorkspaceFile), as the go command builds
+// it, and none when there is none.
+func HardenedEnvFor(dir string) []string {
+	return withWorkspace(GetHardenedEnv(), dir)
+}
+
+// withWorkspace sets env's GOWORK to the workspace that governs dir.
+func withWorkspace(env []string, dir string) []string {
+	if work := WorkspaceFile(dir); work != "" {
+		return append(env, "GOWORK="+work) // the last value of a variable wins
+	}
+	return env
+}
+
+// GetHardenedEnv returns the environment for loading untrusted source: no
+// cgo, no network (GOPROXY=off), a read-only module graph, no workspace
+// (see HardenedEnvFor) and the local toolchain.
 func GetHardenedEnv() []string {
 	// FIX: Ensure return is OUTSIDE the loop so we don't truncate the environment.
 	env := make([]string, 0, len(os.Environ())+7)
@@ -279,7 +322,7 @@ func loadPackagesFromSource(filename string, src string) ([]*packages.Package, e
 		if !ok {
 			return nil, fmt.Errorf("%s is excluded by its build constraints for every known GOOS/GOARCH and tag combination", filename)
 		}
-		cfg.Env = append(GetHardenedEnv(), "GOOS="+goos, "GOARCH="+goarch)
+		cfg.Env = append(HardenedEnvFor(sourceDir), "GOOS="+goos, "GOARCH="+goarch)
 		if len(tags) > 0 {
 			cfg.BuildFlags = []string{"-tags=" + strings.Join(tags, ",")}
 		}
@@ -316,8 +359,8 @@ func loadPackagesFromSource(filename string, src string) ([]*packages.Package, e
 // sourceLoaderConfig is the go/packages configuration every source load
 // uses: full syntax and types for the whole import graph, the hardened
 // environment (CGO_ENABLED=0, GOPROXY=off, GOFLAGS=-mod=readonly,
-// GOWORK=off, GOTOOLCHAIN=local), no test variants, and the given file
-// contents as overlays.
+// GOTOOLCHAIN=local) with the workspace that governs dir, no test
+// variants, and the given file contents as overlays.
 func sourceLoaderConfig(dir string, overlay map[string][]byte) *packages.Config {
 	return &packages.Config{
 		Dir:     dir,
@@ -325,7 +368,7 @@ func sourceLoaderConfig(dir string, overlay map[string][]byte) *packages.Config 
 		Fset:    token.NewFileSet(),
 		Overlay: overlay,
 		Tests:   false,
-		Env:     GetHardenedEnv(),
+		Env:     HardenedEnvFor(dir),
 	}
 }
 
@@ -574,7 +617,7 @@ type TreeLoadOptions struct {
 	// prevents any external network access. Set to a proxy URL (e.g.
 	// "https://proxy.golang.org,direct") when analysing source trees whose
 	// declared dependencies are not yet cached in GOMODCACHE. All other
-	// hardening applied by GetHardenedEnv (CGO_ENABLED=0, GOWORK=off, etc.)
+	// hardening applied by GetHardenedEnv (CGO_ENABLED=0, GOFLAGS, etc.)
 	// remains in effect regardless of this field.
 	Proxy string
 
@@ -688,6 +731,7 @@ func loadPackagesFromTree(rootDir string, opts TreeLoadOptions) ([]*packages.Pac
 		meta.HadGoMod = true
 		meta.ModulePath = modPath
 		cfg.Dir = modDir
+		cfg.Env = withWorkspace(cfg.Env, modDir)
 	} else {
 		// Synthesize a go.mod via overlay so the loader has a canonical
 		// module path. Fixes the qualifier-corruption case where the loader

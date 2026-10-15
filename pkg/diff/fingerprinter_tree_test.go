@@ -135,3 +135,36 @@ func funcNamesOf(results []diff.FingerprintResult) []string {
 	}
 	return names
 }
+
+// A module of a workspace loads as the go command builds it: app imports
+// lib, which only the go.work provides.
+func TestFingerprintTree_Workspace(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	for name, src := range map[string]string{
+		"go.work":    "go 1.22\n\nuse (\n\t./app\n\t./lib\n)\n",
+		"app/go.mod": "module example.com/app\n\ngo 1.22\n",
+		"app/a.go":   "package app\n\nimport \"example.com/lib\"\n\nfunc Twice() int { return 2 * lib.One() }\n",
+		"lib/go.mod": "module example.com/lib\n\ngo 1.22\n",
+		"lib/l.go":   "package lib\n\nfunc One() int { return 1 }\n",
+	} {
+		p := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	results, _, err := diff.FingerprintTree(filepath.Join(root, "app"), nil, ir.DefaultLiteralPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range results {
+		found = found || strings.HasSuffix(r.FunctionName, "app.Twice")
+	}
+	if !found {
+		t.Errorf("app.Twice not fingerprinted: %d results", len(results))
+	}
+}

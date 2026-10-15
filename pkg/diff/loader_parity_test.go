@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -913,5 +914,90 @@ func TestLoadSource_BodyOnlyImportsAreNotLoaded(t *testing.T) {
 	}
 	if dep.Imports["strings"].Types == nil {
 		t.Errorf("strings, which dep's declarations use, was not loaded")
+	}
+}
+
+// The governing go.work is the first in the directory or a parent, up to
+// the repository's root: a worktree checked out inside another tree (its
+// .git a file) does not take the outer tree's workspace.
+func TestWorkspaceFile(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFiles(t, root, map[string]string{
+		"repo/.git/HEAD":       "ref: refs/heads/main\n",
+		"repo/go.work":         "go 1.22\n",
+		"repo/app/go.mod":      "module example.com/app\n",
+		"repo/app/sub/x.go":    "package sub\n",
+		"repo/.wt/.git":        "gitdir: ../.git/worktrees/wt\n",
+		"repo/.wt/app/go.mod":  "module example.com/app\n",
+		"repo/.wt2/.git":       "gitdir: ../.git/worktrees/wt2\n",
+		"repo/.wt2/go.work":    "go 1.22\n",
+		"repo/.wt2/app/go.mod": "module example.com/app\n",
+		"plain/go.work/keep":   "a directory, not a workspace\n",
+		"plain/app/go.mod":     "module example.com/app\n",
+	})
+	for dir, want := range map[string]string{
+		"repo":          "repo/go.work",
+		"repo/app":      "repo/go.work",
+		"repo/app/sub":  "repo/go.work",
+		"repo/.wt/app":  "",
+		"repo/.wt2/app": "repo/.wt2/go.work",
+		"plain/app":     "",
+	} {
+		if want != "" {
+			want = filepath.Join(root, filepath.FromSlash(want))
+		}
+		if got := WorkspaceFile(filepath.Join(root, filepath.FromSlash(dir))); got != want {
+			t.Errorf("%s: got %q, want %q", dir, got, want)
+		}
+	}
+	env := HardenedEnvFor(filepath.Join(root, "repo", "app"))
+	if env[len(env)-1] != "GOWORK="+filepath.Join(root, "repo", "go.work") {
+		t.Errorf("env ends %q; want the workspace", env[len(env)-1])
+	}
+	if env := HardenedEnvFor(filepath.Join(root, "plain", "app")); strings.Join(env, "\n") != strings.Join(GetHardenedEnv(), "\n") {
+		t.Errorf("env without a workspace: %v", env[len(env)-3:])
+	}
+}
+
+// A tree governed by a go.work loads as the go command builds it: a module
+// of the workspace resolves to its directory, even one that takes the path
+// of a required dependency. Here shadow/ replaces example.com/dep v1.0.0.
+func TestLoadSource_WorkspaceParity(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFiles(t, root, map[string]string{
+		"go.work":       "go 1.22\n\nuse (\n\t./app\n\t./lib\n\t./shadow\n)\n",
+		"app/go.mod":    "module example.com/app\n\ngo 1.22\n\nrequire example.com/dep v1.0.0\n",
+		"app/a.go":      "package app\n\nimport \"example.com/dep\"\n\nvar A = dep.D\n",
+		"lib/go.mod":    "module example.com/lib\n\ngo 1.22\n",
+		"lib/l.go":      "package lib\n\nconst L = 1\n",
+		"shadow/go.mod": "module example.com/dep\n\ngo 1.22\n",
+		"shadow/d.go":   "package dep\n\nimport \"os/exec\"\n\nconst D = 666\n\nfunc Run() { exec.Command(\"sh\").Run() }\n",
+	})
+	pinnedModules(t, filepath.Join(root, "app"), map[string]map[string]string{
+		"example.com/dep@v1.0.0": {"go.mod": "module example.com/dep\n\ngo 1.22\n", "d.go": "package dep\n\nconst D = 1\n\nfunc Run() {}\n"},
+	})
+	writeFiles(t, root, map[string]string{
+		"app/a.go": "package app\n\nimport (\n\t\"example.com/dep\"\n\t\"example.com/lib\"\n)\n\nvar A = lib.L + dep.D\n\nfunc Go() { dep.Run() }\n",
+	})
+	app := filepath.Join(root, "app")
+	snap := assertLoadersAgree(t, func() *packages.Config { return sourceLoaderConfig(app, nil) }, "./...")
+	mustContain(t, snap, "package example.com/app illTyped=false", "func example.com/app.Go ")
+
+	roots, err := loadSource(sourceLoaderConfig(app, nil), "./...")
+	if err != nil || len(roots) != 1 {
+		t.Fatalf("%v %v", roots, err)
+	}
+	dep := roots[0].Imports["example.com/dep"]
+	if len(dep.GoFiles) != 1 || dep.GoFiles[0] != filepath.Join(root, "shadow", "d.go") {
+		t.Errorf("example.com/dep loaded from %v; want the workspace's shadow/d.go", dep.GoFiles)
+	}
+	if c := dep.Types.Scope().Lookup("D").(*types.Const); c.Val().String() != "666" {
+		t.Errorf("dep.D = %s; want the workspace copy's 666", c.Val())
 	}
 }
