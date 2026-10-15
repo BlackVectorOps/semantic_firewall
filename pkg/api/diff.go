@@ -57,11 +57,12 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 		if err != nil {
 			absPath = path
 		}
-		results, err := diff.FingerprintSource(absPath, string(content), ir.DefaultLiteralPolicy)
+		paths := pathResolver{}
+		results, err := diff.FingerprintSourceWhere(absPath, string(content), ir.DefaultLiteralPolicy, false, paths.keepFiles(absPath))
 		if err != nil {
 			return nil, err
 		}
-		return inFile(results, absPath, pathResolver{}), nil
+		return inFile(results, absPath, paths), nil
 	}
 
 	// Load the two versions at the same time; report the old side's error
@@ -315,6 +316,17 @@ func inFile(results []diff.FingerprintResult, path string, paths pathResolver) [
 // distinct path: every function of a file names the same path, and a batch
 // filters one package's functions for each of its files.
 type pathResolver map[string]string
+
+// keepFiles returns the keep function of diff.FingerprintPackagesWhere
+// that accepts the files at paths, compared as inFile compares them, so
+// only the functions inFile can keep are fingerprinted.
+func (r pathResolver) keepFiles(paths ...string) func(filename string) bool {
+	want := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		want[r.resolve(p)] = true
+	}
+	return func(filename string) bool { return want[r.resolve(filename)] }
+}
 
 func (r pathResolver) resolve(path string) string {
 	resolved, ok := r[path]

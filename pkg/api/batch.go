@@ -29,8 +29,8 @@ type DiffPair struct {
 // loaded and to make a group fail.
 var (
 	loadFiles           = diff.LoadFiles
-	fingerprintPackages = diff.FingerprintPackages
-	fingerprintSource   = diff.FingerprintSource
+	fingerprintPackages = diff.FingerprintPackagesWhere
+	fingerprintSource   = diff.FingerprintSourceWhere
 )
 
 // DiffBatch diffs every pair and returns one result per pair, in order.
@@ -202,11 +202,15 @@ func fingerprintGroup(root string, files []pendingFile) map[string]fileResult {
 			wellTyped = append(wellTyped, p)
 		}
 	}
+	paths := pathResolver{}
+	abs := make([]string, len(files))
+	for i, f := range files {
+		abs[i] = f.abs
+	}
 	var results []diff.FingerprintResult
 	if err == nil && len(wellTyped) > 0 {
-		results, err = fingerprintPackagesSafely(wellTyped)
+		results, err = fingerprintPackagesSafely(wellTyped, paths.keepFiles(abs...))
 	}
-	paths := pathResolver{}
 	for _, f := range files {
 		if err != nil || !diff.PackagesContain(wellTyped, f.abs) {
 			out[f.path] = fingerprintOne(f)
@@ -217,13 +221,15 @@ func fingerprintGroup(root string, files []pendingFile) map[string]fileResult {
 	return out
 }
 
-func fingerprintPackagesSafely(pkgs []*packages.Package) (results []diff.FingerprintResult, err error) {
+// fingerprintPackagesSafely fingerprints the functions of pkgs in the
+// files keep accepts, turning a panic into an error.
+func fingerprintPackagesSafely(pkgs []*packages.Package, keep func(string) bool) (results []diff.FingerprintResult, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic while fingerprinting: %v", r)
 		}
 	}()
-	return fingerprintPackages(pkgs, ir.DefaultLiteralPolicy, false)
+	return fingerprintPackages(pkgs, ir.DefaultLiteralPolicy, false, keep)
 }
 
 // fingerprintOne loads and fingerprints one file on its own, as Diff does.
@@ -233,11 +239,12 @@ func fingerprintOne(f pendingFile) (res fileResult) {
 			res = fileResult{err: fmt.Errorf("panic while fingerprinting %s: %v", f.path, r)}
 		}
 	}()
-	results, err := fingerprintSource(f.abs, string(f.content), ir.DefaultLiteralPolicy)
+	paths := pathResolver{}
+	results, err := fingerprintSource(f.abs, string(f.content), ir.DefaultLiteralPolicy, false, paths.keepFiles(f.abs))
 	if err != nil {
 		return fileResult{err: err}
 	}
-	return fileResult{results: inFile(results, f.abs, pathResolver{})}
+	return fileResult{results: inFile(results, f.abs, paths)}
 }
 
 // packagesOf returns the type-checked packages among pkgs that compile the

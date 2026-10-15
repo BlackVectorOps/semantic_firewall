@@ -57,12 +57,12 @@ func TestDiffBatch_LoadsEachModuleOnce(t *testing.T) {
 		mu.Unlock()
 		return origLoad(dir, overlay)
 	}
-	fingerprintSource = func(f, src string, policy ir.LiteralPolicy) ([]diff.FingerprintResult, error) {
+	fingerprintSource = func(f, src string, policy ir.LiteralPolicy, strict bool, keep func(string) bool) ([]diff.FingerprintResult, error) {
 		rel, _ := filepath.Rel(root, f)
 		mu.Lock()
 		singles = append(singles, rel)
 		mu.Unlock()
-		return origSingle(f, src, policy)
+		return origSingle(f, src, policy, strict, keep)
 	}
 
 	var pairs []DiffPair
@@ -142,7 +142,7 @@ func TestDiffBatch_GroupFailuresFallBack(t *testing.T) {
 			loadFiles = func(string, map[string][]byte) ([]*packages.Package, error) { return nil, os.ErrPermission }
 		}},
 		{"fingerprinting panics", func() {
-			fingerprintPackages = func([]*packages.Package, ir.LiteralPolicy, bool) ([]diff.FingerprintResult, error) {
+			fingerprintPackages = func([]*packages.Package, ir.LiteralPolicy, bool, func(string) bool) ([]diff.FingerprintResult, error) {
 				panic("boom")
 			}
 		}},
@@ -151,11 +151,11 @@ func TestDiffBatch_GroupFailuresFallBack(t *testing.T) {
 			loadFiles, fingerprintPackages = origLoad, origPkgs
 			var mu sync.Mutex
 			singles := 0
-			fingerprintSource = func(f, src string, policy ir.LiteralPolicy) ([]diff.FingerprintResult, error) {
+			fingerprintSource = func(f, src string, policy ir.LiteralPolicy, strict bool, keep func(string) bool) ([]diff.FingerprintResult, error) {
 				mu.Lock()
 				singles++
 				mu.Unlock()
-				return origSingle(f, src, policy)
+				return origSingle(f, src, policy, strict, keep)
 			}
 			c.setup()
 			got := DiffBatch(pairs)
