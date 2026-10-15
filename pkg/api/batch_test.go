@@ -279,8 +279,17 @@ func TestDiffBatch_InputRules(t *testing.T) {
 		"loose/b.txt": "",
 	})
 	path := func(name string) string { return filepath.Join(root, filepath.FromSlash(name)) }
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(wd, path("p/a.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	pairs := []api.DiffPair{
 		{Old: "", New: path("p/a.go")},
+		{Old: "", New: rel},
 		{Old: path("p/missing.go"), New: path("p/a.go")},
 		{Old: path("blank/b.go"), New: path("p/a.go")},
 		{Old: "", New: path("q/limit.go")},
@@ -293,7 +302,7 @@ func TestDiffBatch_InputRules(t *testing.T) {
 	got := api.DiffBatch(pairs)
 	sameAsSingles(t, pairs, got, singleDiff)
 	for i, want := range []string{
-		"", "", "", "",
+		"", "", "", "", "",
 		"failed to process old file: file " + path("r/big.go") + " exceeds maximum analysis size",
 		"failed to process new file: file " + path("r/big.go") + " exceeds maximum analysis size",
 		"failed to process old file: failed to stat " + path("p/a.go/x.go"),
@@ -303,5 +312,29 @@ func TestDiffBatch_InputRules(t *testing.T) {
 		if msg := got[i].ErrorMessage; want == "" && (msg != "" || len(got[i].Functions) == 0) || !strings.HasPrefix(msg, want) {
 			t.Errorf("pair %d: error %q, %d functions; want %q", i, msg, len(got[i].Functions), want)
 		}
+	}
+}
+
+// statErrFS fails every Stat that is not of an existing file with an error
+// other than "not found".
+type statErrFS struct{ api.RealFileSystem }
+
+func (statErrFS) Stat(name string) (os.FileInfo, error) {
+	if info, err := os.Stat(name); err == nil {
+		return info, nil
+	}
+	return nil, os.ErrPermission
+}
+
+// An empty path stands for an absent file whatever the FileSystem says
+// about it.
+func TestDiffBatchWithFS_EmptyPathIsAbsent(t *testing.T) {
+	a := filepath.Join(t.TempDir(), "a.go")
+	if err := os.WriteFile(a, []byte("package p\n\nfunc F() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := api.DiffBatchWithFS(statErrFS{}, []api.DiffPair{{Old: "", New: a}})
+	if got[0].ErrorMessage != "" || len(got[0].Functions) == 0 {
+		t.Errorf("error %q, %d functions; want F added", got[0].ErrorMessage, len(got[0].Functions))
 	}
 }

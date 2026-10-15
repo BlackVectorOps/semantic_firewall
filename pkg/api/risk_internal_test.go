@@ -71,6 +71,9 @@ func TestAssessTopologyDelta_DeletionSignals(t *testing.T) {
 		{"guards deleted, sorted", fileTopo(four, map[string]int{"os.Remove": 1, "os.Chmod": 1, "os.Rename": 1, "os.Mkdir": 1}),
 			fileTopo(four, map[string]int{"os.Remove": 0, "os.Chmod": 0, "os.Rename": 0, "os.Mkdir": 0}),
 			[]string{"Unguarded(os.Chmod,os.Mkdir,os.Remove,os.Rename)"}, models.RiskScoreHigh},
+		{"a guard deleted beside an unguarded call of its class", fileTopo(removeBoth, map[string]int{"os.Remove": 1, "os.RemoveAll": 0}),
+			fileTopo(removeBoth, map[string]int{"os.Remove": 0, "os.RemoveAll": 0}),
+			[]string{"Unguarded(os.Remove)"}, models.RiskScoreHigh},
 		{"a guarded call swapped for an unguarded one of its class", fileTopo(remove, map[string]int{"os.Remove": 1}),
 			fileTopo(removeAll, map[string]int{"os.RemoveAll": 0}),
 			[]string{"Capability+filesystem(os.RemoveAll)", "Unguarded(os.RemoveAll)", "Calls-1"}, riskAdditionalCapability + models.RiskScoreHigh},
@@ -154,6 +157,9 @@ func TestAssessTopologyDelta_DeletionSignals(t *testing.T) {
 		{"a generic interface's check in a new major version", checks("(x.com/authz/v2.Checker[x.com/model.User]).Allow"),
 			checks("(x.com/authz/v3.Checker[x.com/model.User]).Allow"),
 			[]string{"ReplacedCheck((x.com/authz/v2.Checker[x.com/model.User]).Allow->(x.com/authz/v3.Checker[x.com/model.User]).Allow)"}, 0},
+		{"the first replacement, in order", checks("x.com/a/v2.Verify"),
+			checks("x.com/a/v9.Verify", "x.com/a/v5.Verify", "x.com/a/v3.Verify", "x.com/a/v7.Verify", "x.com/a/v4.Verify", "x.com/a/v8.Verify", "x.com/a/v6.Verify"),
+			[]string{"ReplacedCheck(x.com/a/v2.Verify->x.com/a/v3.Verify)"}, 0},
 		{"a kept check replaces nothing", checks("x.com/a/v2.Verify", "x.com/a/v3.Verify"), checks("x.com/a/v3.Verify"),
 			[]string{"RemovedCheck(x.com/a/v2.Verify)"}, models.RiskScoreHigh},
 		{"error exits removed are labelled, not charged", &topology.FunctionTopology{ErrorExits: 3}, &topology.FunctionTopology{ErrorExits: 1},
@@ -355,6 +361,51 @@ func TestAssessTopologyDelta_Profile(t *testing.T) {
 	}
 }
 
+// Unknown guards stay unknown under a dependency's profile.
+func TestAssessTopologyDelta_ProfileGuardsUnknown(t *testing.T) {
+	const own, other = "golang.org/x/sys/unix.Unlink", "os.Remove"
+	targets := map[string]string{own: topology.CapSyscall, other: topology.CapFilesystem}
+	r := assessTopologyDeltaFor(fileTopo(targets, map[string]int{own: 1, other: 1}), fileTopo(targets, nil), riskProfile{ownModule: "golang.org/x/sys"})
+	if want := []string{"GuardsUnknown(" + other + ")"}; !reflect.DeepEqual(r.labels, want) || r.score(0) != models.RiskScoreHigh {
+		t.Errorf("labels %q, score %d; want %q, %d", r.labels, r.score(0), want, models.RiskScoreHigh)
+	}
+}
+
+// A new weak TLS bound is excused only when it replaces a bound on the same
+// field that was no higher and is gone; versions are read by name or value.
+func TestRaisesTLSVersion(t *testing.T) {
+	const min, max = "crypto/tls.Config.MinVersion=", "crypto/tls.Config.MaxVersion="
+	set := func(s ...string) map[string]bool {
+		m := map[string]bool{}
+		for _, k := range s {
+			m[k] = true
+		}
+		return m
+	}
+	for _, c := range []struct {
+		s        string
+		old, cur map[string]bool
+		want     bool
+	}{
+		{min + "TLS1.1", set(min + "TLS1.0"), set(min + "TLS1.1"), true},
+		{min + "TLS1.0", set(min + "SSL3.0"), set(min + "TLS1.0"), true},
+		{max + "TLS1.1", set(max + "TLS1.0"), set(max + "TLS1.1"), true},
+		{min + "770", set(min + "769"), set(min + "770"), true},
+		{min + "769", set(min + "TLS1.0"), set(min + "769"), true},
+		{min + "TLS1.0", set(min + "TLS1.1"), set(min + "TLS1.0"), false},
+		{min + "TLS1.1", set(min + "TLS1.0"), set(min+"TLS1.0", min+"TLS1.1"), false},
+		{min + "TLS1.1", set(max + "TLS1.0"), set(min + "TLS1.1"), false},
+		{min + "bogus", set(min + "0"), set(min + "bogus"), false},
+		{min + "TLS1.1", set(min + "bogus"), set(min + "TLS1.1"), false},
+		{"example.com/p.Config.Level=1", set("example.com/p.Config.Level=0"), set("example.com/p.Config.Level=1"), false},
+		{"crypto/tls.Config.InsecureSkipVerify", set(), set("crypto/tls.Config.InsecureSkipVerify"), false},
+	} {
+		if got := raisesTLSVersion(c.s, c.old, c.cur); got != c.want {
+			t.Errorf("raisesTLSVersion(%q, %v, %v) = %v; want %v", c.s, c.old, c.cur, got, c.want)
+		}
+	}
+}
+
 func TestPackageBase(t *testing.T) {
 	for path, want := range map[string]string{
 		"github.com/casbin/casbin/v2": "casbin", "gopkg.in/square/go-jose.v2": "go-jose", "github.com/go-jose/go-jose/v3": "go-jose",
@@ -376,7 +427,7 @@ func TestPackageBase(t *testing.T) {
 	}
 }
 
-func TestTargetPackage(t *testing.T) {
+func TestModuleTargets(t *testing.T) {
 	for key, want := range map[string]string{
 		"golang.org/x/sys/unix.Syscall6":        "golang.org/x/sys/unix",
 		"(golang.org/x/sys/unix.Timespec).Unix": "golang.org/x/sys/unix",
@@ -384,9 +435,11 @@ func TestTargetPackage(t *testing.T) {
 		"gopkg.in/yaml.v3.Unmarshal":            "gopkg.in/yaml.v3",
 		"os.Remove":                             "os",
 		"(example.com/a.b.T).M":                 "example.com/a.b",
+		"(.error).Error":                        "",
+		"Name":                                  "",
 	} {
-		if got := targetPackage(key); got != want {
-			t.Errorf("targetPackage(%q) = %q; want %q", key, got, want)
+		if got, _, _ := splitCheckKey(key); got != want {
+			t.Errorf("package of %q = %q; want %q", key, got, want)
 		}
 	}
 	for _, c := range []struct {

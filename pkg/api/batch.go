@@ -10,7 +10,6 @@ import (
 	"sync"
 
 	"golang.org/x/tools/go/packages"
-	"golang.org/x/tools/go/ssa"
 
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff"
@@ -292,26 +291,11 @@ func inFileOf(results []diff.FingerprintResult, path string, own map[*types.Pack
 	kept := inFile(results, path, paths)
 	out := kept[:0:0]
 	for _, r := range kept {
-		if own[declaringPackage(r.GetSSAFunction())] {
+		// Every function fingerprinted is a package member, a method or a
+		// closure of one, which has its package.
+		if fn := r.GetSSAFunction(); fn.Pkg != nil && own[fn.Pkg.Pkg] {
 			out = append(out, r)
 		}
 	}
 	return out
-}
-
-// declaringPackage is the package that declares fn: its own, or for a
-// generic instance or a closure without one, its origin's or enclosing
-// function's.
-func declaringPackage(fn *ssa.Function) *types.Package {
-	for fn != nil {
-		if fn.Pkg != nil {
-			return fn.Pkg.Pkg
-		}
-		if o := fn.Origin(); o != nil {
-			fn = o
-		} else {
-			fn = fn.Parent()
-		}
-	}
-	return nil
 }

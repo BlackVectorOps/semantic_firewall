@@ -390,7 +390,7 @@ func matchingCheck(old string, candidates []string) (match string, same bool) {
 	}
 	for _, c := range candidates {
 		cPkg, cRecv, cName := splitCheckKey(c)
-		if topology.IsVerificationCall(cPkg, cRecv, cName) || lowerFirst(cRecv) != lowerFirst(recv) || lowerFirst(cName) != lowerFirst(name) {
+		if topology.IsVerificationCall(cPkg, cRecv, cName) || !equalButFirstCase(cRecv, recv) || !equalButFirstCase(cName, name) {
 			continue
 		}
 		if cPkg == pkg {
@@ -450,27 +450,22 @@ func packageBase(path string) string {
 
 var majorVersion = regexp.MustCompile(`^v[0-9]+$`)
 
-func lowerFirst(s string) string {
-	if s == "" {
-		return s
-	}
-	r, n := utf8.DecodeRuneInString(s)
-	return string(unicode.ToLower(r)) + s[n:]
+// equalButFirstCase reports whether a and b are the same name but for the
+// case of their first letters.
+func equalButFirstCase(a, b string) bool {
+	ra, na := utf8.DecodeRuneInString(a)
+	rb, nb := utf8.DecodeRuneInString(b)
+	return unicode.ToLower(ra) == unicode.ToLower(rb) && a[na:] == b[nb:]
 }
 
-// guardedClasses returns the capability classes all of whose targets in t
-// have a guard count of at least 1.
+// guardedClasses reports, for each capability class t reaches, whether all
+// of its targets have a guard count of at least 1.
 func guardedClasses(t *topology.FunctionTopology) map[string]bool {
-	guarded, open := make(map[string]bool), make(map[string]bool)
+	guarded := make(map[string]bool)
 	for target, class := range t.Capabilities {
-		if g, ok := t.CapabilityGuards[target]; ok && g > 0 {
-			guarded[class] = true
-		} else {
-			open[class] = true
-		}
-	}
-	for class := range open {
-		delete(guarded, class)
+		g, ok := t.CapabilityGuards[target]
+		all, seen := guarded[class]
+		guarded[class] = (all || !seen) && ok && g > 0
 	}
 	return guarded
 }
@@ -485,39 +480,17 @@ func callTargetsOf(t *topology.FunctionTopology) map[string]int {
 }
 
 // withoutModuleTargets returns t with the capability targets declared in
-// module mod removed from Capabilities and CapabilityGuards.
+// module mod removed from Capabilities. Guards are looked up by the
+// targets of Capabilities, so CapabilityGuards is kept as it is.
 func withoutModuleTargets(t *topology.FunctionTopology, mod string) *topology.FunctionTopology {
 	c := *t
 	c.Capabilities = make(map[string]string, len(t.Capabilities))
 	for k, v := range t.Capabilities {
-		if !inModule(targetPackage(k), mod) {
+		if pkg, _, _ := splitCheckKey(k); !inModule(pkg, mod) {
 			c.Capabilities[k] = v
 		}
 	}
-	if t.CapabilityGuards != nil {
-		c.CapabilityGuards = make(map[string]int, len(t.CapabilityGuards))
-		for k, v := range t.CapabilityGuards {
-			if _, kept := c.Capabilities[k]; kept {
-				c.CapabilityGuards[k] = v
-			}
-		}
-	}
 	return &c
-}
-
-// targetPackage returns the import path of a CallTargets key:
-// "golang.org/x/sys/unix" for "golang.org/x/sys/unix.Syscall6" and for
-// "(golang.org/x/sys/unix.Timespec).Unix".
-func targetPackage(key string) string {
-	if rest, ok := strings.CutPrefix(key, "("); ok {
-		if recv, _, found := strings.Cut(rest, ")."); found {
-			key = recv
-		}
-	}
-	if i := strings.LastIndexByte(key, '.'); i > 0 {
-		return key[:i]
-	}
-	return key
 }
 
 func inModule(pkgPath, mod string) bool {
