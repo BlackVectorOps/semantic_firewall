@@ -280,7 +280,7 @@ The pair below was produced by the code shown. The fingerprints differ, because 
 
 The output is a JSON array with one `sfw diff` result per pair, in order. A pair that cannot be diffed (a file that does not parse, say) has an `error` field and an empty `functions` list. The command prints every result, then exits 1 with `Error: 1 of 3 file pair(s) could not be diffed` on stderr.
 
-Each result equals what `sfw diff` prints for that pair alone. The difference is loading: the files of one side that share a module root (the nearest `go.mod`) are loaded with one `go/packages` call, so a package and its imports are type-checked once however many of its files changed. A file outside any module, a file the module's default build excludes (see [Files](#files)), a file in a package that does not type-check, and every file of a group whose load fails are loaded on their own, as `sfw diff` loads them. The old and new sides load concurrently.
+Each result equals what `sfw diff` prints for that pair alone. The difference is loading: the files of one side that share a module root (the nearest `go.mod`) and the `go.work` that governs them are loaded with one `go/packages` call, so a package and its imports are type-checked once however many of its files changed. A file outside any module, a file the module's default build excludes (see [Files](#files)), a file in a package that does not type-check, and every file of a group whose load fails are loaded on their own, as `sfw diff` loads them. The old and new sides load concurrently.
 
 ## Risk scoring
 

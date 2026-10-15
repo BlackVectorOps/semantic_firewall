@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"golang.org/x/tools/go/packages"
+	"golang.org/x/tools/go/ssa"
 
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff"
@@ -38,16 +39,19 @@ var (
 // fail on has the error in its ErrorMessage and no functions.
 //
 // The files of each side are loaded together: all files under one module
-// root take one go/packages call, so a package and its import graph are
-// loaded once however many of its files are diffed. A file outside any
-// module, a file the module's default build leaves out, a file of a package
-// that does not type-check, and every file of a group whose load or SSA
-// build fails are loaded on their own, exactly as Diff loads them.
+// root, governed by the same go.work, take one go/packages call, so a
+// package and its import graph are loaded once however many of its files
+// are diffed. A file outside any module, a file the module's default build
+// leaves out, a file of a package that does not type-check, and every file
+// of a group whose load or SSA build fails are loaded on their own, exactly
+// as Diff loads them.
 func DiffBatch(pairs []DiffPair) []*models.DiffOutput {
 	return DiffBatchWithFS(RealFileSystem{}, pairs)
 }
 
-// DiffBatchWithFS is DiffBatch against the supplied FileSystem.
+// DiffBatchWithFS is DiffBatch against the supplied FileSystem. With any
+// FileSystem but RealFileSystem, each file is loaded on its own, so each
+// result is what DiffWithFS returns for its pair.
 func DiffBatchWithFS(fsys FileSystem, pairs []DiffPair) []*models.DiffOutput {
 	oldPaths := make([]string, len(pairs))
 	newPaths := make([]string, len(pairs))
@@ -96,9 +100,18 @@ type pendingFile struct {
 
 // fingerprintFiles fingerprints each distinct path of one side, keyed by
 // the path as given.
+//
+// A group shares a module root and the workspace that governs its files'
+// directories, which Diff loads each file with: a .git entry between a
+// file and its module root (a submodule) ends the workspace search for
+// that file alone. Diff reads a file's package siblings from disk, so a
+// FileSystem other than the disk, whose files a group load would overlay
+// on each other, gets single-file loads only.
 func fingerprintFiles(fsys FileSystem, paths []string) map[string]fileResult {
 	out := make(map[string]fileResult)
 	groups := make(map[string][]pendingFile)
+	workspaces := make(map[string]string)
+	_, onDisk := fsys.(RealFileSystem)
 	var loose []pendingFile
 	for _, path := range paths {
 		if _, done := out[path]; done {
@@ -111,20 +124,31 @@ func fingerprintFiles(fsys FileSystem, paths []string) map[string]fileResult {
 		}
 		out[path] = fileResult{} // claimed; filled in below
 		f := pendingFile{path: path, abs: abs, content: content}
-		if root := moduleRoot(fsys, abs); root != "" {
-			groups[root] = append(groups[root], f)
-		} else {
-			loose = append(loose, f)
+		root := ""
+		if onDisk {
+			root = moduleRoot(fsys, abs)
 		}
+		if root == "" {
+			loose = append(loose, f)
+			continue
+		}
+		dir := filepath.Dir(abs)
+		work, seen := workspaces[dir]
+		if !seen {
+			work = diff.WorkspaceFile(dir)
+			workspaces[dir] = work
+		}
+		key := root + "\x00" + work
+		groups[key] = append(groups[key], f)
 	}
 
-	roots := make([]string, 0, len(groups))
-	for r := range groups {
-		roots = append(roots, r)
+	keys := make([]string, 0, len(groups))
+	for k := range groups {
+		keys = append(keys, k)
 	}
-	sort.Strings(roots)
-	for _, root := range roots {
-		for path, res := range fingerprintGroup(root, groups[root]) {
+	sort.Strings(keys)
+	for _, k := range keys {
+		for path, res := range fingerprintGroup(groups[k]) {
 			out[path] = res
 		}
 	}
@@ -182,16 +206,16 @@ func moduleRoot(fsys FileSystem, abs string) string {
 	}
 }
 
-// fingerprintGroup loads the files under one module root together and
-// fingerprints their packages, falling back to fingerprintOne for each file
-// the group cannot cover.
-func fingerprintGroup(root string, files []pendingFile) map[string]fileResult {
+// fingerprintGroup loads a group's files together, from the directory of
+// the first, and fingerprints their packages, falling back to
+// fingerprintOne for each file the group cannot cover.
+func fingerprintGroup(files []pendingFile) map[string]fileResult {
 	out := make(map[string]fileResult)
 	overlay := make(map[string][]byte, len(files))
 	for _, f := range files {
 		overlay[f.abs] = f.content
 	}
-	pkgs, err := loadFiles(root, overlay)
+	pkgs, err := loadFiles(filepath.Dir(files[0].abs), overlay)
 	// SSA skips an ill-typed package (one with errors, or with an ill-typed
 	// dependency), and a single-file diff of its files fails. Build only the
 	// well-typed packages here; the files of the others take the single-file
@@ -260,20 +284,34 @@ func packagesOf(pkgs []*packages.Package, abs string) map[*types.Package]bool {
 }
 
 // inFileOf is inFile for results drawn from several packages: it keeps the
-// functions declared in the file at path, and the functions without a
-// source file (the synthesized package initializer) of the file's own
-// packages only.
+// functions of the file's own packages declared in the file at path, and
+// those without a source file (the synthesized package initializer), as
+// Diff, which loads only those packages, does. A function of another
+// package can claim the file with a //line directive.
 func inFileOf(results []diff.FingerprintResult, path string, own map[*types.Package]bool, paths pathResolver) []diff.FingerprintResult {
 	kept := inFile(results, path, paths)
 	out := kept[:0:0]
 	for _, r := range kept {
-		if r.Filename == "" {
-			fn := r.GetSSAFunction()
-			if fn == nil || fn.Pkg == nil || !own[fn.Pkg.Pkg] {
-				continue
-			}
+		if own[declaringPackage(r.GetSSAFunction())] {
+			out = append(out, r)
 		}
-		out = append(out, r)
 	}
 	return out
+}
+
+// declaringPackage is the package that declares fn: its own, or for a
+// generic instance or a closure without one, its origin's or enclosing
+// function's.
+func declaringPackage(fn *ssa.Function) *types.Package {
+	for fn != nil {
+		if fn.Pkg != nil {
+			return fn.Pkg.Pkg
+		}
+		if o := fn.Origin(); o != nil {
+			fn = o
+		} else {
+			fn = fn.Parent()
+		}
+	}
+	return nil
 }

@@ -367,6 +367,9 @@ func Open(p string) (*os.File, error) { f, err := os.Open(p); if os.IsPermission
 import ("errors";"io/fs";"os")
 func Open(p string) (*os.File, error) { f, err := os.Open(p); if errors.Is(err, fs.ErrPermission) { return nil, nil }; return f, err }
 `},
+		{name: "a non-ASCII check exported", fn: "Handle", label: "RemovedCheck",
+			oldSrc: "package p\nimport \"errors\"\nfunc überprüfeAuth(tok string) bool { return len(tok) == 32 }\nfunc Handle(tok string) error { if !überprüfeAuth(tok) { return errors.New(\"denied\") }; return nil }\n",
+			newSrc: "package p\nimport \"errors\"\nfunc ÜberprüfeAuth(tok string) bool { return len(tok) == 32 }\nfunc Handle(tok string) error { if !ÜberprüfeAuth(tok) { return errors.New(\"denied\") }; return nil }\n"},
 		{name: "hmac.Equal replaced by subtle.ConstantTimeCompare", fn: "Handle", label: "RemovedCheck",
 			oldSrc: checkedMAC,
 			newSrc: `package p

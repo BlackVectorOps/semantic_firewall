@@ -145,6 +145,15 @@ func TestAssessTopologyDelta_DeletionSignals(t *testing.T) {
 			checks("x.com/a/v3.Verify", "x.com/b/v3.Verify", "x.com/c/v3.Verify", "x.com/d/v3.Verify"),
 			[]string{"ReplacedCheck(x.com/a/v2.Verify->x.com/a/v3.Verify,x.com/b/v2.Verify->x.com/b/v3.Verify," +
 				"x.com/c/v2.Verify->x.com/c/v3.Verify,x.com/d/v2.Verify->x.com/d/v3.Verify)"}, 0},
+		{"an exported rename of a non-ASCII name", checks("example.com/p.überprüfeAuth"), checks("example.com/p.ÜberprüfeAuth"), nil, 0},
+		{"first letters that share a UTF-8 byte", checks("example.com/p.ÄAuthorize"), checks("example.com/p.ĄAuthorize"),
+			[]string{"RemovedCheck(example.com/p.ÄAuthorize)"}, models.RiskScoreHigh},
+		{"a generic interface's check moved to another package", checks("(example.com/authz.Checker[example.com/model.User]).Allow"),
+			checks("(example.com/noop.Checker[example.com/model.User]).Allow"),
+			[]string{"RemovedCheck((example.com/authz.Checker[example.com/model.User]).Allow)"}, models.RiskScoreHigh},
+		{"a generic interface's check in a new major version", checks("(x.com/authz/v2.Checker[x.com/model.User]).Allow"),
+			checks("(x.com/authz/v3.Checker[x.com/model.User]).Allow"),
+			[]string{"ReplacedCheck((x.com/authz/v2.Checker[x.com/model.User]).Allow->(x.com/authz/v3.Checker[x.com/model.User]).Allow)"}, 0},
 		{"a kept check replaces nothing", checks("x.com/a/v2.Verify", "x.com/a/v3.Verify"), checks("x.com/a/v3.Verify"),
 			[]string{"RemovedCheck(x.com/a/v2.Verify)"}, models.RiskScoreHigh},
 		{"error exits removed are labelled, not charged", &topology.FunctionTopology{ErrorExits: 3}, &topology.FunctionTopology{ErrorExits: 1},
@@ -358,6 +367,8 @@ func TestPackageBase(t *testing.T) {
 	for key, want := range map[string][3]string{
 		"crypto/hmac.Equal": {"crypto/hmac", "", "Equal"}, "(crypto/x509.Certificate).Verify": {"crypto/x509", "Certificate", "Verify"},
 		"(.error).Error": {"", "error", "Error"}, "Name": {"", "", "Name"},
+		"(example.com/authz.Checker[example.com/model.User]).Allow": {"example.com/authz", "Checker[example.com/model.User]", "Allow"},
+		"example.com/p.Check[example.com/q.T]":                      {"example.com/p", "", "Check[example.com/q.T]"},
 	} {
 		if pkg, recv, name := splitCheckKey(key); [3]string{pkg, recv, name} != want {
 			t.Errorf("splitCheckKey(%q) = %q, %q, %q; want %q", key, pkg, recv, name, want)

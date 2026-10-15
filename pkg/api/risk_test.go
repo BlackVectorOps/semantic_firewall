@@ -566,3 +566,38 @@ func Build(target string) error {
 		}
 	})
 }
+
+// A check made through an instantiated generic interface keeps its key's
+// type arguments apart from the interface's package: swapping the
+// interface for one of another package is a RemovedCheck, as it is for a
+// plain interface.
+func TestDiffRisk_GenericInterfaceCheck(t *testing.T) {
+	root := t.TempDir()
+	handle := func(pkg, typ string) string {
+		return "package h\n\nimport (\n\t\"errors\"\n\n\t\"example.com/m/" + pkg + "\"\n\t\"example.com/m/model\"\n)\n\n" +
+			"func Handle(c " + pkg + "." + typ + ", u model.User) error {\n\tif !c.Allow(u) {\n\t\treturn errors.New(\"denied\")\n\t}\n\treturn nil\n}\n"
+	}
+	ifaces := "import \"example.com/m/model\"\n\ntype Checker[T any] interface{ Allow(T) bool }\n\ntype Plain interface{ Allow(model.User) bool }\n"
+	writeFilesIn(t, root, map[string]string{
+		"go.mod":           "module example.com/m\n\ngo 1.22\n",
+		"model/model.go":   "package model\n\ntype User struct{ Name string }\n",
+		"authz/authz.go":   "package authz\n\n" + ifaces,
+		"noop/noop.go":     "package noop\n\n" + ifaces,
+		"generic/old/h.go": handle("authz", "Checker[model.User]"),
+		"generic/new/h.go": handle("noop", "Checker[model.User]"),
+		"plain/old/h.go":   handle("authz", "Plain"),
+		"plain/new/h.go":   handle("noop", "Plain"),
+	})
+	for kind, label := range map[string]string{
+		"plain":   "RemovedCheck((example.com/m/authz.Plain).Allow)",
+		"generic": "RemovedCheck((example.com/m/authz.Checker[example.com/m/model.User]).Allow)",
+	} {
+		out, err := api.Diff(filepath.Join(root, kind, "old", "h.go"), filepath.Join(root, kind, "new", "h.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f := findFunc(t, out, "Handle"); !strings.Contains(f.TopologyDelta, label) || f.RiskScore < models.RiskScoreHigh {
+			t.Errorf("%s: delta %q, score %d; want %s, high risk", kind, f.TopologyDelta, f.RiskScore, label)
+		}
+	}
+}

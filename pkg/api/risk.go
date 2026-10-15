@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/topology"
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/models"
@@ -409,16 +411,26 @@ var equivalentPrimitive = map[string]string{
 	"crypto/subtle.ConstantTimeCompare": "crypto/hmac.Equal",
 }
 
-// splitCheckKey splits a Checks key, "pkg.Name" or "(pkg.Recv).Name".
+// splitCheckKey splits a Checks key, "pkg.Name" or "(pkg.Recv).Name". An
+// interface's type arguments stay with its name: "(pkg.Recv[other.T]).Name"
+// has receiver "Recv[other.T]".
 func splitCheckKey(key string) (pkg, recv, name string) {
 	if rest, ok := strings.CutPrefix(key, "("); ok {
 		if typ, method, found := strings.Cut(rest, ")."); found {
-			i := strings.LastIndexByte(typ, '.')
-			return typ[:max(i, 0)], typ[i+1:], method
+			pkg, recv := splitQualified(typ)
+			return pkg, recv, method
 		}
 	}
-	i := strings.LastIndexByte(key, '.')
-	return key[:max(i, 0)], "", key[i+1:]
+	pkg, name = splitQualified(key)
+	return pkg, "", name
+}
+
+// splitQualified splits "pkg.Name" at the last dot before any type
+// arguments.
+func splitQualified(s string) (pkg, name string) {
+	head, _, _ := strings.Cut(s, "[")
+	i := strings.LastIndexByte(head, '.')
+	return s[:max(i, 0)], s[i+1:]
 }
 
 // packageBase is the last element of an import path without a major
@@ -442,7 +454,8 @@ func lowerFirst(s string) string {
 	if s == "" {
 		return s
 	}
-	return strings.ToLower(s[:1]) + s[1:]
+	r, n := utf8.DecodeRuneInString(s)
+	return string(unicode.ToLower(r)) + s[n:]
 }
 
 // guardedClasses returns the capability classes all of whose targets in t

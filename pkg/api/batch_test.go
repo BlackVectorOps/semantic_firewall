@@ -147,3 +147,115 @@ func TestDiffBatch_EqualsSingleDiffs(t *testing.T) {
 		t.Errorf("loose file: main = %+v; want modified", f)
 	}
 }
+
+// sameAsSingles reports every batch entry that is not its pair's single
+// result.
+func sameAsSingles(t *testing.T, pairs []api.DiffPair, got []*models.DiffOutput, single func(api.DiffPair) *models.DiffOutput) {
+	t.Helper()
+	for i, p := range pairs {
+		want, _ := json.Marshal(single(p))
+		have, _ := json.Marshal(got[i])
+		if string(want) != string(have) {
+			t.Errorf("pair %d (%s):\n batch  %s\n single %s", i, filepath.Base(p.New), have, want)
+		}
+	}
+}
+
+// A function of another package that claims the diffed file with a //line
+// directive is no function of the file: Diff loads only the file's own
+// package, and a batch that loads both must not let the decoy stand in for
+// the changed function.
+func TestDiffBatch_LineDirectiveFromAnotherPackage(t *testing.T) {
+	root := t.TempDir()
+	writeFilesIn(t, root, map[string]string{
+		"old/go.mod":   "module example.com/m\n\ngo 1.22\n",
+		"old/p/a.go":   "package p\n\nfunc Handle(s string) int { return len(s) }\n",
+		"old/zz/zz.go": "package zz\n\nfunc Z() int { return 1 }\n",
+		"new/go.mod":   "module example.com/m\n\ngo 1.22\n",
+		"new/p/a.go":   "package p\n\nimport \"os/exec\"\n\nfunc Handle(s string) int {\n\texec.Command(s).Run()\n\treturn len(s)\n}\n",
+		"new/zz/zz.go": "package zz\n\nfunc Z() int { return 1 }\n\n//line ../p/a.go:3\nfunc Handle(s string) int { return len(s) }\n",
+	})
+	o := func(n string) string { return filepath.Join(root, "old", n) }
+	n := func(n string) string { return filepath.Join(root, "new", n) }
+	pairs := []api.DiffPair{{Old: o("p/a.go"), New: n("p/a.go")}, {Old: o("zz/zz.go"), New: n("zz/zz.go")}}
+	got := api.DiffBatch(pairs)
+	sameAsSingles(t, pairs, got, singleDiff)
+	if got[0].Summary.HighRiskChanges != 1 {
+		t.Errorf("p/a.go: %+v; want Handle's exec as one high-risk change", got[0].Summary)
+	}
+}
+
+// A batch loads each file with the workspace Diff loads it with, also when
+// a .git entry between the file and its module root (a submodule) ends the
+// workspace search for that file alone. Here Diff, without the workspace,
+// cannot resolve example.com/lib, and the batch must fail the same way.
+func TestDiffBatch_WorkspacePerFile(t *testing.T) {
+	root := t.TempDir()
+	writeFilesIn(t, root, map[string]string{
+		".git/HEAD":    "ref: refs/heads/main\n",
+		"go.work":      "go 1.22\n\nuse (\n\t./m\n\t./lib\n)\n",
+		"lib/go.mod":   "module example.com/lib\n\ngo 1.22\n",
+		"lib/lib.go":   "package lib\n\nfunc F() int { return 1 }\n",
+		"m/go.mod":     "module example.com/m\n\ngo 1.22\n",
+		"m/a.go":       "package m\n\nimport \"example.com/lib\"\n\nfunc A() int { return lib.F() }\n",
+		"m/third/.git": "gitdir: ../../.git/modules/third\n",
+		"m/third/x.go": "package third\n\nimport \"example.com/lib\"\n\nfunc X() int { return lib.F() }\n",
+	})
+	pairs := []api.DiffPair{{New: filepath.Join(root, "m", "a.go")}, {New: filepath.Join(root, "m", "third", "x.go")}}
+	got := api.DiffBatch(pairs)
+	sameAsSingles(t, pairs, got, singleDiff)
+	if got[0].ErrorMessage != "" || got[1].ErrorMessage == "" {
+		t.Errorf("errors %q, %q; want a.go to load with the workspace and x.go to fail without it", got[0].ErrorMessage, got[1].ErrorMessage)
+	}
+}
+
+// overlayFS is the disk with some files' contents replaced, as an editor
+// serving unsaved buffers would be.
+type overlayFS struct {
+	api.RealFileSystem
+	files map[string][]byte
+}
+
+type sizedInfo struct {
+	os.FileInfo
+	size int64
+}
+
+func (i sizedInfo) Size() int64 { return i.size }
+
+func (f overlayFS) Stat(name string) (os.FileInfo, error) {
+	info, err := os.Stat(name)
+	if src, ok := f.files[name]; ok && err == nil {
+		return sizedInfo{info, int64(len(src))}, nil
+	}
+	return info, err
+}
+
+func (f overlayFS) ReadFile(name string) ([]byte, error) {
+	if src, ok := f.files[name]; ok {
+		return src, nil
+	}
+	return f.RealFileSystem.ReadFile(name)
+}
+
+// Against a FileSystem other than the disk, each entry is what DiffWithFS
+// returns for its pair, which reads the file's package siblings from disk:
+// another pair's file served by the FileSystem changes nothing.
+func TestDiffBatchWithFS_EqualsDiffWithFS(t *testing.T) {
+	root := t.TempDir()
+	writeFilesIn(t, root, map[string]string{
+		"go.mod": "module example.com/m\n\ngo 1.22\n",
+		"p/a.go": "package p\n\nimport \"os\"\n\nfunc Clean(dir string) {\n\tif Debug {\n\t\treturn\n\t}\n\tos.RemoveAll(dir)\n}\n",
+		"p/b.go": "package p\n\nconst Debug = false\n",
+	})
+	a, b := filepath.Join(root, "p", "a.go"), filepath.Join(root, "p", "b.go")
+	fsys := overlayFS{files: map[string][]byte{b: []byte("package p\n\nconst Debug = true\n")}}
+	pairs := []api.DiffPair{{New: a}, {New: b}}
+	sameAsSingles(t, pairs, api.DiffBatchWithFS(fsys, pairs), func(p api.DiffPair) *models.DiffOutput {
+		out, err := api.DiffWithFS(fsys, p.Old, p.New)
+		if err != nil {
+			return &models.DiffOutput{OldFile: p.Old, NewFile: p.New, Functions: []models.FunctionDiff{}, ErrorMessage: err.Error()}
+		}
+		return out
+	})
+}
