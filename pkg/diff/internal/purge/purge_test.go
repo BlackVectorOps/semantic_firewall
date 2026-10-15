@@ -122,6 +122,13 @@ func TestPurgeFuncBodiesCases(t *testing.T) {
 			in:   "package p\nfunc F() { x := [...]struct{ A int; B int }{{}}; _ = x }\nvar Y = T{2}\n",
 			want: "package p\nfunc F() {}\nvar Y = T{}\n",
 		},
+		// A "[...]" without a literal (invalid) ends with its statement
+		// and leaves the next literal purged.
+		{
+			name: "auto-sized array type without a literal",
+			in:   "package p\nvar X [...]int\nvar Y = T{2}\n",
+			want: "package p\nvar X [...]int\nvar Y = T{}\n",
+		},
 		// An unbalanced "}" is ignored rather than crashing the scanner.
 		{
 			name: "stray closing brace",
