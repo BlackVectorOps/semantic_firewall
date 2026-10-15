@@ -4,15 +4,20 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/models"
 )
 
-// absFailFS is the disk, except that Abs fails.
+// absFailFS is the disk, except that Abs fails, returning an absolute path
+// that is not the file's: the value of a failed Abs is not used.
 type absFailFS struct{ api.RealFileSystem }
 
-func (absFailFS) Abs(string) (string, error) { return "", errors.New("abs unavailable") }
+func (absFailFS) Abs(string) (string, error) {
+	return "/abs/unavailable.go", errors.New("abs unavailable")
+}
 
 // identityAbsFS is the disk, except that Abs returns the path unchanged (as
 // internal/cli's MockFileSystem does).
@@ -22,10 +27,8 @@ func (identityAbsFS) Abs(p string) (string, error) { return p, nil }
 
 // DiffWithFS filters the loaded functions by the file's absolute path, as
 // the loader reports it. A FileSystem whose Abs fails or returns a relative
-// path must not make that filter drop every function.
-//
-// the file's functions are diffed (Handle is reported as
-// added, high-risk), or DiffWithFS returns an error.
+// path falls back to filepath.Abs, so the filter still finds the file's
+// functions: Handle is added, high-risk.
 func TestDiffWithFS_RelativeAbs(t *testing.T) {
 	root := t.TempDir()
 	writeFilesIn(t, root, map[string]string{
@@ -48,14 +51,14 @@ func TestDiffWithFS_RelativeAbs(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			out, err := api.DiffWithFS(fsys, "", rel)
 			if err != nil {
-				return // failing closed is acceptable
+				t.Fatal(err)
 			}
 			var names []string
 			for _, f := range out.Functions {
 				names = append(names, f.Function+":"+f.Status)
 			}
-			if out.Summary.HighRiskChanges == 0 {
-				t.Errorf("functions %v, %d high-risk changes; want Handle added as a high-risk change (or an error)", names, out.Summary.HighRiskChanges)
+			if !slices.Contains(names, "Handle:"+models.StatusAdded) || out.Summary.HighRiskChanges != 1 {
+				t.Errorf("functions %v, %d high-risk changes; want Handle added as the one high-risk change", names, out.Summary.HighRiskChanges)
 			}
 		})
 	}

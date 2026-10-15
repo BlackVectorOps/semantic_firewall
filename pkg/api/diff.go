@@ -223,27 +223,14 @@ func CompareFunctions(funcName string, oldResult, newResult diff.FingerprintResu
 		return d
 	}
 
-	if oldFn == nil || newFn == nil {
-		d.Status = models.StatusModified
-		return d
-	}
-
-	zipper, err := diff.NewZipper(oldFn, newFn, ir.KeepAllLiteralsPolicy)
-	if err != nil {
-		d.Status = models.StatusModified
-		return d
-	}
-
-	artifacts, err := zipper.ComputeDiff()
-	if err != nil {
-		d.Status = models.StatusModified
-		return d
-	}
-
-	d.MatchedNodes = artifacts.MatchedNodes
-	d.AddedOps = artifacts.Added
-	d.RemovedOps = artifacts.Removed
+	// The Zipper's evidence needs both SSA functions (NewZipper refuses a
+	// nil one, as results built outside a load have).
 	d.Status = models.StatusModified
+	if zipper, err := diff.NewZipper(oldFn, newFn, ir.KeepAllLiteralsPolicy); err == nil {
+		if artifacts, err := zipper.ComputeDiff(); err == nil {
+			d.MatchedNodes, d.AddedOps, d.RemovedOps = artifacts.MatchedNodes, artifacts.Added, artifacts.Removed
+		}
+	}
 	return d
 }
 
