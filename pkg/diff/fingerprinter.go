@@ -141,7 +141,11 @@ func GenerateFingerprint(fn *ssa.Function, policy ir.LiteralPolicy, strictMode b
 	line := 0
 	filename := ""
 	if fn.Prog != nil && fn.Prog.Fset != nil {
-		p := fn.Prog.Fset.Position(fn.Pos())
+		// The file the function is written in, not the one a //line
+		// directive names: a diff keeps the functions of the file it diffs,
+		// and "//line other.go:1" above a changed function would otherwise
+		// drop it from that file's diff (reported removed, risk 0).
+		p := fn.Prog.Fset.PositionFor(fn.Pos(), false)
 		line = p.Line
 		filename = p.Filename
 	}
