@@ -331,6 +331,21 @@ GOCACHE, narrow -run first; replaces the partial state above):
   tests live outside the narrow -run).
 Pair 6 closes once the api retest is read and the two diff survivors
 are answered.
+Closed (session 4, later): the api full-suite retest killed 4 of 12
+(diff.go:281/284 among them); the 8 left are the accepted classes above.
+The diff-file pass with ./pkg/api in -tests and the api diff tests in -run
+(215 mutants, 119 killed, 8 timed out, 60 not compiling, 28 survived; line
+numbers of e00d56c): killed since by buildconfig_internal_test.go, each
+proven by hand against its mutant: fingerprinter.go:375/377/378 (custom
+tags not supplied: the file fell to the ad-hoc load, without its
+siblings), :547 (platform-tag map entries), :270 (VendorDir read the
+working directory's go.mod). Accepted: :218, :300 (filepath.Abs errors);
+:273, :277 (no module / unreadable go.mod: same "" either way); :318
+(`i > 0`: a line starting with // never has two fields "go" and a
+version); :391, :400, :464-465 (go list driver failures); :455-456 (no
+caller passes an empty map; go list on no patterns fails the same);
+:462 (pattern order does not change go list's answer).
+Pair 6 closed.
 Pair 7 (session 4, hunted by the session itself, no sub-agent): three
 bugs, each reproduced against both loaders and the go command, fixed with
 tests that fail on the old code (TestDiff_FilesOutsideTheHostBuild's new
