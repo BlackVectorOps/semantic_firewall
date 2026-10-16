@@ -3,14 +3,16 @@
 Written at the end of a long session for the next agent. Read all of it
 before touching anything. **Delete `.claude/handoff/` before PR #39 merges.**
 
-## Where things stand (session 3, head `40dbfdc`)
+## Where things stand (session 3, head `c4f655f`)
 
 - Repo `BlackVectorOps/semantic_firewall`, Go module `.../v5`, Go 1.26.3.
 - Work branch `ccr-33d08e80-zi15zu`, draft **PR #39** (title still says WIP).
   Session 2 worked on `ccr-2e562674-eku5cl` first, opened PR #40, then the
   user said to move to #39: #39's branch was fast-forwarded and #40 closed.
   If your session is assigned another branch, ask before pushing to #39's.
-- CI green on every commit through `49f8c2b`. Working tree clean.
+- CI green on every commit through `c4f655f`; PR mergeable, no reviews.
+  Working tree clean. Pair 6 is mid-mutation (see "Pair 6" below):
+  resume there.
 - Session 3 (this one): noise evaluation, loader speed (own design, the
   user's request), persistent type cache, import pruning, `go.work`
   honored, pairs 4 and 5. Details in "Loader speed work", "Workspaces",
@@ -51,9 +53,9 @@ answer was: not until these four pairs are done):
 2. Done in session 3: pair 5 `diff/loader.go`+`purge.go` (`f2fb53c`,
    `49f8c2b`, `40dbfdc`; see "Pair 5" below). Open for the user: whether
    to code the constant-len divergence (documented, not fixed).
-3. Pair 6 `api/diff.go`+`cli/diff_logic.go` (DiffWithFS repeats
-   readDiffInput's rules: pinned by TestDiffBatch_InputRules's equality;
-   inFile/pathResolver already closed); then pair 7
+3. Pair 6 `api/diff.go`+`cli/diff_logic.go`: fixes and tests pushed,
+   mutation retest unfinished (see "Pair 6" below; finish it first). Then
+   pair 7
    `diff/fingerprinter.go`+`diff/package_functions.go` (fingerprinter's
    session-3 code FingerprintPackagesWhere, functionPosition,
    WorkspaceFile/HardenedEnvFor is closed) and pair 8
@@ -269,6 +271,39 @@ re-checked with imports pruning dropped: put to the user. Mutation:
 purge.go's only survivor is `top < 0` -> `<= 0` (no token at 0); the
 changed loader lines all killed. Corpus parity: chi, gin, echo, casbin,
 cobra, pocketbase identical (4,753 functions).
+Pair 6 (session 3, IN PROGRESS): fixes pushed with failing-on-old tests
+(`c9b3c72`, `6043283`, `d7a32ff`, `a2e02a0`, `d949d5b`, `c4f655f`; commit
+messages list each): sfw diff "" path is the absent side; functions belong
+to the file they are written in (//line ignored, PositionFor(.., false));
+declared inits pair by content with their closures (contentGroup);
+DiffWithFS uses readDiffInput (Abs fallback); sandbox mounts only existing
+inputs, mounts a rootless or linked-out batch input itself, mounts the
+go.mod dir; empty diff prints "functions": []; CompareFunctions has one
+no-SSA path (NewZipper's error); TestDiff_Summary asserts the whole
+summary; fake runsc tests (diff_sandbox_test.go) cover the sandbox branch.
+Mutation state when the user stopped the run (re-run with an isolated
+GOCACHE, delete it after; -retest only matches unchanged lines):
+- diff.go retest (lines < 226, full ./pkg/api suite): 53 mutants, 33
+  killed, 20 survived, NOT yet classified: 33 (strictMode), 77 x2, 82 x3,
+  83, 85, 114, 118, 135, 136, 141, 160, 161, 165, 176 x2, 179 x2. Judged
+  so far: 77/114/118/135/136/160/161 are nil-topology/nil-SSA guards
+  (a load never fingerprints a function without blocks: probed);
+  82-83 is an unreachable safety net (probed: a same-named callee from
+  another package changes the fingerprint, scores 20). 141 (added risk
+  exactly 10?), 165, 176, 179 (percent guards: an empty diff with
+  total 0 would give NaN under `>=`) need a look or a test.
+- Not run yet: diff.go fresh pass over CompareFunctions (`-base a2e02a0`,
+  9 mutants); batch.go retest (`-base 6ff3b15 -retest mut6-batch.txt`;
+  189-191 now covered by diff_absfs_test/diff_resolve_test, proven by
+  hand; 190/191 kill only via the message, the loader also fails closed);
+  diff_logic.go retest (27 old survivors, likely killed by d7a32ff);
+  sandbox_adapter.go fresh pass (`-base 6ff3b15`, file changed after the
+  first run); topology_match/fingerprinter retest (6, likely killed by
+  TestContentGroup).
+  Full ./pkg/api suite is ~70 s per mutant: the whole retest is 2-3 h.
+Then: record accepted equivalents here, update PR body (Testing list,
+Remaining), mark pair 6 closed.
+
 Next levers, measured: `diffResults` runs pairs serially (0.37 s of the
 batch); GC is ~25% of CPU (GOGC=200 gives 5-15%); `BuildSSAFromPackages`
 builds root packages one at a time; API-closure import pruning would skip
