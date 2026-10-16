@@ -413,9 +413,21 @@ then ERROR; a sentinel hit is *injectionError -> LIE in CallLLM. The audit
 reads the files outside the sandbox (text only; the diff still runs
 inside). Tests: source_test, tools_test, claude_test (loop, injection,
 round cap, no-context), cli/audit_test (payload and tools). README's sfw
-audit section documents it. Not done: a mutation pass over internal/llm
-(the package's tests are fast: `-pkgs ./internal/llm -tests ./internal/llm`),
-and options 2-8 of the brainstorm.
+audit section documents it. Mutation (`-pkgs ./internal/llm,./internal/cli`,
+files audit.go, client.go, claude.go, source.go, tools.go): the first run
+(520 mutants, 131 survived) got tests in 8c27286; the rerun (515 mutants,
+42 survived) leaves only accepted classes: audit.go:144-150
+(readSourceText's open/read error paths and defer Close: the file was
+just read by the diff); tools.go:36, :91, :147, :170, :190 (inline and
+radius boundaries one line apart, an already-bounded result), :295-301
+(the output cap's loop exits that only save work); claude.go:238 (an
+empty retrieved text skips a sentinel call that would pass it anyway);
+source.go:48-49 (a nil parse: ParseFile always returns a file for a
+readable source), :116-132 (callee unwrapping cases no test file writes
+differently from their fallthrough), :155, :178-180, :203-206 (sort and
+clamp boundaries that coincide on every reachable input), :226-245
+(Lookup's not-found returns and suffix checks that a later match makes
+the same). Not done: options 2-8 of the brainstorm.
 
 Next levers, measured: `diffResults` runs pairs serially (0.37 s of the
 batch); GC is ~25% of CPU (GOGC=200 gives 5-15%); `BuildSSAFromPackages`
