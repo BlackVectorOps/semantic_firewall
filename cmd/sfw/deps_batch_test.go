@@ -37,6 +37,7 @@ func TestWorkerDepsAndBatchArgs(t *testing.T) {
 		{[]string{"deps-diff"}, "deps-diff worker requires two directories; got 0 arguments"},
 		{[]string{"deps-diff", "a"}, "deps-diff worker requires two directories; got 1 arguments"},
 		{[]string{"deps-diff", "a", "b", "c"}, "deps-diff worker requires two directories; got 3 arguments"},
+		{[]string{"deps-diff", "", "b"}, `deps diff needs two module directories; got old "" and new "b"`},
 		{[]string{"diff-batch"}, "diff-batch worker requires a pairs file; got 0 arguments"},
 		{[]string{"diff-batch", "a", "b"}, "diff-batch worker requires a pairs file; got 2 arguments"},
 	} {

@@ -338,3 +338,24 @@ func TestDiffBatchWithFS_EmptyPathIsAbsent(t *testing.T) {
 		t.Errorf("error %q, %d functions; want F added", got[0].ErrorMessage, len(got[0].Functions))
 	}
 }
+
+// A batch of one pair loads with one file= query, which go list answers
+// for a file that is the only Go file of its directory and outside the host
+// build with an ad-hoc package of the file under the host's GOOS and GOARCH. Diff loads the file under its
+// own configuration; the batch must give Diff's result, so such a package
+// is not used (the host's sizes would change Size's fingerprint).
+func TestDiffBatch_OnePairOutsideTheHostBuild(t *testing.T) {
+	oldDir, newDir := writeModule(t, nil,
+		map[string]string{"s/size_386.go": "package s\n\nimport \"unsafe\"\n\nfunc Size() int { return int(unsafe.Sizeof(uintptr(0))) }\n"},
+		map[string]string{"s/size_386.go": "package s\n\nimport \"unsafe\"\n\nfunc Size() int { return int(unsafe.Sizeof(uintptr(0))) + 1 }\n"})
+	pair := api.DiffPair{Old: filepath.Join(oldDir, "s", "size_386.go"), New: filepath.Join(newDir, "s", "size_386.go")}
+	got := api.DiffBatch([]api.DiffPair{pair})
+	want, _ := json.Marshal(singleDiff(pair))
+	have, _ := json.Marshal(got[0])
+	if string(want) != string(have) {
+		t.Errorf("batch  %s\nsingle %s", have, want)
+	}
+	if f := findFunc(t, got[0], "Size"); f.Status != models.StatusModified {
+		t.Errorf("Size: %+v; want modified", f)
+	}
+}

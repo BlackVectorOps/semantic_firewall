@@ -41,9 +41,7 @@ type IVType int
 const (
 	IVTypeUnknown IVType = iota
 	IVTypeBasic
-	IVTypeDerived
 	IVTypeGeometric
-	IVTypePolynomial
 )
 
 func DetectLoops(fn *ssa.Function) *LoopInfo {

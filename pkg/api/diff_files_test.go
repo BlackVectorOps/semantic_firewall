@@ -51,6 +51,23 @@ func TestDiff_FilesOutsideTheHostBuild(t *testing.T) {
 		{"test file", "a_test.go", "TestX",
 			"package p\n\nimport \"testing\"\n\nfunc TestX(t *testing.T) {}\n",
 			"package p\n\nimport (\n\t\"os/exec\"\n\t\"testing\"\n)\n\nfunc TestX(t *testing.T) { exec.Command(\"x\").Run() }\n"},
+		// For a file that is the only Go file of its directory, go list has
+		// no package to leave it out of: it builds an ad-hoc package of the
+		// file under the host's GOOS and GOARCH, where its platform's API is
+		// undefined and its sizes are the host's. It must be loaded under its
+		// own configuration, as a file with siblings is.
+		{"GOOS suffix alone in its directory", "w/dll_windows.go", "Load",
+			"package w\n\nimport \"syscall\"\n\nfunc Load(n string) *syscall.LazyDLL { return syscall.NewLazyDLL(n) }\n",
+			"package w\n\nimport (\n\t\"os/exec\"\n\t\"syscall\"\n)\n\nfunc Load(n string) *syscall.LazyDLL { exec.Command(n).Run(); return syscall.NewLazyDLL(n) }\n"},
+		{"GOARCH suffix alone in its directory", "s/size_386.go", "Size",
+			"package s\n\nimport \"unsafe\"\n\nvar _ [4 - unsafe.Sizeof(int(0))]byte\n\nfunc Size() int { return int(unsafe.Sizeof(uintptr(0))) }\n",
+			"package s\n\nimport (\n\t\"os/exec\"\n\t\"unsafe\"\n)\n\nvar _ [4 - unsafe.Sizeof(int(0))]byte\n\nfunc Size() int { exec.Command(\"x\").Run(); return int(unsafe.Sizeof(uintptr(0))) }\n"},
+		// A //go:build ignore script beside the package's files is in no
+		// configuration's package (the ignore tag cannot be supplied: the
+		// standard library's generators carry it). It is loaded alone.
+		{"ignored script", "gen.go", "main",
+			"//go:build ignore\n\npackage main\n\nfunc main() { println(1) }\n",
+			"//go:build ignore\n\npackage main\n\nimport \"os/exec\"\n\nfunc main() { exec.Command(\"x\").Run() }\n"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -119,4 +136,25 @@ func TestDiff_DottedModulePathNames(t *testing.T) {
 	}
 	findFunc(t, out, "(*T).M")
 	findFunc(t, out, "F")
+}
+
+// A module with a vendor directory is diffed with its dependencies from it,
+// as the go command builds it, whatever the module cache holds: the vendored
+// module here is in no cache and has no go.sum entry.
+func TestDiff_VendoredModule(t *testing.T) {
+	shared := map[string]string{
+		"go.mod":                        "module example.com/m\n\ngo 1.22\n\nrequire example.com/dep v1.0.0\n",
+		"vendor/modules.txt":            "# example.com/dep v1.0.0\n## explicit; go 1.22\nexample.com/dep\n",
+		"vendor/example.com/dep/dep.go": "package dep\n\nfunc Run(s string) string { return s }\n",
+	}
+	oldDir, newDir := writeModule(t, shared,
+		map[string]string{"a.go": "package m\n\nimport \"example.com/dep\"\n\nfunc F(s string) string { return dep.Run(s) }\n"},
+		map[string]string{"a.go": "package m\n\nimport (\n\t\"os/exec\"\n\n\t\"example.com/dep\"\n)\n\nfunc F(s string) string { exec.Command(s).Run(); return dep.Run(s) }\n"})
+	out, err := api.Diff(filepath.Join(oldDir, "a.go"), filepath.Join(newDir, "a.go"))
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if f := findFunc(t, out, "F"); f.RiskScore < models.RiskScoreHigh {
+		t.Errorf("F: risk %d (%s); want >= %d", f.RiskScore, f.TopologyDelta, models.RiskScoreHigh)
+	}
 }

@@ -34,12 +34,6 @@ func CalculateEntropy(data []byte) float64 {
 	return entropy
 }
 
-// Returns entropy normalized to 0.0-1.0 range.
-// Useful for direct comparison and threshold checks.
-func CalculateEntropyNormalized(data []byte) float64 {
-	return CalculateEntropy(data) / 8.0
-}
-
 // Captures entropy characteristics for malware analysis.
 type EntropyProfile struct {
 	// Overall entropy of the function body
@@ -116,10 +110,4 @@ func CalculateEntropyProfile(bodyBytes []byte, stringLiterals []string) EntropyP
 // Used for fuzzy matching: two functions with similar entropy are more likely related.
 func EntropyDistance(e1, e2 float64) float64 {
 	return math.Abs(e1 - e2)
-}
-
-// Returns true if two entropy values are within the given tolerance.
-// Default tolerance of 0.5 is recommended for malware family matching.
-func EntropyMatch(e1, e2, tolerance float64) bool {
-	return EntropyDistance(e1, e2) <= tolerance
 }

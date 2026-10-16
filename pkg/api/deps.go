@@ -158,20 +158,13 @@ func loadDepsSide(dir string) (*depsSide, error) {
 	// compared like a module replaced by a local directory, so a `use` of
 	// a directory that takes a dependency's path shows as that dependency
 	// replaced.
-	env := diff.HardenedEnvFor(dir)
-	work := diff.WorkspaceFile(dir)
 	// The go command builds with a consistent vendor directory, the
 	// module's or, in a workspace, the workspace's (go work vendor),
-	// rather than the module cache; so does the analysis.
-	vendorRoot := dir
-	if work != "" {
-		vendorRoot = filepath.Dir(work)
-	}
-	_, statErr := os.Stat(filepath.Join(vendorRoot, "vendor", "modules.txt"))
-	vendored := statErr == nil
-	if vendored {
-		env = append(env, "GOFLAGS=-mod=vendor") // the last value of a variable wins
-	}
+	// rather than the module cache; so does the analysis (HardenedEnvFor
+	// sets -mod=vendor where diff.VendorDir finds one).
+	env := diff.HardenedEnvFor(dir)
+	work := diff.WorkspaceFile(dir)
+	vendorDir := diff.VendorDir(dir)
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports |
 			packages.NeedDeps | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo |
@@ -228,8 +221,8 @@ func loadDepsSide(dir string) (*depsSide, error) {
 			} else if p.Module.Main {
 				m.identity, m.localReplace = "use "+workspacePath(work, p.Module.Dir), true
 			}
-			if vendored {
-				m.vendored, m.dir = true, filepath.Join(vendorRoot, "vendor", filepath.FromSlash(p.Module.Path))
+			if vendorDir != "" {
+				m.vendored, m.dir = true, filepath.Join(vendorDir, filepath.FromSlash(p.Module.Path))
 			}
 			side.modules[p.Module.Path] = m
 		}

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -207,8 +208,10 @@ func TestLoadSource_TestsAndOverlayParity(t *testing.T) {
 }
 
 // Errors: a root with a type error and a syntax error, a dependency with an
-// error in its declarations or a syntax error, and a vendored module the
-// read-only module mode cannot resolve all fail identically.
+// error in its declarations or a syntax error, and a required module that
+// is neither in the module cache nor vendored all fail identically. The
+// same tree with the module vendored builds from its vendor directory (see
+// VendorDir) and loads identically.
 func TestLoadSource_ErrorParity(t *testing.T) {
 	root := t.TempDir()
 	writeFiles(t, root, map[string]string{
@@ -225,15 +228,29 @@ func TestLoadSource_ErrorParity(t *testing.T) {
 	mustContain(t, snap, "package example.com/m/typeerr illTyped=true", "package example.com/m/syntax illTyped=true",
 		"package example.com/m/usesbad illTyped=true", "package example.com/m/missing illTyped=true", "package example.com/m/usesparse illTyped=true")
 
-	vend := t.TempDir()
-	writeFiles(t, vend, map[string]string{
-		"go.mod":                          "module example.com/v\n\ngo 1.22\n\nrequire example.com/vend v1.0.0\n",
-		"vendor/modules.txt":              "# example.com/vend v1.0.0\n## explicit\nexample.com/vend\n",
-		"vendor/example.com/vend/vend.go": "package vend\n\nfunc V() int { return 1 }\n",
-		"a/a.go":                          "package a\n\nimport \"example.com/vend\"\n\nfunc A() int { return vend.V() }\n",
-	})
+	moduleTree := func(vendored bool) string {
+		vend := t.TempDir()
+		files := map[string]string{
+			"go.mod": "module example.com/v\n\ngo 1.22\n\nrequire example.com/vend v1.0.0\n",
+			"a/a.go": "package a\n\nimport \"example.com/vend\"\n\nfunc A() int { return vend.V() }\n",
+		}
+		if vendored {
+			files["vendor/modules.txt"] = "# example.com/vend v1.0.0\n## explicit\nexample.com/vend\n"
+			files["vendor/example.com/vend/vend.go"] = "package vend\n\nfunc V() int { return 1 }\n"
+		}
+		writeFiles(t, vend, files)
+		return vend
+	}
+	vend := moduleTree(false)
 	snap = assertLoadersAgree(t, func() *packages.Config { return sourceLoaderConfig(vend, nil) }, "./a")
 	mustContain(t, snap, "package example.com/v/a illTyped=true")
+
+	vend = moduleTree(true)
+	snap = assertLoadersAgree(t, func() *packages.Config { return sourceLoaderConfig(vend, nil) }, "./a")
+	mustContain(t, snap, "package example.com/v/a illTyped=false")
+	if !slices.ContainsFunc(snap, func(l string) bool { return strings.HasPrefix(l, "func example.com/v/a.A ") }) {
+		t.Errorf("snapshot lacks A:\n%s", strings.Join(snap, "\n"))
+	}
 }
 
 // A dependency's length-elided array whose element type spans lines keeps

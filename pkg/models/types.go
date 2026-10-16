@@ -83,7 +83,6 @@ type ScanOutput struct {
 	Alerts       []detection.ScanResult `json:"alerts"`
 	Summary      ScanSummary            `json:"summary"`
 	ScannedDeps  []string               `json:"scanned_dependencies,omitempty"`
-	Error        string                 `json:"error,omitempty"`
 }
 
 type ScanSummary struct {

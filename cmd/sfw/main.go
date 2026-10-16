@@ -118,7 +118,7 @@ Examples:
 
 	scanCmd := flag.NewFlagSet("scan", flag.ExitOnError)
 	scanDB := scanCmd.String("db", "", "Path to signatures database")
-	scanThreshold := scanCmd.Float64("threshold", 0.75, "Match confidence threshold")
+	scanThreshold := scanCmd.Float64("threshold", models.DefaultScanThreshold, "Match confidence threshold")
 	scanExact := scanCmd.Bool("exact", false, "Use exact topology matching only")
 	scanDeps := scanCmd.Bool("deps", false, "Scan imported dependencies")
 	scanDepsDepth := scanCmd.String("deps-depth", "direct", "Dependency depth: direct or transitive")
@@ -330,7 +330,7 @@ func runWorker(args []string) error {
 		fs := flag.NewFlagSet("scan", flag.ExitOnError)
 		db := fs.String("db", "", "")
 		target := fs.String("target", "", "")
-		threshold := fs.Float64("threshold", 0.75, "")
+		threshold := fs.Float64("threshold", models.DefaultScanThreshold, "")
 		exact := fs.Bool("exact", false, "")
 		deps := fs.Bool("deps", false, "")
 		depsDepth := fs.String("deps-depth", "direct", "")

@@ -68,21 +68,6 @@ func (m *mockDirEntry) IsDir() bool                { return false }
 func (m *mockDirEntry) Type() os.FileMode          { return 0644 }
 func (m *mockDirEntry) Info() (fs.FileInfo, error) { return &mockFileInfo{name: m.name}, nil }
 
-type MockScanner struct {
-	Hits []detection.ScanResult
-}
-
-func (m *MockScanner) ScanTopology(topo *topology.FunctionTopology, funcName string) ([]detection.ScanResult, error) {
-	return m.Hits, nil
-}
-func (m *MockScanner) ScanTopologyExact(topo *topology.FunctionTopology, funcName string) (*detection.ScanResult, error) {
-	if len(m.Hits) > 0 {
-		return &m.Hits[0], nil
-	}
-	return nil, nil
-}
-func (m *MockScanner) Close() error { return nil }
-
 // -- TESTS --
 
 // TestShortFunctionName verifies that the parser correctly simplifies complex Go SSA names,
@@ -513,5 +498,60 @@ func TestRunAudit_APIKeyOnlyNeededForHighRisk(t *testing.T) {
 	if code == 0 || out.Output.Verdict != models.VerdictError || !strings.Contains(out.Output.Evidence, "no API key") {
 		t.Errorf("high-risk diff without key: exit %d verdict %s (%s); want non-zero ERROR naming the missing key",
 			code, out.Output.Verdict, out.Output.Evidence)
+	}
+}
+
+// A scan of a module with a vendor directory loads its dependencies from
+// it, as the go command builds it: the vendored module here is in no cache
+// and has no go.sum entry.
+func TestLoadPackagesWithDeps_VendoredModule(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"go.mod":                        "module example.com/app\n\ngo 1.22\n\nrequire example.com/dep v1.0.0\n",
+		"vendor/modules.txt":            "# example.com/dep v1.0.0\n## explicit; go 1.22\nexample.com/dep\n",
+		"vendor/example.com/dep/dep.go": "package dep\n\nimport \"os/exec\"\n\nfunc Run() { exec.Command(\"x\").Run() }\n",
+		"main.go":                       "package app\n\nimport \"example.com/dep\"\n\nfunc F() { dep.Run() }\n",
+	} {
+		p := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pkgs, err := loadPackagesWithDeps(RealPackageLoader{}, root)
+	if err != nil {
+		t.Fatalf("loadPackagesWithDeps: %v", err)
+	}
+	var errs []string
+	packages.Visit(pkgs, nil, func(p *packages.Package) {
+		for _, e := range p.Errors {
+			errs = append(errs, e.Error())
+		}
+	})
+	if len(errs) > 0 {
+		t.Fatalf("load errors: %v", errs)
+	}
+	deps := selectDependencies(pkgs, false)
+	if len(deps) != 1 || deps[0].PkgPath != "example.com/dep" || deps[0].Types == nil {
+		t.Errorf("dependencies %+v; want example.com/dep, typed", deps)
+	}
+}
+
+// A deps diff has no absent side: an empty directory argument is an error
+// before anything is cleaned or loaded (Clean("") is "."), in the CLI entry
+// point and in the worker's.
+func TestRunDepsDiff_EmptyDirectory(t *testing.T) {
+	dir := t.TempDir()
+	for _, c := range []struct{ old, new string }{{"", dir}, {dir, ""}, {"", ""}} {
+		want := fmt.Sprintf("deps diff needs two module directories; got old %q and new %q", c.old, c.new)
+		if err := RunDepsDiff(c.old, c.new, true); err == nil || err.Error() != want {
+			t.Errorf("RunDepsDiff(%q, %q) = %v; want %q", c.old, c.new, err, want)
+		}
+		var out strings.Builder
+		if err := RunDepsDiffLogic(&out, c.old, c.new); err == nil || err.Error() != want || out.Len() != 0 {
+			t.Errorf("RunDepsDiffLogic(%q, %q) = %v, wrote %q; want %q and no output", c.old, c.new, err, out.String(), want)
+		}
 	}
 }

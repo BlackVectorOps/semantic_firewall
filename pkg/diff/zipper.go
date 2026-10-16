@@ -396,14 +396,6 @@ func (z *Zipper) compareOps(a, b ssa.Instruction) bool {
 	return true
 }
 
-func IsCommutativeOp(op token.Token) bool {
-	switch op {
-	case token.ADD, token.MUL, token.AND, token.OR, token.XOR, token.EQL, token.NEQ:
-		return true
-	}
-	return false
-}
-
 func (z *Zipper) compareOperands(a, b ssa.Instruction) bool {
 	opsA := a.Operands(nil)
 	opsB := b.Operands(nil)

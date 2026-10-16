@@ -303,6 +303,47 @@ GOCACHE, delete it after; -retest only matches unchanged lines):
   Full ./pkg/api suite is ~70 s per mutant: the whole retest is 2-3 h.
 Then: record accepted equivalents here, update PR body (Testing list,
 Remaining), mark pair 6 closed.
+Pair 7 (session 4, hunted by the session itself, no sub-agent): three
+bugs, each reproduced against both loaders and the go command, fixed with
+tests that fail on the old code (TestDiff_FilesOutsideTheHostBuild's new
+cases, TestDiff_VendoredModule, TestDiffBatch_OnePairOutsideTheHostBuild,
+TestVendorDir, TestFingerprintTree_Vendored, TestFingerprintSource_Vendored,
+TestLoadPackagesWithDeps_VendoredModule; TestLoadSource_ErrorParity's
+vendored case had asserted the bug and now asserts the load):
+- Vendored modules could not be diffed: GetHardenedEnv's
+  GOFLAGS=-mod=readonly overrode the go command's default vendor mode, so
+  a tree whose deps are only in vendor/ failed with "missing go.sum entry"
+  in diff, batch, tree mode and scan (deps diff had its own -mod=vendor).
+  `diff.VendorDir(dir)` now implements the go command's rule (vendor dir
+  exists; go.mod go >= 1.14, or go.work go >= 1.22 for the workspace's
+  vendor dir); HardenedEnvFor appends -mod=vendor; deps.go uses VendorDir
+  (it used to key on vendor/modules.txt alone); scan.go uses HardenedEnvFor
+  (so it honors go.work too).
+- A file the host build excludes that is the only Go file of its
+  directory (a windows-only package), or lies outside any module, was
+  loaded as go list's ad-hoc `command-line-arguments` package under the
+  host GOOS/GOARCH: its platform API undefined, its sizes the host's, and
+  the documented retry never ran because packagesContain was true. The
+  build configuration is now chosen before the first load. A file with
+  siblings in a module was already handled. batch.go excludes ad-hoc
+  packages from a group so a one-pair batch equals Diff.
+- A `//go:build ignore` script beside a package's files could not be
+  diffed at all: `ignore` was supplied as -tags, which breaks the standard
+  library (its generators carry it). `ignore` is never a custom tag; a
+  file in no configuration's package is loaded alone (pattern = the file
+  path), as `go build file.go` builds it.
+Not bugs (checked): generic functions/methods and their closures, blank
+functions, legacy `// +build` lines, range-over-func closure positions.
+Mutation over the pair 7 files: see below (state at handoff time).
+Pair 8 (session 4, hunted directly): `sfw deps diff "" .` cleaned "" to
+"." and reported the working directory diffed against itself as no change,
+exit 0 (a caller whose base-directory variable came out empty would pass
+silently). RunDepsDiff and RunDepsDiffLogic now reject an empty directory
+(TestRunDepsDiff_EmptyDirectory; the worker case in
+TestWorkerDepsAndBatchArgs). Probed and left as is: `sfw check ""` and
+`sfw scan ""` act on the working directory (more work, not less); `--`
+before the deps diff directories is accepted; the audit's empty commit
+message is accepted; a lone `sfw diff <one file>` prints usage.
 
 Next levers, measured: `diffResults` runs pairs serially (0.37 s of the
 batch); GC is ~25% of CPU (GOGC=200 gives 5-15%); `BuildSSAFromPackages`
