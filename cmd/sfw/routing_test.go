@@ -71,8 +71,8 @@ func fakeRunscPath(t *testing.T) (pathEnv, spec string) {
 	return "PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH"), spec
 }
 
-// writeModule writes a module with one file and returns the file's path.
-func writeModule(t *testing.T, src string) string {
+// oneFileModule writes a module with one file and returns the file's path.
+func oneFileModule(t *testing.T, src string) string {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/m\n\ngo 1.22\n"), 0o644); err != nil {
@@ -133,7 +133,7 @@ func TestMain_DiffBatchFailureExitsNonZero(t *testing.T) {
 // Two files without --batch are a single diff.
 func TestMain_DiffTwoFiles(t *testing.T) {
 	bin := buildSFW(t)
-	file := writeModule(t, "package p\n\nfunc A() int { return 1 }\n")
+	file := oneFileModule(t, "package p\n\nfunc A() int { return 1 }\n")
 	stdout, stderr, code := runSFW(t, bin, nil, "diff", "--no-sandbox", file, file)
 	if code != 0 {
 		t.Fatalf("sfw diff exited %d: %s", code, stderr)
@@ -149,7 +149,7 @@ func TestMain_DiffTwoFiles(t *testing.T) {
 func TestMain_ConfiguresTypeCache(t *testing.T) {
 	bin := buildSFW(t)
 	cacheHome := t.TempDir()
-	file := writeModule(t, "package p\n\nimport \"strings\"\n\nfunc A(s string) string { return strings.ToUpper(s) }\n")
+	file := oneFileModule(t, "package p\n\nimport \"strings\"\n\nfunc A(s string) string { return strings.ToUpper(s) }\n")
 	env := []string{"SFW_TYPE_CACHE=on", "XDG_CACHE_HOME=" + cacheHome}
 	if _, stderr, code := runSFW(t, bin, env, "diff", "--no-sandbox", file, file); code != 0 {
 		t.Fatalf("sfw diff exited %d: %s", code, stderr)
