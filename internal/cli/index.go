@@ -4,6 +4,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/models"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,7 +66,7 @@ func RunIndex(target, name, severity, category, dbPath string) error {
 		Indexed:   indexed,
 		Database:  dbPath,
 		TotalSigs: totalSigs,
-		Backend:   map[bool]string{true: "json", false: "pebbledb"}[isJSON],
+		Backend:   map[bool]string{true: models.BackendJSON, false: models.BackendPebbleDB}[isJSON],
 	}
 
 	encoder := json.NewEncoder(os.Stdout)

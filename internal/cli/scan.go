@@ -92,7 +92,7 @@ func RunScanLogic(fsys FileSystem, pkgLoader PackageLoader, target string, opts 
 
 	// DB Initialization
 	if !IsJSON(opts.DBPath) {
-		backend = "pebbledb"
+		backend = models.BackendPebbleDB
 
 		// Use shared helper logic to handle sandbox environments robustly
 		safeDBPath, cleanup, err := PrepareSandboxDB(opts.DBPath)
@@ -112,7 +112,7 @@ func RunScanLogic(fsys FileSystem, pkgLoader PackageLoader, target string, opts 
 		defer ps.Close()
 		scanner = ps
 	} else {
-		backend = "json"
+		backend = models.BackendJSON
 		js := jsondb.NewScanner()
 		if err := js.LoadDatabase(opts.DBPath); err != nil {
 			return fmt.Errorf("failed to load json db: %w", err)
@@ -151,13 +151,13 @@ func RunScanLogic(fsys FileSystem, pkgLoader PackageLoader, target string, opts 
 	summary := models.ScanSummary{TotalAlerts: len(allAlerts)}
 	for _, alert := range allAlerts {
 		switch alert.Severity {
-		case "CRITICAL":
+		case models.SeverityCritical:
 			summary.CriticalAlerts++
-		case "HIGH":
+		case models.SeverityHigh:
 			summary.HighAlerts++
-		case "MEDIUM":
+		case models.SeverityMedium:
 			summary.MediumAlerts++
-		case "LOW":
+		case models.SeverityLow:
 			summary.LowAlerts++
 		}
 	}
@@ -370,7 +370,7 @@ func loadPackagesWithDeps(pkgLoader PackageLoader, target string) ([]*packages.P
 		Mode:  mode,
 		Dir:   dir,
 		Tests: false,
-		Env:   diff.GetHardenedEnv(),
+		Env:   diff.HardenedEnvFor(dir),
 	}
 	return pkgLoader.Load(cfg, pattern)
 }

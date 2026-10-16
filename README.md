@@ -225,10 +225,12 @@ The package `init` function is diffed like any other. Swapping an import changes
 
 The diff reports the functions declared in the given file, closures included, plus the package's synthesized `init`. That function has no source file and runs every file's package-level initializers. The package's other files are loaded for type-checking but their functions are not reported. A function belongs to the file it is written in: a `//line` directive changes the position the compiler reports, not which file's diff the function is in.
 
-A file that the host build excludes is loaded under a configuration that includes it:
+A file that the host build excludes is loaded under a configuration that includes it, chosen before the file is loaded:
 - **`_test.go` file:** loaded with the package's tests.
-- **`_GOOS`/`_GOARCH` name suffix or `//go:build` line:** `go/build` matches the file against GOOS/GOARCH pairs, the host's first and then a fixed list of 27 (`knownPlatforms` in `pkg/diff/fingerprinter.go`). For each pair it tries every subset of the line's custom tags, at most 4. Platform names, `unix`, `cgo`, `gc`, `gccgo`, `go1.*` and `goexperiment.*` do not count as custom tags. The first match is loaded, with cgo disabled.
-- A file that no combination matches is an error.
+- **`_GOOS`/`_GOARCH` name suffix or `//go:build` line:** `go/build` matches the file against GOOS/GOARCH pairs, the host's first and then a fixed list of 27 (`knownPlatforms` in `pkg/diff/fingerprinter.go`). For each pair it tries every subset of the line's custom tags, at most 4. Platform names, `unix`, `cgo`, `gc`, `gccgo`, `ignore`, `go1.*` and `goexperiment.*` do not count as custom tags (`ignore` is never supplied: the standard library's generators carry it, and a build with it set fails). The first match is loaded, with cgo disabled. The configuration is chosen up front because `go list`, asked for a file that is the only Go file of its directory, does not report it excluded: it builds an ad-hoc package of the file under the host's GOOS and GOARCH, where the platform's API is undefined and the sizes are the host's.
+- A file that no combination matches (a `//go:build ignore` script beside a package's files) is loaded alone, as `go build file.go` builds it: an ad-hoc package of the one file under the host's GOOS and GOARCH, its constraints ignored.
+
+A module with a `vendor` directory is loaded from it, as the go command builds it (a `go.mod` of go 1.14 or later; in a workspace, the workspace's `vendor` directory with a `go.work` of go 1.22 or later), whatever the module cache holds. Every mode of `sfw` applies this rule (`diff.VendorDir`).
 
 Reported names are relative to the function's own package: `F`, `(*T).M`, `F$1`. A package whose last path element contains a dot (`gopkg.in/yaml.v3`) is stripped completely.
 
@@ -682,7 +684,7 @@ The scan output's top-level fields are:
 | `direct` | packages imported by any package of the target's own module |
 | `transitive` | also everything those packages import |
 
-Packages are loaded with `GOPROXY=off` and `-mod=readonly`, so modules must already be in the module cache (`go mod download`). `dependencies_scanned` counts dependency functions, which are also included in `total_functions_scanned`.
+Packages are loaded with `GOPROXY=off` and `-mod=readonly`, so modules must already be in the module cache (`go mod download`), unless the tree has a vendor directory the go command would build from (see [Files](#files)), which is loaded with `-mod=vendor`. `dependencies_scanned` counts dependency functions, which are also included in `total_functions_scanned`.
 
 ## Signature store
 
@@ -787,7 +789,8 @@ scanner, err := pebbledb.NewPebbleScanner("signatures.db", pebbledb.DefaultPebbl
 ┌────────────────────────────────────────────────────────────────┐
 │ golang.org/x/tools/go/packages.Load, then go/ssa build         │
 │ loader env: CGO_ENABLED=0 GOPROXY=off GOTOOLCHAIN=local        │
-│             GOFLAGS=-mod=readonly GONOSUMDB=*                  │
+│             GOFLAGS=-mod=readonly (-mod=vendor if vendored)    │
+│             GONOSUMDB=*                                        │
 │             GOWORK=<the governing go.work, or off>             │
 └────────────────────────────────┬───────────────────────────────┘
                                  │ *ssa.Function

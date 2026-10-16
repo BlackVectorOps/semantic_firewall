@@ -37,6 +37,8 @@ func Gone(mac, want []byte) error {
 	}
 	return nil
 }
+
+func GoneHarmless(x int) int { return x + 1 }
 `, `package p
 
 import "net"
@@ -74,6 +76,7 @@ func Added(addr string) error {
 		"Mod":               {models.StatusModified, 0},
 		"OldName → NewName": {models.StatusRenamed, 0},
 		"Gone":              {models.StatusRemoved, models.RiskScoreHigh},
+		"GoneHarmless":      {models.StatusRemoved, 0}, // removing a function without a check is neutral
 		"Added":             {models.StatusAdded, models.BaseRiskAddedFunc + 1 + 20},
 		"init":              {models.StatusModified, 0},
 	} {
@@ -84,9 +87,9 @@ func Added(addr string) error {
 	if mod := got["Mod"]; len(mod.AddedOps) == 0 || len(mod.RemovedOps) == 0 {
 		t.Errorf("Mod: added ops %q, removed ops %q; want the Zipper's evidence of the changed constant", mod.AddedOps, mod.RemovedOps)
 	}
-	pct := func(n float64) float64 { return n / 6 * 100 } // in float64, as the summary computes it
+	pct := func(n float64) float64 { return n / 7 * 100 } // in float64, as the summary computes it
 	want := models.DiffSummary{
-		TotalFunctions: 6, Preserved: 1, Modified: 3, Added: 1, Removed: 1,
+		TotalFunctions: 7, Preserved: 1, Modified: 3, Added: 1, Removed: 2,
 		SemanticMatchPct: pct(1), TopologyMatchedPct: pct(4), RenamedFunctions: 1, HighRiskChanges: 2,
 	}
 	if out.Summary != want {

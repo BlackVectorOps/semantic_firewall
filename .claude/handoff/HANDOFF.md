@@ -304,6 +304,75 @@ GOCACHE, delete it after; -retest only matches unchanged lines):
 Then: record accepted equivalents here, update PR body (Testing list,
 Remaining), mark pair 6 closed.
 
+Session 4 result (fresh whole-file passes vs origin/main, isolated
+GOCACHE, narrow -run first; replaces the partial state above):
+- api/diff.go + batch.go, `-run 'TestDiff|TestCompareFunctions'`: 250
+  mutants, 152 killed, 12 timed out (caught), 71 not compiling, 15
+  survived. Accepted: strictMode literals (diff.go:33, batch.go:260,
+  271); nil-SSA/nil-topology guards (diff.go:135, 136, 161); batch.go
+  path de-duplication (116, 117), the claim (124), the workspace memo
+  (138), `len(wellTyped) > 0` (239: an empty list errors into the same
+  single-file fallback). diff.go:165 (removed function forced high-risk)
+  killed since by TestDiff_Summary's neutral removed function.
+  diff.go:281/284 (pathResolver symlinks) are covered by
+  TestInFile_ResolvesEachPathOnce outside that -run; the full-suite
+  -retest was queued and not read before the session lost its shell.
+  batch.go lines are pre-session-4 (a 4-line comment above the
+  wellTyped loop shifts later lines by 4).
+- cli/diff_logic.go + sandbox_adapter.go, full ./internal/cli,./cmd/sfw:
+  149 mutants, 105 killed, 4 timed out, 34 not compiling, 6 survived,
+  all accepted: diff_logic.go:124-125 and sandbox_adapter.go:38 are
+  filepath.Abs (Getwd) error paths; sandbox_adapter.go:141 forces the
+  workspace mount on, which mounts the cwd already mounted.
+- diff/topology_match.go + fingerprinter.go (with the pair 7 changes):
+  220 mutants, cut off early; first survivors fingerprinter.go:319 (`>=`
+  boundary) and :218 (remove return), unclassified. Rerun with
+  `-tests ./pkg/diff,./pkg/api` (TestVendorDir and the api host-build
+  tests live outside the narrow -run).
+Pair 6 closes once the api retest is read and the two diff survivors
+are answered.
+Pair 7 (session 4, hunted by the session itself, no sub-agent): three
+bugs, each reproduced against both loaders and the go command, fixed with
+tests that fail on the old code (TestDiff_FilesOutsideTheHostBuild's new
+cases, TestDiff_VendoredModule, TestDiffBatch_OnePairOutsideTheHostBuild,
+TestVendorDir, TestFingerprintTree_Vendored, TestFingerprintSource_Vendored,
+TestLoadPackagesWithDeps_VendoredModule; TestLoadSource_ErrorParity's
+vendored case had asserted the bug and now asserts the load):
+- Vendored modules could not be diffed: GetHardenedEnv's
+  GOFLAGS=-mod=readonly overrode the go command's default vendor mode, so
+  a tree whose deps are only in vendor/ failed with "missing go.sum entry"
+  in diff, batch, tree mode and scan (deps diff had its own -mod=vendor).
+  `diff.VendorDir(dir)` now implements the go command's rule (vendor dir
+  exists; go.mod go >= 1.14, or go.work go >= 1.22 for the workspace's
+  vendor dir); HardenedEnvFor appends -mod=vendor; deps.go uses VendorDir
+  (it used to key on vendor/modules.txt alone); scan.go uses HardenedEnvFor
+  (so it honors go.work too).
+- A file the host build excludes that is the only Go file of its
+  directory (a windows-only package), or lies outside any module, was
+  loaded as go list's ad-hoc `command-line-arguments` package under the
+  host GOOS/GOARCH: its platform API undefined, its sizes the host's, and
+  the documented retry never ran because packagesContain was true. The
+  build configuration is now chosen before the first load. A file with
+  siblings in a module was already handled. batch.go excludes ad-hoc
+  packages from a group so a one-pair batch equals Diff.
+- A `//go:build ignore` script beside a package's files could not be
+  diffed at all: `ignore` was supplied as -tags, which breaks the standard
+  library (its generators carry it). `ignore` is never a custom tag; a
+  file in no configuration's package is loaded alone (pattern = the file
+  path), as `go build file.go` builds it.
+Not bugs (checked): generic functions/methods and their closures, blank
+functions, legacy `// +build` lines, range-over-func closure positions.
+Mutation over the pair 7 files: see below (state at handoff time).
+Pair 8 (session 4, hunted directly): `sfw deps diff "" .` cleaned "" to
+"." and reported the working directory diffed against itself as no change,
+exit 0 (a caller whose base-directory variable came out empty would pass
+silently). RunDepsDiff and RunDepsDiffLogic now reject an empty directory
+(TestRunDepsDiff_EmptyDirectory; the worker case in
+TestWorkerDepsAndBatchArgs). Probed and left as is: `sfw check ""` and
+`sfw scan ""` act on the working directory (more work, not less); `--`
+before the deps diff directories is accepted; the audit's empty commit
+message is accepted; a lone `sfw diff <one file>` prints usage.
+
 Next levers, measured: `diffResults` runs pairs serially (0.37 s of the
 batch); GC is ~25% of CPU (GOGC=200 gives 5-15%); `BuildSSAFromPackages`
 builds root packages one at a time; API-closure import pruning would skip

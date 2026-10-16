@@ -223,10 +223,14 @@ func fingerprintGroup(files []pendingFile) map[string]fileResult {
 	// SSA skips an ill-typed package (one with errors, or with an ill-typed
 	// dependency), and a single-file diff of its files fails. Build only the
 	// well-typed packages here; the files of the others take the single-file
-	// path, which reports the same error Diff does.
+	// path, which reports the same error Diff does. An ad-hoc package is one
+	// go list built of a single file its directory's package leaves out (a
+	// GOOS suffix, a //go:build line), under the host's GOOS and GOARCH;
+	// Diff loads such a file under a configuration that includes it, so its
+	// files take the single-file path too.
 	var wellTyped []*packages.Package
 	for _, p := range pkgs {
-		if !p.IllTyped {
+		if !p.IllTyped && p.PkgPath != "command-line-arguments" {
 			wellTyped = append(wellTyped, p)
 		}
 	}
