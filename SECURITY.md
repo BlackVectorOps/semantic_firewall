@@ -9,15 +9,15 @@ I adhere to Semantic Versioning. Security patches will be backported to the curr
 
 | Version | Supported | Status |
 | :--- | :---: | :--- |
-| 5.x | :white_check_mark: | **Active Support.** Malware Scanner, PebbleDB, Sandbox, Entropy Engine. |
-| x.x.x | :warning:          | **Maintenance.** Diff/Check features only. |
+| 6.x | :white_check_mark: | **Active Support.** Diff and deletion signals, `sfw deps diff`, batch diff, source loader and type cache, LLM audit, Malware Scanner, PebbleDB, Sandbox, Entropy Engine, GitHub Action. |
+| 5.x | :warning: | **Critical fixes only.** Upgrade to 6.x; the module path is now `/v6`. |
 | < 1.0 | :x: | **End of Life.** Pre-release versions are not supported. |
 
 
 ## Reporting a Vulnerability
 
 
-I take the security of the Semantic Firewall (`sfw`) extremely seriously. If you discover a vulnerability in the canonicalizer, the SCEV analysis engine, or the fingerprinting logic, please follow the procedure below.
+I take the security of the Semantic Firewall (`sfw`) extremely seriously. If you discover a vulnerability in the canonicalizer, the SCEV analysis engine, the fingerprinting logic, the risk scoring, the dependency analysis, the sandbox or the LLM audit, please follow the procedure below.
 
 
 ### **DO NOT open a public GitHub Issue**
@@ -51,7 +51,7 @@ If you cannot use GitHub reporting, you may email me directly.
 ## What Qualifies as a Vulnerability?
 
 
-The Semantic Firewall is designed to detect logic changes. A vulnerability in this context generally falls into two categories:
+The Semantic Firewall is designed to detect logic changes. A vulnerability in this context generally falls into one of these categories:
 
 
 1.  **Semantic Collision:** You can demonstrate two pieces of Go code with **divergent business logic** that produce the **same** semantic fingerprint.
@@ -59,6 +59,17 @@ The Semantic Firewall is designed to detect logic changes. A vulnerability in th
     * *Note:* Two pieces of code with the *same* logic but different syntax (e.g., `for` vs `range`) producing the same fingerprint is a feature, not a bug.
 
 2.  **Canonicalizer Injection:** You can inject IR instructions or break out of the string/type sanitization layer to alter the resulting hash.
+
+
+3.  **Detection Bypass:** A change that removes a guard or a verification check, weakens a TLS, cookie or SSH setting, or adds a capability call, and that `sfw diff` scores as low risk where the README says it should not. Examples: a deleted guard that does not raise `Unguarded`, or a check swapped for a no-op that reads as `ReplacedCheck`.
+
+4.  **Dependency Blind Spot:** A dependency change that `sfw deps diff` neither diffs nor lists under `unanalyzed`. Examples: code reachable through a file, build tag, `go.work` entry or vendored copy that the tool silently skips.
+
+5.  **Sandbox or Cache Escape:** Analyzed code that runs, writes outside its mounts, or writes a persistent type cache entry from inside the gVisor sandbox, or a cache entry that `sfw` accepts for a different source.
+
+6.  **Audit Injection:** Source, a commit message or a tool result that gets `sfw audit` to return `MATCH` for a flagged change by passing instructions to the model through the prompt-injection sentinel and the nonce fences.
+
+Known limits documented in the README (functions moved across files, interface and dynamic calls in reach analysis, errors inside a dependency's function bodies) are not vulnerabilities on their own. A bypass that builds on one of them still qualifies.
 
 
 ## Response Timeline
