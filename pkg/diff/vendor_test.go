@@ -6,8 +6,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
 )
 
 // VendorDir follows the go command's rule for building from a vendor

@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/internal/sandbox"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v6/internal/sandbox"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/api"
 )
 
 // fakeRunsc puts a "runsc" first on PATH that saves the OCI spec the real

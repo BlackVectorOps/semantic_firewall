@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/api"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
 )
 
 // moduleProxy serves the given modules ("path@version" -> files) from a

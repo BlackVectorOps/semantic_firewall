@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/api"
 )
 
 // -- Public API --

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
 )
 
 const (

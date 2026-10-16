@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/internal/sandbox"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v6/internal/sandbox"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
 )
 
 // SFW_TYPE_CACHE=on or off decides; a direct setting passes through;

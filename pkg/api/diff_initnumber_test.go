@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/api"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
 )
 
 // go/ssa names a package's declared init functions init#1, init#2, ... in

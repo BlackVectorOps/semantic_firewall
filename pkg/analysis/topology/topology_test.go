@@ -5,8 +5,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/testutil"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/testutil"
 )
 
 func TestExtractTopology(t *testing.T) {

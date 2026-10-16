@@ -10,8 +10,8 @@ import (
 
 	"golang.org/x/tools/go/packages"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
 )
 
 // A batch loads each module's files with one call per side, and sends only

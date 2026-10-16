@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/internal/llm"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v6/internal/llm"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
 )
 
 // -- AUDIT COMMAND --

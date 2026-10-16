@@ -4,17 +4,17 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/detection"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/storage/jsondb"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/storage/pebbledb"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/jsondb"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/pebbledb"
 	"golang.org/x/tools/go/ssa"
 )
 

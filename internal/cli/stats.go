@@ -3,11 +3,11 @@ package cli
 
 import (
 	"encoding/json"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
 	"os"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/storage/jsondb"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/storage/pebbledb"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/jsondb"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/pebbledb"
 )
 
 func RunStats(dbPath string) error {

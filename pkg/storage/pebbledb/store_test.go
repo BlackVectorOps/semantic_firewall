@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/detection"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/storage/jsondb"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/storage/pebbledb"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/jsondb"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/pebbledb"
 )
 
 func TestPebbleScanner_RejectsOlderSchema(t *testing.T) {

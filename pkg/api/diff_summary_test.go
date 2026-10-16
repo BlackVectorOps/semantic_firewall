@@ -4,9 +4,9 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/api"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
 )
 
 // One diff with every status: the summary's counts and percentages, each
