@@ -303,6 +303,34 @@ GOCACHE, delete it after; -retest only matches unchanged lines):
   Full ./pkg/api suite is ~70 s per mutant: the whole retest is 2-3 h.
 Then: record accepted equivalents here, update PR body (Testing list,
 Remaining), mark pair 6 closed.
+
+Session 4 result (fresh whole-file passes vs origin/main, isolated
+GOCACHE, narrow -run first; replaces the partial state above):
+- api/diff.go + batch.go, `-run 'TestDiff|TestCompareFunctions'`: 250
+  mutants, 152 killed, 12 timed out (caught), 71 not compiling, 15
+  survived. Accepted: strictMode literals (diff.go:33, batch.go:260,
+  271); nil-SSA/nil-topology guards (diff.go:135, 136, 161); batch.go
+  path de-duplication (116, 117), the claim (124), the workspace memo
+  (138), `len(wellTyped) > 0` (239: an empty list errors into the same
+  single-file fallback). diff.go:165 (removed function forced high-risk)
+  killed since by TestDiff_Summary's neutral removed function.
+  diff.go:281/284 (pathResolver symlinks) are covered by
+  TestInFile_ResolvesEachPathOnce outside that -run; the full-suite
+  -retest was queued and not read before the session lost its shell.
+  batch.go lines are pre-session-4 (a 4-line comment above the
+  wellTyped loop shifts later lines by 4).
+- cli/diff_logic.go + sandbox_adapter.go, full ./internal/cli,./cmd/sfw:
+  149 mutants, 105 killed, 4 timed out, 34 not compiling, 6 survived,
+  all accepted: diff_logic.go:124-125 and sandbox_adapter.go:38 are
+  filepath.Abs (Getwd) error paths; sandbox_adapter.go:141 forces the
+  workspace mount on, which mounts the cwd already mounted.
+- diff/topology_match.go + fingerprinter.go (with the pair 7 changes):
+  220 mutants, cut off early; first survivors fingerprinter.go:319 (`>=`
+  boundary) and :218 (remove return), unclassified. Rerun with
+  `-tests ./pkg/diff,./pkg/api` (TestVendorDir and the api host-build
+  tests live outside the narrow -run).
+Pair 6 closes once the api retest is read and the two diff survivors
+are answered.
 Pair 7 (session 4, hunted by the session itself, no sub-agent): three
 bugs, each reproduced against both loaders and the go command, fixed with
 tests that fail on the old code (TestDiff_FilesOutsideTheHostBuild's new
