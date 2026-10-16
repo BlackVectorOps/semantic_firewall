@@ -126,7 +126,7 @@ func TestCallLLM_FullFlow(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	res, err := CallLLM("msg", nil, "k", models.ModelGPT5_2, ts.URL)
+	res, err := CallLLM("msg", nil, "k", models.ModelGPT5_2, ts.URL, nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestCallLLM_InjectionDefense(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	res, err := CallLLM("attack", nil, "k", models.ModelGPT5_2, ts.URL)
+	res, err := CallLLM("attack", nil, "k", models.ModelGPT5_2, ts.URL, nil)
 	if err != nil {
 		t.Fatalf("Should not error on logic detection: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestBuildModernPrompts_Nonce(t *testing.T) {
 
 	// Verify that the nonce is correctly embedded in the delimiter
 	generateNonceFunc = func(l int) (string, error) { return "UNIQUE1", nil }
-	_, p1, _ := buildModernPrompts("test", nil)
+	_, p1, _ := buildModernPrompts("test", nil, false)
 
 	if !strings.Contains(p1, "### BEGIN DATA [UNIQUE1] ###") {
 		t.Error("Prompt missing secure nonce delimiter")
@@ -261,7 +261,7 @@ func TestCallLLM_SentinelUsesRequestedModel(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	if _, err := CallLLM("msg", nil, "k", "my-proxy-model", ts.URL); err != nil {
+	if _, err := CallLLM("msg", nil, "k", "my-proxy-model", ts.URL, nil); err != nil {
 		t.Fatalf("CallLLM: %v", err)
 	}
 	if len(seen) != 2 || seen[0] != "my-proxy-model" || seen[1] != "my-proxy-model" {

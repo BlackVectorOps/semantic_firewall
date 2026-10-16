@@ -48,6 +48,11 @@ func RunAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 		return 1, fmt.Errorf("failed to parse sandboxed diff output (invalid JSON): %w", err)
 	}
 
+	// The auditor reads the two files as text (go/parser, no toolchain), so
+	// this happens outside the sandbox. An unreadable side is an absent
+	// side: the diff above already decided what that means.
+	audit := llm.NewAuditContext(cleanOld, readSourceText(cleanOld), cleanNew, readSourceText(cleanNew), &diffOutput)
+
 	var evidence []models.AuditEvidence
 	for _, fn := range diffOutput.Functions {
 		if fn.RiskScore >= models.RiskScoreHigh {
@@ -58,11 +63,15 @@ func RunAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 				ops = strings.Join(fn.AddedOps, ", ")
 			}
 
+			oldSrc, newSrc := audit.InlineSource(fn)
 			evidence = append(evidence, models.AuditEvidence{
 				Function:        fn.Function,
+				Status:          fn.Status,
 				RiskScore:       fn.RiskScore,
 				StructuralDelta: fn.TopologyDelta,
 				AddedOperations: ops,
+				OldSource:       oldSrc,
+				NewSource:       newSrc,
 			})
 		}
 	}
@@ -91,7 +100,7 @@ func RunAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 			Evidence: fmt.Sprintf("High-risk changes need LLM verification, but no API key was provided (set %s).", llm.APIKeyEnvVar(model)),
 		}
 	} else if highRiskDetected {
-		result, err := llm.CallLLM(commitMsg, evidence, apiKey, model, apiBase)
+		result, err := llm.CallLLM(commitMsg, evidence, apiKey, model, apiBase, audit)
 		if err != nil {
 			output.Output = models.LLMResult{
 				Verdict:  models.VerdictError,
@@ -125,4 +134,20 @@ func RunAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 	default:
 		return 1, fmt.Errorf("unknown verdict received: %s", output.Output.Verdict)
 	}
+}
+
+// readSourceText reads one side of the audited diff for the auditor's
+// tools, bounded by models.MaxSourceFileSize as the diff bounds its inputs.
+// A missing or unreadable file is nil: that side does not exist.
+func readSourceText(path string) []byte {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, models.MaxSourceFileSize))
+	if err != nil {
+		return nil
+	}
+	return data
 }

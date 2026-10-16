@@ -373,6 +373,35 @@ TestWorkerDepsAndBatchArgs). Probed and left as is: `sfw check ""` and
 before the deps diff directories is accepted; the audit's empty commit
 message is accepted; a lone `sfw diff <one file>` prints usage.
 
+Dead-code sweep (session 4, user's directive): `deadcode -test ./...`,
+`staticcheck -checks U1000` and a one-off whole-module unused-export scan.
+Removed: tree mode (FingerprintTree*, LoadMeta, loadPackagesFromTree and
+its tests), pkg/storage/provider.go, FilePerm*/HTTPClientTimeout/GPT model
+constants, ScanOutput.Error, IsCommutativeOp, EntropyMatch,
+CalculateEntropyNormalized, IVType constants nothing used, testutil
+helpers, cli MockScanner. Literal backends, severities and 0.75 thresholds
+now use the models constants. Kept on purpose: sandbox Capabilities
+fields, OptionalCalls, IVTypeUnknown. Suites were green before and after.
+
+LLM audit, option 1 of /mnt/project-files/drafts/llm-brainstorm.md
+(session 4, user approved): the auditor reads code. internal/llm/source.go
+indexes each side with go/parser (declaration ranges, syntactic callees,
+callers; closure and instantiated names resolve to their declaration);
+internal/llm/tools.go serves function_source, function_diff,
+file_context, list_functions, callers, callees from the two files and the
+DiffOutput, bounded (MaxToolResultBytes, MaxFileContextRadius). Evidence
+now carries status and the bounded source of both sides
+(MaxInlineSourceLines) for every provider. callClaude runs a manual tool
+loop (not the SDK runner: each round's results must pass the sentinel
+before the model sees them, and are fenced with a nonce); MaxAuditToolRounds
+then ERROR; a sentinel hit is *injectionError -> LIE in CallLLM. The audit
+reads the files outside the sandbox (text only; the diff still runs
+inside). Tests: source_test, tools_test, claude_test (loop, injection,
+round cap, no-context), cli/audit_test (payload and tools). README's sfw
+audit section documents it. Not done: a mutation pass over internal/llm
+(the package's tests are fast: `-pkgs ./internal/llm -tests ./internal/llm`),
+and options 2-8 of the brainstorm.
+
 Next levers, measured: `diffResults` runs pairs serially (0.37 s of the
 batch); GC is ~25% of CPU (GOGC=200 gives 5-15%); `BuildSSAFromPackages`
 builds root packages one at a time; API-closure import pruning would skip

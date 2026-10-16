@@ -9,7 +9,7 @@
 
 - `sfw diff` compares two files function by function. It matches renamed functions by topology and scores each change by the capabilities it newly reaches and the guards, checks and security settings it removes.
 - `sfw deps diff` compares the third-party code two trees of a module compile in: changed functions, exported functions that newly reach a capability, and changed files the analysis cannot see.
-- `sfw audit` sends a diff's high-risk changes and the commit message to an LLM, which decides whether the message describes the change.
+- `sfw audit` sends a diff's high-risk changes, their source and the commit message to an LLM, which reads the code (through tools, with a Claude model) and decides whether the message describes the change.
 - `sfw index` and `sfw scan` match function topologies against a signature store (PebbleDB or JSON).
 
 The analysis never executes the code under test.
@@ -548,13 +548,14 @@ sfw audit old.go new.go "minor refactor of logging"
 ```
 
 1. Runs `sfw diff` on the two files.
-2. Collects every function with `risk_score >= 10`, sending its name, score, `topology_delta` and at most 10 `added_ops`.
+2. Collects every function with `risk_score >= 10`: its name, status, score, `topology_delta`, at most 10 `added_ops`, and its source on both sides (`old_source`, `new_source`: the declaration with line numbers, the first 120 lines of a longer one). The source comes from `go/parser` over the two files, outside the sandbox, which reads text and runs nothing.
 3. If there are none, returns `MATCH` without calling an LLM, so no key is needed.
 4. Otherwise it makes two LLM calls with the requested model:
    - a prompt-injection sentinel over the payload, where an unsafe result gives `LIE`;
    - the verdict call.
 
    A reply that fails validation becomes `SUSPICIOUS`.
+5. With a Claude model the verdict call may read further through six read-only tools served from the two files and the diff: `function_source` (a whole declaration; a closure name gives its enclosing declaration), `function_diff` (every added and removed operation and the topology match), `file_context` (lines around a line, radius at most 60), `list_functions`, `callers` and `callees` (syntactic, within the file). Each round of tool results passes the sentinel before the model sees it, an unsafe result gives `LIE`, and results go back inside nonce fences as untrusted data. A tool result is cut at 16 KB; after 8 rounds without a verdict the audit is `ERROR`. Other providers judge the payload alone.
 
 | Model prefix | Provider | Key variable |
 |--------------|----------|--------------|

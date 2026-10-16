@@ -15,6 +15,16 @@ const (
 	// short plain-text rationale indicates the model strayed from the output
 	// protocol (e.g. echoing the payload or injected instructions back).
 	MaxEvidenceRunes = 4000
+	// bounds the source of one side of a flagged function in the audit
+	// payload; the rest is a tool call away.
+	MaxInlineSourceLines = 120
+	// caps one tool result the auditor retrieves.
+	MaxToolResultBytes = 16 * 1024
+	// caps the lines on each side of a file_context request.
+	MaxFileContextRadius = 60
+	// caps the tool-call rounds of one audit; the model answers within them
+	// or the audit fails closed.
+	MaxAuditToolRounds = 8
 
 	// limits the number of attempts to reach an API before conceding failure.
 	MaxHTTPRetries = 3
