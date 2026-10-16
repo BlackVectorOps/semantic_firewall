@@ -1,0 +1,107 @@
+// Code copied from golang.org/x/tools v0.48.0, internal/astutil/purge.go.
+// The package clause and doc comment differ, and so does the tracking of
+// "[...]": upstream forgets it at any semicolon, including those inside
+// the element type's struct or interface body, and purges the literal.
+// Deleted regions keep their line breaks, so errors keep their lines.
+
+// Copyright 2023 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package purge strips the bodies of a Go source file so that only its
+// declarations remain to be parsed.
+package purge
+
+import (
+	"bytes"
+	"go/scanner"
+	"go/token"
+)
+
+// PurgeFuncBodies returns a copy of src in which the contents of each
+// outermost {...} region have been deleted, except for struct and
+// interface type bodies and the bodies of length-elided array
+// literals ([...]T), whose element count is part of the type. It
+// includes function bodies, function-literal bodies, and the bodies
+// of slice, map, and explicitly-sized array composite literals (whose
+// contents don't affect the type of the enclosing declaration). This
+// reduces the amount of work required to parse the top-level
+// declarations.
+//
+// PurgeFuncBodies keeps the line breaks of what it deletes, so every
+// line keeps its number; only columns after a deletion on its line move.
+// If the input is invalid, parsing the output of
+// PurgeFuncBodies may result in a different tree due to its effects
+// on parser error recovery.
+func PurgeFuncBodies(src []byte) []byte {
+	// Destroy the content of any {...}-bracketed regions that are
+	// not immediately preceded by a "struct" or "interface" token,
+	// and that are not the body of a length-elided array literal.
+	// That includes function bodies, switch/select bodies, and most
+	// composite literals; this will lead to non-void functions that
+	// don't have return statements, which of course is a type error,
+	// but that's ok.
+
+	var out bytes.Buffer
+	file := token.NewFileSet().AddFile("", -1, len(src))
+	var sc scanner.Scanner
+	sc.Init(file, src, nil, 0)
+	var prev token.Token
+	var cursor int         // last consumed src offset
+	var braces []token.Pos // stack of unclosed braces, or -1 for a region we preserve
+	ellipsis := -1         // brace depth of a "[...]" not yet consumed by its literal-body "{", or -1
+	for {
+		pos, tok, _ := sc.Scan()
+		if tok == token.EOF {
+			break
+		}
+		switch tok {
+		case token.COMMENT:
+			// TODO(adonovan): opt: skip, to save an estimated 20% of time.
+
+		case token.SEMICOLON:
+			// A semicolon at the depth of the "[...]" ends its
+			// statement; deeper ones are in the element type's
+			// struct or interface body.
+			if len(braces) == ellipsis {
+				ellipsis = -1
+			}
+
+		case token.RBRACK:
+			// "...]" occurs only in the array-type prefix of a
+			// composite literal; variadic "..." is followed by
+			// a type or ")", never "]".
+			if prev == token.ELLIPSIS {
+				ellipsis = len(braces)
+			}
+
+		case token.LBRACE:
+			if prev == token.STRUCT || prev == token.INTERFACE {
+				pos = -1 // type body: preserve (don't consume ellipsis)
+			} else if len(braces) == ellipsis {
+				pos = -1 // [...]T literal body: preserve
+				ellipsis = -1
+			}
+			braces = append(braces, pos)
+
+		case token.RBRACE:
+			if last := len(braces) - 1; last >= 0 {
+				top := braces[last]
+				braces = braces[:last]
+				if top < 0 {
+					// preserve
+				} else if len(braces) == 0 { // toplevel only
+					// Delete {...} body.
+					start := file.Offset(top)
+					end := file.Offset(pos)
+					out.Write(src[cursor : start+len("{")])
+					out.Write(bytes.Repeat([]byte("\n"), bytes.Count(src[start:end], []byte("\n"))))
+					cursor = end
+				}
+			}
+		}
+		prev = tok
+	}
+	out.Write(src[cursor:])
+	return out.Bytes()
+}

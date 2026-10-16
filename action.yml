@@ -13,7 +13,7 @@ inputs:
     required: false
     default: '.'
   mode:
-    description: 'Operation mode: check, diff, scan, or audit'
+    description: 'Operation mode: check, diff, deps, scan, or audit'
     required: false
     default: 'check'
   go-version:
@@ -33,7 +33,7 @@ inputs:
     required: false
     default: 'false'
   fail-on-alert:
-    description: 'Fail workflow if malware detected (scan mode only)'
+    description: 'Fail workflow if malware is detected (scan mode) or a dependency change is high-risk (deps mode)'
     required: false
     default: 'true'
   scan-deps:
@@ -71,6 +71,9 @@ outputs:
   audit-verdict:
     description: 'Final audit verdict (audit mode): PASS or FAIL'
     value: ${{ steps.run-sfw.outputs.audit-verdict }}
+  high-risk-changes:
+    description: 'Number of high-risk dependency changes (deps mode)'
+    value: ${{ steps.run-sfw.outputs.high-risk-changes }}
 
 runs:
   using: 'composite'
@@ -80,21 +83,21 @@ runs:
       with:
         go-version: ${{ inputs.go-version }}
 
-    # IMPORTANT: Caller must use actions/checkout with fetch-depth: 0 for diff/audit modes
+    # IMPORTANT: Caller must use actions/checkout with fetch-depth: 0 for diff/audit/deps modes
     - name: Validate Checkout Depth
-      if: ${{ inputs.mode == 'diff' || inputs.mode == 'audit' }}
+      if: ${{ inputs.mode == 'diff' || inputs.mode == 'audit' || inputs.mode == 'deps' }}
       shell: bash
       run: |
         set -euo pipefail
         if ! git rev-parse HEAD~1 >/dev/null 2>&1; then
-          echo "::error::Insufficient git history. Please use 'actions/checkout' with 'fetch-depth: 0' for diff/audit modes."
+          echo "::error::Insufficient git history. Please use 'actions/checkout' with 'fetch-depth: 0' for diff/audit/deps modes."
           exit 1
         fi
 
     - name: Install sfw
       shell: bash
       env:
-        SFW_VERSION: "v5.2.0"
+        SFW_VERSION: "v6.0.0"
       run: |
         set -euo pipefail
         
@@ -109,7 +112,7 @@ runs:
         RETRY_DELAY=5
         
         for attempt in $(seq 1 $MAX_RETRIES); do
-          if go install "github.com/BlackVectorOps/semantic_firewall/v5/cmd/sfw@${SFW_VERSION}"; then
+          if go install "github.com/BlackVectorOps/semantic_firewall/v6/cmd/sfw@${SFW_VERSION}"; then
             break
           fi
           
@@ -136,7 +139,7 @@ runs:
       run: |
         set -euo pipefail
         
-        if [[ "$INPUT_MODE" != "diff" ]] && [[ "$INPUT_MODE" != "audit" ]]; then
+        if [[ "$INPUT_MODE" != "diff" ]] && [[ "$INPUT_MODE" != "audit" ]] && [[ "$INPUT_MODE" != "deps" ]]; then
           echo "mode_needs_prep=false" >> "$GITHUB_OUTPUT"
           exit 0
         fi
@@ -189,7 +192,17 @@ runs:
           : > "$DIFF_STREAM_FILE"
         fi
         
-        GO_FILE_COUNT=$(git diff --name-only "$BASE_REF" "$HEAD_REF" 2>/dev/null | grep -c '\.go$' || echo "0")
+        # grep -c prints 0 and exits 1 when nothing matches; `|| true` keeps
+        # that single 0 instead of appending a second one.
+        GO_FILE_COUNT=$(git diff --name-only "$BASE_REF" "$HEAD_REF" 2>/dev/null | grep -c '\.go$' || true)
+        # A go.work redirects modules like a replace does, so its changes
+        # count too.
+        MOD_FILE_COUNT=$(git diff --name-only "$BASE_REF" "$HEAD_REF" 2>/dev/null | grep -cE '(^|/)go\.(mod|sum|work|work\.sum)$' || true)
+        if [[ "$MOD_FILE_COUNT" -gt 0 ]]; then
+          echo "has_mod_changes=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "has_mod_changes=false" >> "$GITHUB_OUTPUT"
+        fi
         if [[ "$GO_FILE_COUNT" -gt 0 ]]; then
           echo "has_go_files=true" >> "$GITHUB_OUTPUT"
         else
@@ -251,6 +264,7 @@ runs:
         PR_BODY: ${{ github.event.pull_request.body }}
         PREP_WORKTREE_DIR: ${{ steps.prep.outputs.worktree_dir }}
         PREP_HAS_GO_FILES: ${{ steps.prep.outputs.has_go_files }}
+        PREP_HAS_MOD_CHANGES: ${{ steps.prep.outputs.has_mod_changes }}
       run: |
         set -euo pipefail
         
@@ -293,10 +307,11 @@ runs:
               OUTPUT="[]"
               echo "semantic-match-pct=100.0" >> "$GITHUB_OUTPUT"
             else
-              readonly STREAM_FILE="$LOCAL_TEMP/sfw_stream.jsonl"
-              TOTAL_MATCH_PCT=0
-              FILE_COUNT=0
-              ERROR_COUNT=0
+              # Collect every changed file as an old/new pair and diff them in
+              # one sfw run, which loads each tree's packages once.
+              readonly PAIRS_FILE="$LOCAL_TEMP/sfw_pairs.bin"
+              : > "$PAIRS_FILE"
+              PAIR_COUNT=0
 
               while IFS= read -r -d '' status; do
                 case "$status" in
@@ -316,35 +331,92 @@ runs:
                 [[ ! -f "$OLD_FILE" ]] && OLD_FILE="/dev/null"
                 [[ "$NEW_FILE" == "/dev/null" && "$OLD_FILE" == "/dev/null" ]] && continue
 
-                # Keep stderr (warnings such as the runsc fallback notice) out
-                # of DIFF_OUT: it is parsed as JSON below.
-                DIFF_ERR="$LOCAL_TEMP/sfw_diff_stderr.log"
-                if ! DIFF_OUT=$(sfw diff -- "$OLD_FILE" "$NEW_FILE" 2>"$DIFF_ERR"); then
-                   echo "::warning::sfw diff failed for ${new_rel_path}"
-                   sed 's/^/  [sfw] /' "$DIFF_ERR" || true
-                   DIFF_OUT='{}'
-                   ((ERROR_COUNT++)) || true
-                fi
-                echo "$DIFF_OUT" >> "$STREAM_FILE"
-                
-                PCT=$(echo "$DIFF_OUT" | jq -r '.summary.semantic_match_pct // 0')
-                TOTAL_MATCH_PCT=$(echo "$TOTAL_MATCH_PCT + $PCT" | bc)
-                ((FILE_COUNT++)) || true
+                printf '%s\0%s\0' "$OLD_FILE" "$NEW_FILE" >> "$PAIRS_FILE"
+                ((PAIR_COUNT++)) || true
               done < "$DIFF_STREAM_FILE"
 
-              if [[ -f "$STREAM_FILE" ]]; then OUTPUT=$(jq -s '.' "$STREAM_FILE"); else OUTPUT="[]"; fi
-              
-              if [[ $FILE_COUNT -gt 0 ]]; then
-                AVG_PCT=$(echo "scale=1; $TOTAL_MATCH_PCT / $FILE_COUNT" | bc)
+              if [[ $PAIR_COUNT -eq 0 ]]; then
+                OUTPUT="[]"
+                echo "semantic-match-pct=100.0" >> "$GITHUB_OUTPUT"
               else
-                AVG_PCT="100.0"
-              fi
-              echo "semantic-match-pct=${AVG_PCT}" >> "$GITHUB_OUTPUT"
+                # sfw prints one result per pair and exits non-zero after
+                # printing when a pair could not be diffed; that pair's entry
+                # carries the reason in "error". Keep stderr (warnings such as
+                # the runsc fallback notice) out of OUTPUT, which is parsed.
+                DIFF_ERR="$LOCAL_TEMP/sfw_diff_stderr.log"
+                set +e
+                OUTPUT=$(sfw diff --batch "$PAIRS_FILE" 2>"$DIFF_ERR")
+                set -e
+                if ! echo "$OUTPUT" | jq -e 'type == "array" and length == '"$PAIR_COUNT" >/dev/null 2>&1; then
+                  echo "::error::sfw diff produced no result for the ${PAIR_COUNT} changed file(s)"
+                  sed 's/^/  [sfw] /' "$DIFF_ERR" || true
+                  OUTPUT="[]"
+                  echo "semantic-match-pct=0.0" >> "$GITHUB_OUTPUT"
+                  EXIT_CODE=1
+                else
+                  echo "$OUTPUT" | jq -r '.[] | select((.error // "") != "") | "::warning::sfw diff failed for \(.new_file): \(.error)"'
+                  ERROR_COUNT=$(echo "$OUTPUT" | jq '[.[] | select((.error // "") != "")] | length')
+                  TOTAL_MATCH_PCT=$(echo "$OUTPUT" | jq '[.[] | .summary.semantic_match_pct // 0] | add')
+                  AVG_PCT=$(echo "scale=1; $TOTAL_MATCH_PCT / $PAIR_COUNT" | bc)
+                  echo "semantic-match-pct=${AVG_PCT}" >> "$GITHUB_OUTPUT"
 
-              # A file that could not be analyzed is not a passing file.
-              if [[ $ERROR_COUNT -gt 0 ]]; then
-                echo "::error::sfw diff failed for ${ERROR_COUNT} file(s)"
-                EXIT_CODE=1
+                  # A file that could not be analyzed is not a passing file.
+                  if [[ $ERROR_COUNT -gt 0 ]]; then
+                    echo "::error::sfw diff failed for ${ERROR_COUNT} file(s)"
+                    EXIT_CODE=1
+                  fi
+                fi
+              fi
+            fi
+            ;;
+
+          deps)
+            readonly WORKTREE_DIR="${PREP_WORKTREE_DIR:-.sfw_base_worktree}"
+            if [[ "${PREP_HAS_MOD_CHANGES:-false}" != "true" ]]; then
+              OUTPUT='{}'
+              echo "high-risk-changes=0" >> "$GITHUB_OUTPUT"
+            else
+              readonly OLD_ROOT="$WORKTREE_DIR/$REL_PATH"
+              if [[ ! -f "$TARGET_PATH/go.mod" ]] || [[ ! -f "$OLD_ROOT/go.mod" ]]; then
+                echo "::error::deps mode needs 'path' to be a module root (a directory with go.mod) in both revisions."
+                exit 1
+              fi
+              # sfw loads with GOPROXY=off, so fetch both build lists first.
+              # Downloading only fetches and verifies module zips against
+              # go.sum; it runs no code. Each tree builds with the go.work
+              # above it, but the search stops at the tree's root (a .git
+              # entry), as sfw's does: the base worktree sits inside the
+              # head's checkout and must not take its workspace.
+              governing_work() {
+                local d
+                d=$(cd "$1" && pwd)
+                while :; do
+                  if [[ -f "$d/go.work" ]]; then printf '%s' "$d/go.work"; return; fi
+                  if [[ -e "$d/.git" ]] || [[ "$d" == "/" ]]; then printf 'off'; return; fi
+                  d=$(dirname "$d")
+                done
+              }
+              for root in "$OLD_ROOT" "$TARGET_PATH"; do
+                work=$(governing_work "$root")
+                if ! (cd "$root" && GOWORK="$work" go mod download); then
+                  echo "::error::go mod download failed in ${root}"
+                  exit 1
+                fi
+              done
+              DEPS_ERR="$LOCAL_TEMP/sfw_deps_stderr.log"
+              if ! OUTPUT=$(sfw deps diff -- "$OLD_ROOT" "$TARGET_PATH" 2>"$DEPS_ERR"); then
+                sed 's/^/  [sfw] /' "$DEPS_ERR" || true
+                echo "::error::sfw deps diff failed"
+                exit 1
+              fi
+              echo "$OUTPUT"
+              HIGH_RISK=$(echo "$OUTPUT" | jq -r '.summary.high_risk_changes // 0')
+              echo "high-risk-changes=${HIGH_RISK}" >> "$GITHUB_OUTPUT"
+              if [[ "$HIGH_RISK" -gt 0 ]]; then
+                echo "::warning::${HIGH_RISK} high-risk dependency change(s)"
+                if [[ "${INPUT_FAIL_ON_ALERT:-true}" == "true" ]]; then
+                  EXIT_CODE=1
+                fi
               fi
             fi
             ;;

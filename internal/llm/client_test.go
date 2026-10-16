@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
 )
 
 // -- Helpers --
@@ -126,7 +126,7 @@ func TestCallLLM_FullFlow(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	res, err := CallLLM("msg", nil, "k", models.ModelGPT5_2, ts.URL)
+	res, err := CallLLM("msg", nil, "k", models.ModelGPT5_2, ts.URL, nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestCallLLM_InjectionDefense(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	res, err := CallLLM("attack", nil, "k", models.ModelGPT5_2, ts.URL)
+	res, err := CallLLM("attack", nil, "k", models.ModelGPT5_2, ts.URL, nil)
 	if err != nil {
 		t.Fatalf("Should not error on logic detection: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestBuildModernPrompts_Nonce(t *testing.T) {
 
 	// Verify that the nonce is correctly embedded in the delimiter
 	generateNonceFunc = func(l int) (string, error) { return "UNIQUE1", nil }
-	_, p1, _ := buildModernPrompts("test", nil)
+	_, p1, _ := buildModernPrompts("test", nil, false)
 
 	if !strings.Contains(p1, "### BEGIN DATA [UNIQUE1] ###") {
 		t.Error("Prompt missing secure nonce delimiter")
@@ -261,10 +261,29 @@ func TestCallLLM_SentinelUsesRequestedModel(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	if _, err := CallLLM("msg", nil, "k", "my-proxy-model", ts.URL); err != nil {
+	if _, err := CallLLM("msg", nil, "k", "my-proxy-model", ts.URL, nil); err != nil {
 		t.Fatalf("CallLLM: %v", err)
 	}
 	if len(seen) != 2 || seen[0] != "my-proxy-model" || seen[1] != "my-proxy-model" {
 		t.Errorf("models used = %v; want the requested model for both sentinel and audit", seen)
+	}
+}
+
+// A provider without tool support gets no tools section in its prompt,
+// even when an audit context is passed.
+func TestCallLLM_OpenAIPromptWithoutTools(t *testing.T) {
+	var bodies []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(body))
+		mockResponse(w, true, map[bool]string{true: "", false: "MATCH"}[len(bodies) == 1])
+	}))
+	defer ts.Close()
+	c := NewAuditContext("", nil, "x.go", []byte("package x\n"), &models.DiffOutput{})
+	if _, err := CallLLM("msg", nil, "k", models.ModelGPT5_2, ts.URL, c); err != nil {
+		t.Fatalf("CallLLM: %v", err)
+	}
+	if len(bodies) != 2 || strings.Contains(bodies[1], "### TOOLS ###") {
+		t.Errorf("verdict request mentions tools the provider is not offered: %d requests", len(bodies))
 	}
 }

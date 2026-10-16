@@ -1,7 +1,7 @@
 package models
 
 import (
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/detection"
 )
 
 // -- Diff & Fingerprinting --
@@ -83,7 +83,6 @@ type ScanOutput struct {
 	Alerts       []detection.ScanResult `json:"alerts"`
 	Summary      ScanSummary            `json:"summary"`
 	ScannedDeps  []string               `json:"scanned_dependencies,omitempty"`
-	Error        string                 `json:"error,omitempty"`
 }
 
 type ScanSummary struct {
@@ -118,9 +117,15 @@ type LLMResult struct {
 
 type AuditEvidence struct {
 	Function        string `json:"function"`
+	Status          string `json:"status,omitempty"`
 	RiskScore       int    `json:"risk_score"`
 	StructuralDelta string `json:"structural_delta"`
 	AddedOperations string `json:"added_operations"`
+	// OldSource and NewSource are the function's declaration on each side,
+	// numbered lines bounded by MaxInlineSourceLines; empty for the side the
+	// function does not exist on.
+	OldSource string `json:"old_source,omitempty"`
+	NewSource string `json:"new_source,omitempty"`
 }
 
 // -- OpenAI / Gemini API Types --

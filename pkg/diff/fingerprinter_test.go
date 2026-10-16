@@ -1,13 +1,15 @@
 package diff_test
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/testutil"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/testutil"
 )
 
 func TestRegression_LogicCorruption(t *testing.T) {
@@ -181,5 +183,91 @@ func TestZipper_IntCommutativity(t *testing.T) {
 
 	if !artifacts.Preserved {
 		t.Error("Zipper failed to identify swapped integer addition as preserved")
+	}
+}
+
+// FingerprintPackagesWhere returns what FingerprintPackages returns for the
+// files keep accepts and the functions without a file (the package
+// initializer), judging each closure by its own file: a //line directive
+// places G's closure in a.go.
+func TestFingerprintPackagesWhere_MatchesFilteredResults(t *testing.T) {
+	root := t.TempDir()
+	sources := map[string]string{
+		"p/a.go": "package p\n\nfunc F(x int) int {\n\tg := func() int { return x + 1 }\n\treturn g()\n}\n",
+		"p/b.go": "package p\n\nvar H = func() int { return 2 }\n\ntype T struct{}\n\nfunc (T) M() int { return 3 }\n\nfunc Asm() int\n\n" +
+			"func G() int {\n\tk := 0\n//line a.go:90\n\th := func() int { return k }\n\treturn h()\n}\n",
+	}
+	overlay := map[string][]byte{}
+	for name, src := range sources {
+		overlay[filepath.Join(root, filepath.FromSlash(name))] = []byte(src)
+	}
+	overlay[filepath.Join(root, "go.mod")] = []byte("module example.com/m\n\ngo 1.22\n")
+	overlay[filepath.Join(root, "p", "asm.s")] = []byte("// Asm's body.\n")
+	for path, src := range overlay {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, src, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	delete(overlay, filepath.Join(root, "go.mod"))
+	delete(overlay, filepath.Join(root, "p", "asm.s"))
+	pkgs, err := diff.LoadFiles(root, overlay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all, err := diff.FingerprintPackages(pkgs, ir.DefaultLiteralPolicy, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	render := func(rs []diff.FingerprintResult) string {
+		var out []string
+		for _, r := range rs {
+			file := "-"
+			if r.Filename != "" {
+				file = filepath.Base(r.Filename)
+			}
+			out = append(out, fmt.Sprintf("%s %s:%d %s", r.FunctionName, file, r.Line, r.Fingerprint))
+		}
+		return strings.Join(out, "\n")
+	}
+	for _, files := range [][]string{{"a.go"}, {"b.go"}, {}, {"a.go", "b.go"}} {
+		keep := func(f string) bool {
+			for _, k := range files {
+				if f == filepath.Join(root, "p", k) {
+					return true
+				}
+			}
+			return false
+		}
+		var want []diff.FingerprintResult
+		for _, r := range all {
+			if r.Filename == "" || keep(r.Filename) {
+				want = append(want, r)
+			}
+		}
+		got, err := diff.FingerprintPackagesWhere(pkgs, ir.DefaultLiteralPolicy, false, keep)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if render(got) != render(want) {
+			t.Errorf("keeping %v:\ngot:\n%s\nwant:\n%s", files, render(got), render(want))
+		}
+		if len(files) == 1 && files[0] == "a.go" {
+			names := render(got)
+			// The //line directive in b.go names a.go: G's closure is still
+			// b.go's.
+			if !strings.Contains(names, "example.com/m/p.F$1 a.go:4") || strings.Contains(names, "example.com/m/p.G") ||
+				!strings.Contains(names, "example.com/m/p.init -:0") {
+				t.Errorf("keeping a.go: want F's closure and the initializer, nothing of G:\n%s", names)
+			}
+		}
+		if len(files) == 1 && files[0] == "b.go" {
+			names := render(got)
+			if !strings.Contains(names, "(example.com/m/p.T).M b.go") || !strings.Contains(names, "example.com/m/p.G$1 b.go:14") || strings.Contains(names, "p.Asm") {
+				t.Errorf("keeping b.go: want T's method and G's closure, not the body-less Asm:\n%s", names)
+			}
+		}
 	}
 }

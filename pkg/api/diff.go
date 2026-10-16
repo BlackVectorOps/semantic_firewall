@@ -2,15 +2,13 @@ package api
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
-	"sort"
-	"strings"
+	"sync"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -27,56 +25,46 @@ func Diff(oldPath, newPath string) (*models.DiffOutput, error) {
 // identical to Diff otherwise.
 func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, error) {
 	processFile := func(path string) ([]diff.FingerprintResult, error) {
-		if path == "" {
-			return []diff.FingerprintResult{}, nil
+		content, absPath, err := readDiffInput(fsys, path)
+		if err != nil || content == nil {
+			return []diff.FingerprintResult{}, err
 		}
-		info, statErr := fsys.Stat(path)
-		if statErr != nil {
-			// A missing file is a valid "no functions" case (added/removed
-			// file). Any other stat error must surface so we never
-			// dereference the nil FileInfo below.
-			if os.IsNotExist(statErr) {
-				return []diff.FingerprintResult{}, nil
-			}
-			return nil, fmt.Errorf("failed to stat %s: %w", path, statErr)
-		}
-		if info.Size() > models.MaxSourceFileSize {
-			return nil, fmt.Errorf("file %s exceeds maximum analysis size of %d bytes", path, models.MaxSourceFileSize)
-		}
-		content, err := fsys.ReadFile(path)
+		paths := pathResolver{}
+		results, err := diff.FingerprintSourceWhere(absPath, string(content), ir.DefaultLiteralPolicy, false, paths.keepFiles(absPath))
 		if err != nil {
 			return nil, err
 		}
-		// An empty input (an empty file, or /dev/null standing in for the
-		// missing side of an added or deleted file) has no functions.
-		if len(strings.TrimSpace(string(content))) == 0 {
-			return []diff.FingerprintResult{}, nil
-		}
-		absPath, err := fsys.Abs(path)
-		if err != nil {
-			absPath = path
-		}
-		results, err := diff.FingerprintSource(absPath, string(content), ir.DefaultLiteralPolicy)
-		if err != nil {
-			return nil, err
-		}
-		return inFile(results, absPath), nil
+		return inFile(results, absPath, paths), nil
 	}
 
-	oldResults, err := processFile(oldPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to process old file: %w", err)
+	// Load the two versions at the same time; report the old side's error
+	// first when both fail.
+	var oldResults, newResults []diff.FingerprintResult
+	var oldErr, newErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); oldResults, oldErr = processFile(oldPath) }()
+	go func() { defer wg.Done(); newResults, newErr = processFile(newPath) }()
+	wg.Wait()
+	if oldErr != nil {
+		return nil, fmt.Errorf("failed to process old file: %w", oldErr)
 	}
-	newResults, err := processFile(newPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to process new file: %w", err)
+	if newErr != nil {
+		return nil, fmt.Errorf("failed to process new file: %w", newErr)
 	}
+	return diffResults(oldPath, newPath, oldResults, newResults, riskProfile{}), nil
+}
 
+// diffResults pairs two sets of fingerprinted functions, compares each pair,
+// scores the changes and summarizes them. It is the part of a diff that does
+// not depend on where the functions came from.
+func diffResults(oldPath, newPath string, oldResults, newResults []diff.FingerprintResult, profile riskProfile) *models.DiffOutput {
 	matched, addedFuncs, removedFuncs := diff.MatchFunctionsByTopology(
 		oldResults, newResults, models.DefaultTopologyMatchThreshold,
 	)
 
-	var functionDiffs []models.FunctionDiff
+	// An empty diff lists no functions as [], not null.
+	functionDiffs := []models.FunctionDiff{}
 	var topologyMatches []models.TopologyMatchInfo
 	preserved, modified, renamed, highRisk := 0, 0, 0, 0
 
@@ -87,7 +75,7 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 		d := CompareFunctions(oldShort, m.OldResult, m.NewResult)
 
 		if m.OldTopology != nil && m.NewTopology != nil {
-			r := assessTopologyDelta(m.OldTopology, m.NewTopology)
+			r := assessTopologyDeltaFor(m.OldTopology, m.NewTopology, profile)
 			// The canonical IR names callees without their package, so a
 			// fingerprint match can still hide a swapped-in capability
 			// (a same-named, same-signature function from another package).
@@ -144,16 +132,9 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 	for _, r := range addedFuncs {
 		risk := models.BaseRiskAddedFunc
 		delta := models.TopoDeltaNew
-
-		fn := r.GetSSAFunction()
-		if fn != nil {
-			topo := topology.ExtractTopology(fn)
-			if topo != nil {
-				a := assessTopologyDelta(nil, topo)
-				if len(a.labels) > 0 {
-					delta = a.delta()
-				}
-				risk = a.score(models.BaseRiskAddedFunc)
+		if fn := r.GetSSAFunction(); fn != nil {
+			if topo := topology.ExtractTopology(fn); topo != nil {
+				delta, risk = addedDelta(topo, profile)
 			}
 		}
 
@@ -176,20 +157,13 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 			Status:         models.StatusRemoved,
 			OldFingerprint: r.Fingerprint,
 		}
-		// Deleting a function is usually neutral, but deleting one that
-		// performed a verification (a validator, a signature check) removes
-		// that check from every caller.
 		if fn := r.GetSSAFunction(); fn != nil {
-			if topo := topology.ExtractTopology(fn); topo != nil && len(topo.Checks) > 0 {
-				checks := make([]string, 0, len(topo.Checks))
-				for c := range topo.Checks {
-					checks = append(checks, c)
-				}
-				sort.Strings(checks)
-				d.TopologyDelta = fmt.Sprintf("RemovedCheck(%s)", strings.Join(checks, ","))
-				d.RiskScore = models.RiskScoreHigh
-				highRisk++
+			if topo := topology.ExtractTopology(fn); topo != nil {
+				d.TopologyDelta, d.RiskScore = removedDelta(topo)
 			}
+		}
+		if d.RiskScore >= models.RiskScoreHigh {
+			highRisk++
 		}
 		functionDiffs = append(functionDiffs, d)
 	}
@@ -222,7 +196,7 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 		},
 		Functions:       functionDiffs,
 		TopologyMatches: topologyMatches,
-	}, nil
+	}
 }
 
 // CompareFunctions reduces two FingerprintResult values to a
@@ -249,27 +223,14 @@ func CompareFunctions(funcName string, oldResult, newResult diff.FingerprintResu
 		return d
 	}
 
-	if oldFn == nil || newFn == nil {
-		d.Status = models.StatusModified
-		return d
-	}
-
-	zipper, err := diff.NewZipper(oldFn, newFn, ir.KeepAllLiteralsPolicy)
-	if err != nil {
-		d.Status = models.StatusModified
-		return d
-	}
-
-	artifacts, err := zipper.ComputeDiff()
-	if err != nil {
-		d.Status = models.StatusModified
-		return d
-	}
-
-	d.MatchedNodes = artifacts.MatchedNodes
-	d.AddedOps = artifacts.Added
-	d.RemovedOps = artifacts.Removed
+	// The Zipper's evidence needs both SSA functions (NewZipper refuses a
+	// nil one, as results built outside a load have).
 	d.Status = models.StatusModified
+	if zipper, err := diff.NewZipper(oldFn, newFn, ir.KeepAllLiteralsPolicy); err == nil {
+		if artifacts, err := zipper.ComputeDiff(); err == nil {
+			d.MatchedNodes, d.AddedOps, d.RemovedOps = artifacts.MatchedNodes, artifacts.Added, artifacts.Removed
+		}
+	}
 	return d
 }
 
@@ -285,24 +246,42 @@ func literalsUnchanged(oldFn, newFn *ssa.Function) bool {
 // report its siblings' changes. Functions without a source file (the
 // synthesized package initializer, which runs every file's package-level
 // initializers) are kept so a payload in a package-level variable is never
-// hidden.
-func inFile(results []diff.FingerprintResult, path string) []diff.FingerprintResult {
-	want := filepath.Clean(path)
-	if resolved, err := filepath.EvalSymlinks(want); err == nil {
-		want = resolved
-	}
+// hidden. Paths are compared cleaned and with symbolic links resolved.
+func inFile(results []diff.FingerprintResult, path string, paths pathResolver) []diff.FingerprintResult {
+	want := paths.resolve(path)
 	kept := results[:0:0]
 	for _, r := range results {
-		file := r.Filename
-		if file != "" {
-			file = filepath.Clean(file)
-			if resolved, err := filepath.EvalSymlinks(file); err == nil {
-				file = resolved
-			}
-		}
-		if file == "" || file == want {
+		if r.Filename == "" || paths.resolve(r.Filename) == want {
 			kept = append(kept, r)
 		}
 	}
 	return kept
+}
+
+// pathResolver cleans a path and resolves its symbolic links once per
+// distinct path: every function of a file names the same path, and a batch
+// filters one package's functions for each of its files.
+type pathResolver map[string]string
+
+// keepFiles returns the keep function of diff.FingerprintPackagesWhere
+// that accepts the files at paths, compared as inFile compares them, so
+// only the functions inFile can keep are fingerprinted.
+func (r pathResolver) keepFiles(paths ...string) func(filename string) bool {
+	want := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		want[r.resolve(p)] = true
+	}
+	return func(filename string) bool { return want[r.resolve(filename)] }
+}
+
+func (r pathResolver) resolve(path string) string {
+	resolved, ok := r[path]
+	if !ok {
+		resolved = filepath.Clean(path)
+		if real, err := filepath.EvalSymlinks(resolved); err == nil {
+			resolved = real
+		}
+		r[path] = resolved
+	}
+	return resolved
 }

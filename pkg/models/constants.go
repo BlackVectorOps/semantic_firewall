@@ -5,10 +5,6 @@ import "time"
 //-- Section --
 
 const (
-	// FilePermReadWrite defines standard non-executable file permissions.
-	FilePermReadWrite = 0644
-	// FilePermSecure enforces strict owner-only access to prevent local privilege escalation or data leakage.
-	FilePermSecure = 0600
 	// prevents memory exhaustion attacks by capping the size of files loaded into the AST.
 	MaxSourceFileSize = 10 * 1024 * 1024 // 10 MB
 	// limits the buffer size for LLM responses to mitigate potential DoS from upstream providers.
@@ -19,6 +15,16 @@ const (
 	// short plain-text rationale indicates the model strayed from the output
 	// protocol (e.g. echoing the payload or injected instructions back).
 	MaxEvidenceRunes = 4000
+	// bounds the source of one side of a flagged function in the audit
+	// payload; the rest is a tool call away.
+	MaxInlineSourceLines = 120
+	// caps one tool result the auditor retrieves.
+	MaxToolResultBytes = 16 * 1024
+	// caps the lines on each side of a file_context request.
+	MaxFileContextRadius = 60
+	// caps the tool-call rounds of one audit; the model answers within them
+	// or the audit fails closed.
+	MaxAuditToolRounds = 8
 
 	// limits the number of attempts to reach an API before conceding failure.
 	MaxHTTPRetries = 3
@@ -26,8 +32,6 @@ const (
 	BaseRetryDelay = 500 * time.Millisecond
 	// prevents backoff times from growing indefinitely and stalling the execution pipeline.
 	MaxRetryDelay = 5 * time.Second
-	// sets a hard deadline for network requests to prevent lingering or "zombie" connections.
-	HTTPClientTimeout = 120 * time.Second
 	// acts as a circuit breaker for the entire operation to ensure the tool exits within a predictable window.
 	GlobalScanTimeout = 300 * time.Second
 
@@ -91,12 +95,6 @@ const (
 	ModelGeminiFlash = "gemini-2.5-flash"
 	// frontier OpenAI reasoning models.
 	ModelGPT5_2 = "gpt-5.2"
-	// optimized specifically for deep static analysis tasks.
-	ModelGPT5_2_Codex = "gpt-5.2-codex"
-	// legacy flagship for general purpose diffing.
-	ModelGPT4o = "gpt-4o"
-	// used for cost effective initial triaging.
-	ModelGPT4oMini = "gpt-4o-mini"
 
 	//  portable, human readable storage format for scan results.
 	BackendJSON = "json"

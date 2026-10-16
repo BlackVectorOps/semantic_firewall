@@ -1,0 +1,63 @@
+name: Test
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Vet and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Tools the Action tests need
+        # internal/actiontest runs action.yml's steps, which use jq and bc.
+        run: |
+          command -v jq >/dev/null || sudo apt-get install -y jq
+          command -v bc >/dev/null || sudo apt-get install -y bc
+
+      - name: Vet
+        run: CGO_ENABLED=0 go vet ./...
+
+      - name: Test
+        run: CGO_ENABLED=0 go test -count=1 ./...
+
+  race:
+    name: Race detector (loader, batch diff, Action)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Tools the Action tests need
+        run: |
+          command -v jq >/dev/null || sudo apt-get install -y jq
+          command -v bc >/dev/null || sudo apt-get install -y bc
+
+      - name: Test with -race
+        # The race detector needs cgo; the code under test still loads with
+        # CGO_ENABLED=0, which the loader sets for go list itself.
+        run: CGO_ENABLED=1 go test -race -count=1 ./pkg/diff/... ./pkg/api/... ./internal/actiontest/...

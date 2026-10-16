@@ -3,10 +3,11 @@ package cli
 
 import (
 	"encoding/json"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
 	"os"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/storage/jsondb"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/storage/pebbledb"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/jsondb"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/pebbledb"
 )
 
 func RunStats(dbPath string) error {
@@ -20,17 +21,15 @@ func RunStats(dbPath string) error {
 		}
 		db := scanner.GetDatabase()
 		output := struct {
-			Database          string `json:"database"`
-			Backend           string `json:"backend"`
-			Version           string `json:"version"`
-			SignatureCount    int    `json:"signature_count"`
-			TopoIndexCount    int    `json:"topology_index_count,omitempty"`
-			EntropyIndexCount int    `json:"entropy_index_count,omitempty"`
-			FileSizeBytes     int64  `json:"file_size_bytes"`
-			FileSizeHuman     string `json:"file_size_human"`
+			Database       string `json:"database"`
+			Backend        string `json:"backend"`
+			Version        string `json:"version"`
+			SignatureCount int    `json:"signature_count"`
+			FileSizeBytes  int64  `json:"file_size_bytes"`
+			FileSizeHuman  string `json:"file_size_human"`
 		}{
 			Database:       dbPath,
-			Backend:        "json",
+			Backend:        models.BackendJSON,
 			Version:        db.Version,
 			SignatureCount: len(db.Signatures),
 			FileSizeBytes:  fileSize,
@@ -64,7 +63,7 @@ func RunStats(dbPath string) error {
 		FileSizeHuman     string `json:"file_size_human"`
 	}{
 		Database:          dbPath,
-		Backend:           "pebbledb",
+		Backend:           models.BackendPebbleDB,
 		SignatureCount:    stats.SignatureCount,
 		TopoIndexCount:    stats.TopoIndexCount,
 		EntropyIndexCount: stats.EntropyIndexCount,

@@ -12,9 +12,9 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/detection"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/storage/pathguard"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/pathguard"
 )
 
 const (

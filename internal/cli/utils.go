@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/api"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 )
@@ -86,7 +86,7 @@ func levenshtein(s1, s2 string) int {
 }
 
 func SuggestCommand(cmd string) string {
-	commands := []string{"check", "diff", "audit", "index", "scan", "migrate", "stats"}
+	commands := []string{"check", "diff", "deps", "audit", "index", "scan", "migrate", "stats"}
 	bestMatch := ""
 	minDist := 100
 	cmdLower := strings.ToLower(cmd)

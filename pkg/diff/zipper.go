@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/ir"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -394,14 +394,6 @@ func (z *Zipper) compareOps(a, b ssa.Instruction) bool {
 		return z.sameType(iA.Type(), iB.Type())
 	}
 	return true
-}
-
-func IsCommutativeOp(op token.Token) bool {
-	switch op {
-	case token.ADD, token.MUL, token.AND, token.OR, token.XOR, token.EQL, token.NEQ:
-		return true
-	}
-	return false
 }
 
 func (z *Zipper) compareOperands(a, b ssa.Instruction) bool {

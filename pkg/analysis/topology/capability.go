@@ -28,6 +28,13 @@ const (
 // Closures, including range-over-func loop bodies, are fingerprinted and
 // diffed as functions of their own, so their calls are attributed to them,
 // not to the enclosing function.
+//
+// Capabilities the body can reach without naming them are recorded too, as
+// targets of their own: the methods of a value converted to an interface,
+// or passed as a type argument, that the interface or the constraint
+// declares (an exec.Cmd run through `interface{ Run() error }`), and an
+// interface method that is a capability whatever implements it
+// (http.RoundTripper's RoundTrip).
 func collectCallTargets(fn *ssa.Function, t *FunctionTopology) {
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
@@ -41,47 +48,107 @@ func collectCallTargets(fn *ssa.Function, t *FunctionTopology) {
 				}
 				recordCallTarget(t, callee)
 			}
+			switch v := instr.(type) {
+			case *ssa.MakeInterface:
+				recordInterfaceTargets(fn.Prog, t, v.X.Type(), v.Type())
+			case ssa.CallInstruction:
+				common := v.Common()
+				if common.IsInvoke() {
+					if named, ok := types.Unalias(common.Value.Type()).(*types.Named); ok && named.Obj().Pkg() != nil {
+						recordCapabilityTarget(t, named.Obj().Pkg().Path(), named.Obj().Name(), common.Method.Name())
+					}
+				} else if callee := common.StaticCallee(); callee != nil {
+					params := callee.TypeParams()
+					for i, arg := range callee.TypeArgs() {
+						recordInterfaceTargets(fn.Prog, t, arg, params.At(i).Constraint())
+					}
+				}
+			}
 		}
 	}
 }
 
-func recordCallTarget(t *FunctionTopology, callee *ssa.Function) {
-	// Package initializers are import side effects, not behaviour of the
-	// function that triggers them; counting them turns every new import into
-	// a "new call".
-	if callee.Name() == "init" && callee.Signature.Recv() == nil {
+// recordInterfaceTargets records the capability methods of concrete that
+// iface declares: once a value is converted to iface, or passed for a type
+// parameter iface constrains, the code can call them through it.
+func recordInterfaceTargets(prog *ssa.Program, t *FunctionTopology, concrete, iface types.Type) {
+	// A conversion's target and a constraint are interfaces, and concrete
+	// has the methods they declare.
+	it := iface.Underlying().(*types.Interface)
+	if it.NumMethods() == 0 || types.IsInterface(concrete) {
 		return
 	}
+	mset := prog.MethodSets.MethodSet(concrete)
+	for i := 0; i < it.NumMethods(); i++ {
+		m := it.Method(i)
+		pkgPath, recv, name := funcIdentity(mset.Lookup(m.Pkg(), m.Name()).Obj().(*types.Func))
+		recordCapabilityTarget(t, pkgPath, recv, name)
+	}
+}
 
-	var pkgPath, recv, name string
+// recordCapabilityTarget records a callee the body reaches without naming
+// it, when it is a capability.
+func recordCapabilityTarget(t *FunctionTopology, pkgPath, recv, name string) {
+	if class := ClassifyCallTarget(pkgPath, recv, name); class != "" {
+		key := callTargetKey(pkgPath, recv, name)
+		t.CallTargets[key]++
+		t.Capabilities[key] = class
+	}
+}
+
+func recordCallTarget(t *FunctionTopology, callee *ssa.Function) {
+	pkgPath, recv, name, ok := calleeIdentity(callee)
+	if !ok {
+		return
+	}
+	key := callTargetKey(pkgPath, recv, name)
+	t.CallTargets[key]++
+	if class := ClassifyCallTarget(pkgPath, recv, name); class != "" {
+		t.Capabilities[key] = class
+	}
+}
+
+// calleeIdentity returns the import path, receiver type name ("" for a
+// package-level function) and name a call target is classified by. ok is
+// false for a package initializer: those are import side effects, not
+// behaviour of the function that triggers them, and counting them would turn
+// every new import into a "new call".
+func calleeIdentity(callee *ssa.Function) (pkgPath, recv, name string, ok bool) {
+	if callee.Name() == "init" && callee.Signature.Recv() == nil {
+		return "", "", "", false
+	}
 	// Object() resolves generic instantiations and bound/thunk wrappers back
 	// to the declared function, so "(*T).M$bound" is recorded as "(T).M".
-	if obj, ok := callee.Object().(*types.Func); ok {
-		name = obj.Name()
-		if obj.Pkg() != nil {
-			pkgPath = obj.Pkg().Path()
-		}
-		if sig, ok := obj.Type().(*types.Signature); ok && sig.Recv() != nil {
-			recv = receiverTypeName(sig.Recv().Type())
-		}
+	if obj, isFunc := callee.Object().(*types.Func); isFunc {
+		pkgPath, recv, name = funcIdentity(obj)
 	} else {
 		name = callee.Name()
 		if callee.Pkg != nil && callee.Pkg.Pkg != nil {
 			pkgPath = callee.Pkg.Pkg.Path()
 		}
 	}
+	return pkgPath, recv, name, true
+}
 
-	key := pkgPath + "." + name
+// funcIdentity returns the import path, receiver type name and name of a
+// declared function or method.
+func funcIdentity(obj *types.Func) (pkgPath, recv, name string) {
+	if obj.Pkg() != nil {
+		pkgPath = obj.Pkg().Path()
+	}
+	if recvVar := obj.Type().(*types.Signature).Recv(); recvVar != nil {
+		recv = receiverTypeName(recvVar.Type())
+	}
+	return pkgPath, recv, obj.Name()
+}
+
+// callTargetKey is the CallTargets key of a callee: "os/exec.Command",
+// "(net/http.Client).Do".
+func callTargetKey(pkgPath, recv, name string) string {
 	if recv != "" {
-		key = "(" + pkgPath + "." + recv + ")." + name
+		return "(" + pkgPath + "." + recv + ")." + name
 	}
-	t.CallTargets[key]++
-	if class := ClassifyCallTarget(pkgPath, recv, name); class != "" {
-		t.Capabilities[key] = class
-	}
-	if IsVerificationCall(pkgPath, recv, name) {
-		t.Checks[key] = true
-	}
+	return pkgPath + "." + name
 }
 
 // IsVerificationCall reports whether a callee, identified like
@@ -91,7 +158,12 @@ func recordCallTarget(t *FunctionTopology, callee *ssa.Function) {
 func IsVerificationCall(pkgPath, recv, name string) bool {
 	switch pkgPath {
 	case "crypto/subtle":
-		return strings.HasPrefix(name, "ConstantTime")
+		// The comparisons; ConstantTimeCopy and ConstantTimeSelect compare
+		// nothing.
+		switch name {
+		case "ConstantTimeCompare", "ConstantTimeEq", "ConstantTimeByteEq", "ConstantTimeLessOrEq":
+			return true
+		}
 	case "crypto/hmac":
 		return name == "Equal"
 	case "crypto/ed25519", "crypto/ecdsa", "crypto/rsa":
@@ -110,8 +182,10 @@ func IsVerificationCall(pkgPath, recv, name string) bool {
 }
 
 func receiverTypeName(t types.Type) string {
+	// A method may be declared on an alias of its type.
+	t = types.Unalias(t)
 	if ptr, ok := t.(*types.Pointer); ok {
-		t = ptr.Elem()
+		t = types.Unalias(ptr.Elem())
 	}
 	if named, ok := t.(*types.Named); ok {
 		return named.Obj().Name()
@@ -125,9 +199,24 @@ func receiverTypeName(t types.Type) string {
 func ClassifyCallTarget(pkgPath, recv, name string) string {
 	switch pkgPath {
 	case "os/exec":
+		// LookPath searches PATH and runs nothing.
+		if recv == "" && name == "LookPath" {
+			return ""
+		}
 		return CapExec
+	case "io/ioutil":
+		switch name {
+		case "WriteFile", "TempFile", "TempDir":
+			return CapFilesystem
+		}
 	case "os":
 		switch recv {
+		case "File":
+			// An open file's metadata, whatever mode it was opened in.
+			switch name {
+			case "Chmod", "Chown", "Truncate":
+				return CapFilesystem
+			}
 		case "":
 			switch name {
 			case "StartProcess":
@@ -147,7 +236,7 @@ func ClassifyCallTarget(pkgPath, recv, name string) string {
 	case "syscall", "golang.org/x/sys/unix", "golang.org/x/sys/windows":
 		// Methods are on value types like Errno and Signal; only the raw
 		// entry points are capabilities.
-		if recv != "" {
+		if recv != "" || syscallHelpers[name] {
 			return ""
 		}
 		switch name {
@@ -163,7 +252,7 @@ func ClassifyCallTarget(pkgPath, recv, name string) string {
 		}
 	case "net/http":
 		switch recv {
-		case "", "Client", "Server", "Transport":
+		case "", "Client", "Server", "Transport", "RoundTripper":
 			switch name {
 			case "Get", "Post", "PostForm", "Head", "Do", "RoundTrip",
 				"ListenAndServe", "ListenAndServeTLS", "Serve", "ServeTLS":
@@ -191,7 +280,9 @@ func ClassifyCallTarget(pkgPath, recv, name string) string {
 			return CapExec
 		}
 	case "reflect":
-		if recv == "Value" && (name == "Call" || name == "CallSlice") {
+		// MethodByName and Method return a method as a func value the code
+		// can call without Call.
+		if recv == "Value" && (name == "Call" || name == "CallSlice" || name == "MethodByName" || name == "Method") {
 			return CapReflection
 		}
 	}
@@ -203,11 +294,23 @@ func ClassifyCallTarget(pkgPath, recv, name string) string {
 // file.
 func isFilesystemMutation(name string) bool {
 	switch name {
-	case "WriteFile", "Create", "OpenFile", "Remove", "RemoveAll", "Rename",
-		"Chmod", "Chown", "Lchown", "Truncate", "Symlink", "Link":
+	case "WriteFile", "Create", "CreateTemp", "OpenFile", "Remove", "RemoveAll", "Rename",
+		"Chmod", "Chown", "Lchown", "Chtimes", "Truncate", "Symlink", "Link",
+		"Mkdir", "MkdirAll", "MkdirTemp":
 		return true
 	}
 	return false
+}
+
+// syscallHelpers are the functions of syscall, x/sys/unix and x/sys/windows
+// that convert or compute and make no system call.
+var syscallHelpers = map[string]bool{
+	"BytePtrFromString": true, "ByteSliceFromString": true, "StringBytePtr": true, "StringByteSlice": true,
+	"BytePtrToString": true, "ByteSliceToString": true,
+	"UTF16FromString": true, "UTF16PtrFromString": true, "UTF16ToString": true, "UTF16PtrToString": true,
+	"StringToUTF16": true, "StringToUTF16Ptr": true,
+	"NsecToTimespec": true, "NsecToTimeval": true, "TimespecToNsec": true, "TimevalToNsec": true,
+	"NsecToFiletime": true, "Getpagesize": true, "CmsgLen": true, "CmsgSpace": true,
 }
 
 func hasAnyPrefix(s string, prefixes ...string) bool {
@@ -217,4 +320,15 @@ func hasAnyPrefix(s string, prefixes ...string) bool {
 		}
 	}
 	return false
+}
+
+// CalleeCapability returns the CallTargets key of a callee and its
+// capability class ("" when it has none). ok is false for a package
+// initializer, which is not a call target.
+func CalleeCapability(callee *ssa.Function) (key, class string, ok bool) {
+	pkgPath, recv, name, ok := calleeIdentity(callee)
+	if !ok {
+		return "", "", false
+	}
+	return callTargetKey(pkgPath, recv, name), ClassifyCallTarget(pkgPath, recv, name), true
 }

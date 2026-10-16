@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/internal/cli"
-	"github.com/BlackVectorOps/semantic_firewall/v5/internal/llm"
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/models"
-	version "github.com/BlackVectorOps/semantic_firewall/v5/pkg/version"
+	"github.com/BlackVectorOps/semantic_firewall/v6/internal/cli"
+	"github.com/BlackVectorOps/semantic_firewall/v6/internal/llm"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
+	version "github.com/BlackVectorOps/semantic_firewall/v6/pkg/version"
 )
 
 // Package main provides the sfw CLI tool for semantic fingerprinting and malware scanning of Go source files.
@@ -29,6 +29,9 @@ func main() {
 
 	// -- Standard CLI --
 
+	// Decide here, not in a worker: a worker uses what its parent decided.
+	cli.ConfigureTypeCache()
+
 	// Configure help text
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `sfw - Semantic Firewall CLI
@@ -38,6 +41,8 @@ A Semantic Malware Scanner for Go source files.
 Usage (flags must come before file arguments):
   sfw check [--strict] <file.go|directory>    Fingerprint a file or recursively scan a directory
   sfw diff <old.go> <new.go>                  Semantic diff between two Go files
+  sfw diff --batch <pairs-file>               Diff many file pairs, loading each tree once
+  sfw deps diff <old-dir> <new-dir>           Diff the dependencies two module trees compile in
   sfw audit <old.go> <new.go> "<message>"     Audit a commit for deception using Semantic Analysis + LLM
   sfw index --name <name> <file.go>           Index a malware sample into the signature database
   sfw scan --db <path> <file.go|directory>    Scan code against the signature database
@@ -47,6 +52,8 @@ Usage (flags must come before file arguments):
 Commands:
   check   Generate semantic fingerprints (Level 1: Signal)
   diff    Compute semantic delta using the Zipper algorithm (Level 2: Context)
+  deps    deps diff: compare the third-party code compiled into two trees of a
+          module (functions, newly reachable capabilities, unanalyzed files)
   audit   Verify if commit message matches structural code changes (Level 3: Intent)
           Uses internal diff engine and optional LLM API to detect "Lies".
           Flags:
@@ -67,6 +74,7 @@ Commands:
 Examples:
   sfw check ./cmd/app
   sfw diff old.go new.go
+  sfw deps diff ../base .
   ANTHROPIC_API_KEY=... sfw audit old.go new.go "fix typo"
   sfw index --name "Beacon_v1" --severity CRITICAL malware.go
   sfw scan --db signatures.db ./src
@@ -91,6 +99,10 @@ Examples:
 
 	diffCmd := flag.NewFlagSet("diff", flag.ExitOnError)
 	diffNoSandbox := diffCmd.Bool("no-sandbox", false, "Disable gVisor/Namespace isolation")
+	diffBatch := diffCmd.String("batch", "", "File of NUL-terminated old/new path pairs to diff in one run")
+
+	depsDiffCmd := flag.NewFlagSet("deps diff", flag.ExitOnError)
+	depsDiffNoSandbox := depsDiffCmd.Bool("no-sandbox", false, "Disable gVisor/Namespace isolation")
 
 	auditCmd := flag.NewFlagSet("audit", flag.ExitOnError)
 	auditApiKey := auditCmd.String("api-key", "", "API Key (WARNING: Prefer ENV vars to avoid history leaks)")
@@ -106,7 +118,7 @@ Examples:
 
 	scanCmd := flag.NewFlagSet("scan", flag.ExitOnError)
 	scanDB := scanCmd.String("db", "", "Path to signatures database")
-	scanThreshold := scanCmd.Float64("threshold", 0.75, "Match confidence threshold")
+	scanThreshold := scanCmd.Float64("threshold", models.DefaultScanThreshold, "Match confidence threshold")
 	scanExact := scanCmd.Bool("exact", false, "Use exact topology matching only")
 	scanDeps := scanCmd.Bool("deps", false, "Scan imported dependencies")
 	scanDepsDepth := scanCmd.String("deps-depth", "direct", "Dependency depth: direct or transitive")
@@ -138,11 +150,37 @@ Examples:
 		if err := diffCmd.Parse(os.Args[2:]); err != nil {
 			cli.ExitError(err)
 		}
+		if *diffBatch != "" {
+			if diffCmd.NArg() != 0 {
+				fmt.Fprintln(os.Stderr, "Usage: sfw diff --batch <pairs-file> (no positional arguments)")
+				os.Exit(1)
+			}
+			if err := cli.RunDiffBatch(*diffBatch, *diffNoSandbox); err != nil {
+				cli.ExitError(err)
+			}
+			break
+		}
 		if diffCmd.NArg() < 2 {
 			diffCmd.Usage()
 			os.Exit(1)
 		}
 		if err := cli.RunDiff(diffCmd.Arg(0), diffCmd.Arg(1), *diffNoSandbox); err != nil {
+			cli.ExitError(err)
+		}
+
+	case "deps":
+		if len(os.Args) < 3 || os.Args[2] != "diff" {
+			fmt.Fprintln(os.Stderr, "Usage: sfw deps diff [--no-sandbox] <old-module-dir> <new-module-dir>")
+			os.Exit(1)
+		}
+		if err := depsDiffCmd.Parse(os.Args[3:]); err != nil {
+			cli.ExitError(err)
+		}
+		if depsDiffCmd.NArg() < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: sfw deps diff [--no-sandbox] <old-module-dir> <new-module-dir>")
+			os.Exit(1)
+		}
+		if err := cli.RunDepsDiff(depsDiffCmd.Arg(0), depsDiffCmd.Arg(1), *depsDiffNoSandbox); err != nil {
 			cli.ExitError(err)
 		}
 
@@ -274,11 +312,25 @@ func runWorker(args []string) error {
 		}
 		return cli.RunDiffLogic(fsys, os.Stdout, args[1], args[2])
 
+	case "diff-batch":
+		// sfw internal-worker diff-batch <pairs-file>
+		if len(args) != 2 {
+			return fmt.Errorf("diff-batch worker requires a pairs file; got %d arguments", len(args)-1)
+		}
+		return cli.RunDiffBatchLogic(fsys, os.Stdout, args[1])
+
+	case "deps-diff":
+		// sfw internal-worker deps-diff <old-dir> <new-dir>
+		if len(args) != 3 {
+			return fmt.Errorf("deps-diff worker requires two directories; got %d arguments", len(args)-1)
+		}
+		return cli.RunDepsDiffLogic(os.Stdout, args[1], args[2])
+
 	case "scan":
 		fs := flag.NewFlagSet("scan", flag.ExitOnError)
 		db := fs.String("db", "", "")
 		target := fs.String("target", "", "")
-		threshold := fs.Float64("threshold", 0.75, "")
+		threshold := fs.Float64("threshold", models.DefaultScanThreshold, "")
 		exact := fs.Bool("exact", false, "")
 		deps := fs.Bool("deps", false, "")
 		depsDepth := fs.String("deps-depth", "direct", "")

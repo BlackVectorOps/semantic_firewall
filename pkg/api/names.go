@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/BlackVectorOps/semantic_firewall/v5/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
 	"golang.org/x/tools/go/ssa"
 )
 
