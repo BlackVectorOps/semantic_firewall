@@ -14,6 +14,17 @@ I adhere to Semantic Versioning. Security patches will be backported to the curr
 | < 1.0 | :x: | **End of Life.** Pre-release versions are not supported. |
 
 
+### What counts as critical for 5.x
+
+A fix is backported to 5.x when the bug lets a change through a check that 5.x already ships, with no error:
+- **Fail-open diffs:** `sfw diff` or `sfw check` drops, hides or misattributes a changed function, or reports it as unchanged or removed when it is not.
+- **Bypass of a 5.x signal:** a change that a 5.x signal is documented to score (a new capability call, a removed check, obfuscation) scores lower than its rule says.
+- **Sandbox escape:** analyzed code runs or writes outside the gVisor sandbox's mounts.
+- **Action passes on a failure:** the GitHub Action reports success when `sfw` failed or analyzed nothing.
+
+Signals, capability classes and commands added in 6.x are not backported. Neither are false positives, crashes that fail the run, or speed fixes.
+
+
 ## Reporting a Vulnerability
 
 
@@ -59,7 +70,6 @@ The Semantic Firewall is designed to detect logic changes. A vulnerability in th
     * *Note:* Two pieces of code with the *same* logic but different syntax (e.g., `for` vs `range`) producing the same fingerprint is a feature, not a bug.
 
 2.  **Canonicalizer Injection:** You can inject IR instructions or break out of the string/type sanitization layer to alter the resulting hash.
-
 
 3.  **Detection Bypass:** A change that removes a guard or a verification check, weakens a TLS, cookie or SSH setting, or adds a capability call, and that `sfw diff` scores as low risk where the README says it should not. Examples: a deleted guard that does not raise `Unguarded`, or a check swapped for a no-op that reads as `ReplacedCheck`.
 
