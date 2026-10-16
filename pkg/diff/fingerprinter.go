@@ -278,9 +278,8 @@ func VendorDir(dir string) string {
 	}
 	v := goDirective(data)
 	if v == "" {
-		if minVersion != "go1.14" {
-			return "" // a go.work without a go line never vendors
-		}
+		// The go command's default for a go.mod without a go line; below
+		// go1.22, so a go.work without one never vendors either.
 		v = "1.16"
 	}
 	if version.Compare("go"+v, minVersion) < 0 {

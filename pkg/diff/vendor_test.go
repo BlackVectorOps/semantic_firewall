@@ -23,7 +23,9 @@ func TestVendorDir(t *testing.T) {
 		{"module go 1.14", map[string]string{"go.mod": "module m\n\ngo 1.14\n", "vendor": ""}, "", "vendor"},
 		{"module go 1.13", map[string]string{"go.mod": "module m\n\ngo 1.13\n", "vendor": ""}, "", ""},
 		{"module without a go line", map[string]string{"go.mod": "module m\n", "vendor": ""}, "", "vendor"},
-		{"go line with a comment", map[string]string{"go.mod": "module m\n\ngo 1.22 // toolchain\n", "vendor": ""}, "", "vendor"},
+		// The comment must not hide the version: unread, a missing go line
+		// would count as 1.16 and vendor.
+		{"go line with a comment", map[string]string{"go.mod": "module m\n\ngo 1.13 // old\n", "vendor": ""}, "", ""},
 		{"no vendor directory", map[string]string{"go.mod": "module m\n\ngo 1.22\n"}, "", ""},
 		{"vendor is a file", map[string]string{"go.mod": "module m\n\ngo 1.22\n", "vendor": "x"}, "", ""},
 		{"no go.mod", map[string]string{"vendor": ""}, "", ""},
