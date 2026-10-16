@@ -268,3 +268,22 @@ func TestCallLLM_SentinelUsesRequestedModel(t *testing.T) {
 		t.Errorf("models used = %v; want the requested model for both sentinel and audit", seen)
 	}
 }
+
+// A provider without tool support gets no tools section in its prompt,
+// even when an audit context is passed.
+func TestCallLLM_OpenAIPromptWithoutTools(t *testing.T) {
+	var bodies []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(body))
+		mockResponse(w, true, map[bool]string{true: "", false: "MATCH"}[len(bodies) == 1])
+	}))
+	defer ts.Close()
+	c := NewAuditContext("", nil, "x.go", []byte("package x\n"), &models.DiffOutput{})
+	if _, err := CallLLM("msg", nil, "k", models.ModelGPT5_2, ts.URL, c); err != nil {
+		t.Fatalf("CallLLM: %v", err)
+	}
+	if len(bodies) != 2 || strings.Contains(bodies[1], "### TOOLS ###") {
+		t.Errorf("verdict request mentions tools the provider is not offered: %d requests", len(bodies))
+	}
+}

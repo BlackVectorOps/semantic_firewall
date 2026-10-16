@@ -327,3 +327,190 @@ func TestCallLLM_ClaudeToolUseWithoutContext(t *testing.T) {
 		t.Errorf("verdict %q err %v; want ERROR with an error", res.Verdict, err)
 	}
 }
+
+// claudeServer answers sentinel calls with sentinel(n) for the nth one and
+// audit calls with audit(n, req) for the nth one, recording every request.
+type claudeServer struct {
+	sentinel func(n int, w http.ResponseWriter)
+	audit    func(n int, req map[string]any, w http.ResponseWriter)
+	requests []map[string]any
+	headers  []http.Header
+	ns, na   int
+}
+
+func (s *claudeServer) start(t *testing.T) *httptest.Server {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		s.requests = append(s.requests, req)
+		s.headers = append(s.headers, r.Header.Clone())
+		if claudeRequestKind(req) == "sentinel" {
+			s.ns++
+			if s.sentinel != nil {
+				s.sentinel(s.ns, w)
+				return
+			}
+			claudeMessage(w, `{"safe": true, "analysis": "clean"}`, "end_turn")
+			return
+		}
+		s.na++
+		s.audit(s.na, req, w)
+	}))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func claudeVerdict(w http.ResponseWriter) {
+	claudeMessage(w, `{"verdict": "MATCH", "evidence": "fine"}`, "end_turn")
+}
+
+// Every way the verdict call can fail ends in ERROR with an error.
+func TestCallLLM_ClaudeAuditFailuresFailClosed(t *testing.T) {
+	cases := []struct {
+		name  string
+		audit func(n int, req map[string]any, w http.ResponseWriter)
+		want  string
+	}{
+		{"api error", func(n int, req map[string]any, w http.ResponseWriter) {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}`))
+		}, "400"},
+		{"refusal", func(n int, req map[string]any, w http.ResponseWriter) { claudeMessage(w, "", "refusal") }, "refused"},
+		{"empty", func(n int, req map[string]any, w http.ResponseWriter) { claudeMessage(w, "", "end_turn") }, "empty response"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &claudeServer{audit: tc.audit}
+			ts := s.start(t)
+			c := handleContext()
+			res, err := CallLLM("minor cleanup", handleEvidence(c), "k", models.ModelClaudeOpus, ts.URL, c)
+			if err == nil || res.Verdict != models.VerdictError || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("verdict %q err %v; want ERROR with an error naming %q", res.Verdict, err, tc.want)
+			}
+		})
+	}
+}
+
+// A sentinel failure on retrieved source fails closed; the model never
+// sees the source.
+func TestCallLLM_ClaudeRetrievedSentinelError(t *testing.T) {
+	s := &claudeServer{
+		sentinel: func(n int, w http.ResponseWriter) {
+			if n == 1 {
+				claudeMessage(w, `{"safe": true, "analysis": "clean"}`, "end_turn")
+				return
+			}
+			claudeMessage(w, `not json`, "end_turn")
+		},
+		audit: func(n int, req map[string]any, w http.ResponseWriter) {
+			claudeToolUse(w, map[string]any{"name": "list_functions", "input": map[string]any{"side": "new"}})
+		},
+	}
+	ts := s.start(t)
+	c := handleContext()
+	res, err := CallLLM("minor cleanup", handleEvidence(c), "k", models.ModelClaudeOpus, ts.URL, c)
+	if err == nil || res.Verdict != models.VerdictError || !strings.Contains(err.Error(), "retrieved source") || s.na != 1 {
+		t.Errorf("verdict %q err %v after %d audit calls; want ERROR on the retrieved source after 1", res.Verdict, err, s.na)
+	}
+}
+
+// A round whose calls all fail has nothing to screen: no sentinel call. A
+// text block beside the tool call gets no tool result, and the assistant
+// turn precedes its results in the history.
+func TestCallLLM_ClaudeToolRoundShape(t *testing.T) {
+	s := &claudeServer{audit: func(n int, req map[string]any, w http.ResponseWriter) {
+		if n == 2 {
+			msgs, _ := req["messages"].([]any)
+			prev, _ := json.Marshal(msgs[len(msgs)-2])
+			last, _ := json.Marshal(msgs[len(msgs)-1])
+			if !strings.Contains(string(prev), `"role":"assistant"`) || !strings.Contains(string(prev), `"tool_use"`) {
+				t.Errorf("turn before the results = %s; want the assistant's tool_use", prev)
+			}
+			if strings.Count(string(last), `"tool_result"`) != 1 {
+				t.Errorf("results turn = %s; want exactly one tool_result", last)
+			}
+			claudeVerdict(w)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id": "msg_tool", "type": "message", "role": "assistant", "model": models.ModelClaudeOpus,
+			"content": []map[string]any{
+				{"type": "text", "text": "Let me look."},
+				{"type": "tool_use", "id": "tu_0", "name": "function_source", "input": map[string]any{"function": "Nope", "side": "new"}},
+			},
+			"stop_reason": "tool_use", "usage": map[string]any{"input_tokens": 1, "output_tokens": 1},
+		})
+	}}
+	ts := s.start(t)
+	c := handleContext()
+	res, err := CallLLM("minor cleanup", handleEvidence(c), "k", models.ModelClaudeOpus, ts.URL, c)
+	if err != nil || res.Verdict != models.VerdictMatch {
+		t.Fatalf("verdict %q err %v; want MATCH", res.Verdict, err)
+	}
+	if s.ns != 1 {
+		t.Errorf("%d sentinel calls; want 1 (the payload only)", s.ns)
+	}
+}
+
+// The tools section of the system prompt is there exactly when tools are
+// offered.
+func TestCallLLM_ClaudePromptMentionsToolsOnlyWithTools(t *testing.T) {
+	for _, withCtx := range []bool{true, false} {
+		s := &claudeServer{audit: func(n int, req map[string]any, w http.ResponseWriter) { claudeVerdict(w) }}
+		ts := s.start(t)
+		var c *AuditContext
+		if withCtx {
+			c = handleContext()
+		}
+		if _, err := CallLLM("minor cleanup", nil, "k", models.ModelClaudeOpus, ts.URL, c); err != nil {
+			t.Fatalf("CallLLM: %v", err)
+		}
+		audit := s.requests[len(s.requests)-1]
+		system, _ := json.Marshal(audit["system"])
+		if got := strings.Contains(string(system), "### TOOLS ###"); got != withCtx {
+			t.Errorf("context %v: tools section in the prompt %v", withCtx, got)
+		}
+	}
+}
+
+// With no key or base URL given, the SDK's own resolution applies: the
+// environment's key and base URL are used, not overridden with empty ones.
+func TestCallLLM_ClaudeUsesEnvironmentCredentials(t *testing.T) {
+	s := &claudeServer{audit: func(n int, req map[string]any, w http.ResponseWriter) { claudeVerdict(w) }}
+	ts := s.start(t)
+	t.Setenv("ANTHROPIC_API_KEY", "env-key")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("ANTHROPIC_BASE_URL", ts.URL)
+	if _, err := CallLLM("msg", nil, "", models.ModelClaudeOpus, "", nil); err != nil {
+		t.Fatalf("CallLLM: %v", err)
+	}
+	for i, h := range s.headers {
+		if h.Get("X-Api-Key") != "env-key" {
+			t.Errorf("request %d x-api-key = %q; want the environment's", i, h.Get("X-Api-Key"))
+		}
+	}
+}
+
+// A nonce failure inside the tool loop is an error, not an unfenced round.
+func TestCallLLM_ClaudeLoopNonceFailure(t *testing.T) {
+	orig := generateNonceFunc
+	defer func() { generateNonceFunc = orig }()
+	calls := 0
+	generateNonceFunc = func(n int) (string, error) {
+		calls++
+		if calls == 3 { // payload fence, sentinel fence, then the loop's
+			return "", fmt.Errorf("no entropy")
+		}
+		return orig(n)
+	}
+	s := &claudeServer{audit: func(n int, req map[string]any, w http.ResponseWriter) { claudeVerdict(w) }}
+	ts := s.start(t)
+	c := handleContext()
+	res, err := CallLLM("msg", nil, "k", models.ModelClaudeOpus, ts.URL, c)
+	if err == nil || res.Verdict != models.VerdictError || s.na != 0 {
+		t.Errorf("verdict %q err %v after %d audit calls; want ERROR before any", res.Verdict, err, s.na)
+	}
+}

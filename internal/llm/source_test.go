@@ -29,6 +29,14 @@ type G[P any] struct{}
 func (g *G[P]) Get() {}
 
 func Gen[P any](p P) { Gen[int](1) }
+
+type H[P, Q any] struct{}
+
+func (h H[P, Q]) Two() { (Gen[int])(2); (Gen)[int](3); ((helper))(4); Pair[int, string](1, "") }
+
+func Pair[A, B any](a A, b B) {}
+
+func (t *T) O() { t.N(); mk().N() }
 `
 
 func TestSourceIndex_NamesAndRanges(t *testing.T) {
@@ -38,7 +46,7 @@ func TestSourceIndex_NamesAndRanges(t *testing.T) {
 	for _, fn := range idx.Functions() {
 		names = append(names, fn.Name)
 	}
-	want := []string{"F", "helper", "(*T).M", "(T).N", "(*G).Get", "Gen"}
+	want := []string{"F", "helper", "(*T).M", "(T).N", "(*G).Get", "Gen", "(H).Two", "Pair", "(*T).O"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("functions = %v; want %v", names, want)
 	}
@@ -97,15 +105,34 @@ func TestSourceIndex_CalleesAndCallers(t *testing.T) {
 		t.Errorf("callees(Gen) = %v; want %v (instantiation stripped)", gen.Callees, want)
 	}
 
-	if got, want := idx.Callers("helper"), []string{"F", "(*T).M"}; !slices.Equal(got, want) {
+	// Parenthesized and instantiated callees, one or two type arguments,
+	// name the function.
+	two, _, _ := idx.Lookup("(H).Two")
+	if want := []string{"Gen", "Pair", "helper"}; !slices.Equal(two.Callees, want) {
+		t.Errorf("callees((H).Two) = %v; want %v", two.Callees, want)
+	}
+
+	if got, want := idx.Callers("helper"), []string{"F", "(*T).M", "(H).Two"}; !slices.Equal(got, want) {
 		t.Errorf("Callers(helper) = %v; want %v", got, want)
 	}
 	// A method is matched by its method name through any receiver.
-	if got, want := idx.Callers("(T).N"), []string{"(*T).M"}; !slices.Equal(got, want) {
+	// A caller is listed once however many of its calls match.
+	if got, want := idx.Callers("(T).N"), []string{"(*T).M", "(*T).O"}; !slices.Equal(got, want) {
 		t.Errorf("Callers((T).N) = %v; want %v", got, want)
+	}
+	// A closure name resolves to its enclosing declaration.
+	if got, want := idx.Callers("helper$1"), []string{"F", "(*T).M", "(H).Two"}; !slices.Equal(got, want) {
+		t.Errorf("Callers(helper$1) = %v; want %v", got, want)
 	}
 	if got := idx.Callers("(*G).Get"); got != nil {
 		t.Errorf("Callers((*G).Get) = %v; want none", got)
+	}
+}
+
+// An empty file has no lines.
+func TestSourceIndex_Empty(t *testing.T) {
+	if n := NewSourceIndex("p.go", []byte{}).LineCount(); n != 0 {
+		t.Errorf("LineCount of an empty file = %d; want 0", n)
 	}
 }
 

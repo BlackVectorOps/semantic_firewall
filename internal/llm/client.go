@@ -109,9 +109,6 @@ func CallLLM(commitMsg string, evidence []models.AuditEvidence, apiKey, model, a
 	var result models.LLMResult
 	switch {
 	case isClaude(model):
-		if !withTools {
-			audit = nil
-		}
 		result, err = callClaude(ctx, sysPrompt, userPayload, apiKey, model, apiBase, audit)
 	case isGemini(model):
 		result, err = callGemini(ctx, sysPrompt, userPayload, apiKey, model, apiBase)
