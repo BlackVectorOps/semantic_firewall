@@ -185,85 +185,11 @@ func TestCanonicalizer_HoistSafety(t *testing.T) {
 	}
 }
 
-func TestCanonicalizer_SinkingOrder(t *testing.T) {
-	t.Parallel()
-
-	// Manual construction test to ensure 'heads' logic works.
-	// Since we can't easily force SSA sinking without writing a pass,
-	// we use the ExportTest_MarkSunk hooks.
-	// NOTE: We use a dynamic size 'n' to prevent constant folding of len(a).
-	src := `package main
-		func sink(n int) {
-			a := make([]int, n)
-			_ = len(a)
-		}`
-
-	fn := testutil.CompileAndGetFunction(t, src, "sink")
-	c := ir.NewCanonicalizer(ir.DefaultLiteralPolicy)
-	defer ir.ReleaseCanonicalizer(c)
-
-	var makeInstr ssa.Instruction
-	var lenInstr ssa.Instruction
-
-	for _, b := range fn.Blocks {
-		for _, instr := range b.Instrs {
-			if _, ok := instr.(*ssa.MakeSlice); ok {
-				makeInstr = instr
-			}
-			if call, ok := instr.(*ssa.Call); ok && call.Call.Value.Name() == "len" {
-				lenInstr = instr
-			}
-		}
-	}
-
-	if makeInstr == nil || lenInstr == nil {
-		// Just skip if we can't find them precisely due to optimizations/SSA variances
-		t.Skip("Instructions not found")
-	}
-
-	// We sink 'make' to the same block (simulating it coming from a predecessor).
-	// If we mark it sunk, it should go to HEAD (executing before body).
-	// 'len' stays in BODY.
-	// Result: Make (Head) -> Len (Body). Correct dependency order.
-	c.ExportTest_MarkSunk(makeInstr)
-
-	out := c.CanonicalizeFunction(fn)
-
-	makeIdx := strings.Index(out, "MakeSlice")
-	lenIdx := strings.Index(out, "Call <builtin:len>")
-
-	if makeIdx == -1 || lenIdx == -1 {
-		t.Fatal("Instructions missing from output")
-	}
-
-	if lenIdx < makeIdx {
-		t.Errorf("Dependency violation: 'len' (Body) appeared before 'MakeSlice' (Sunk/Head).")
-	}
-}
-
-// mockSCEVWithParam implements Loop TripCount simulation using a specific parameter
-type mockSCEVWithParam struct {
-	Param ssa.Value
-}
-
-func (m *mockSCEVWithParam) String() string                    { return "raw_" + m.Param.Name() }
-func (m *mockSCEVWithParam) Type() types.Type                  { return types.Typ[types.Int] }
-func (m *mockSCEVWithParam) IsLoopInvariant(l *loop.Loop) bool { return true }
-func (m *mockSCEVWithParam) StringWithRenamer(r loop.Renamer) string {
-	// The renamer should convert the raw param (e.g. "x") to canonical "p0"
-	return "canonical_" + r(m.Param)
-}
-func (m *mockSCEVWithParam) EvaluateAt(k *big.Int, cache map[loop.SCEV]*big.Int) *big.Int { return nil }
-func (m *mockSCEVWithParam) Name() string                                                 { return m.String() }
-func (m *mockSCEVWithParam) Parent() *ssa.Function                                        { return nil }
-func (m *mockSCEVWithParam) Referrers() *[]ssa.Instruction                                { return nil }
-func (m *mockSCEVWithParam) Pos() token.Pos                                               { return token.NoPos }
-
 func TestCanonicalizer_TripCountNaming(t *testing.T) {
 	t.Parallel()
 
-	// Verify that TripCount values are passed through the renamer.
-	// We manually inject a loop info that refers to a function parameter.
+	// A trip count names values through the renamer, so a loop bounded by
+	// parameter n reports it as p0, not by its source name.
 	src := `package main
 		func loop(n int) {
 			for i := 0; i < n; i++ {}
@@ -273,47 +199,66 @@ func TestCanonicalizer_TripCountNaming(t *testing.T) {
 	c := ir.NewCanonicalizer(ir.DefaultLiteralPolicy)
 	defer ir.ReleaseCanonicalizer(c)
 
-	// Mock loop info
-	if len(fn.Params) == 0 {
-		t.Fatal("Function missing params")
-	}
-	paramN := fn.Params[0]
-
-	mockTrip := &mockSCEVWithParam{Param: paramN}
-	loopInfo := &loop.LoopInfo{
-		Loops:   nil,
-		LoopMap: make(map[*ssa.BasicBlock]*loop.Loop),
-	}
-
-	// Find the loop header (likely b1)
-	header := fn.Blocks[1]
-	loopInfo.LoopMap[header] = &loop.Loop{
-		Header:    header,
-		TripCount: mockTrip,
-	}
-
-	c.ExportTest_InjectLoopInfo(loopInfo)
-
-	// We don't run AnalyzeLoops here because we injected our own info.
-	// But we must run NormalizeValue on params manually or call CanonicalizeFunction.
-	// Calling CanonicalizeFunction will wipe our injected loop info because it calls AnalyzeLoops.
-
-	// We rely on the fact that AnalyzeLoops *should* find the real TripCount.
-	// If the real analysis works, "n" should be renamed to "p0".
-
 	out := c.CanonicalizeFunction(fn)
 
-	if !strings.Contains(out, "TripCount:") {
-		t.Log("Real SCEV analysis might have failed to determine trip count, skipping check.")
-		return
+	_, trip, found := strings.Cut(out, "TripCount: ")
+	if !found {
+		t.Fatalf("no trip count computed for a counted loop:\n%s", out)
+	}
+	trip, _, _ = strings.Cut(trip, "\n")
+	if !strings.Contains(trip, "p0(inv)") || strings.Contains(trip, "n(inv)") {
+		t.Errorf("TripCount %q should name the bound as p0, not n", trip)
+	}
+}
+
+// A Canonicalizer that did not come from AcquireCanonicalizer works too.
+func TestCanonicalizer_ZeroValue(t *testing.T) {
+	t.Parallel()
+	fn := testutil.CompileAndGetFunction(t, `package main
+		var g int
+		func h() string { return "h" }
+		func f(n int) string {
+			s := ""
+			for i := 0; i < n; i++ { s += "abc" + h() }
+			g++
+			return s
+		}`, "f")
+
+	pooled := ir.AcquireCanonicalizer(ir.DefaultLiteralPolicy)
+	want := pooled.CanonicalizeFunction(fn)
+	ir.ReleaseCanonicalizer(pooled)
+
+	zero := &ir.Canonicalizer{Policy: ir.DefaultLiteralPolicy}
+	if got := zero.CanonicalizeFunction(fn); got != want {
+		t.Errorf("zero-value Canonicalizer:\n%s\nwant\n%s", got, want)
 	}
 
-	// If TripCount was found, it must NOT refer to "n" directly if "n" became "p0".
-	if strings.Contains(out, "TripCount: n") {
-		t.Errorf("TripCount leaked raw variable name 'n'. Output snippet:\n%s", out)
+	// NormalizeOperand on a fresh zero value, before any analysis, renders
+	// every operand as a pooled Canonicalizer does.
+	pooled = ir.AcquireCanonicalizer(ir.DefaultLiteralPolicy)
+	defer ir.ReleaseCanonicalizer(pooled)
+	fresh := &ir.Canonicalizer{Policy: ir.DefaultLiteralPolicy}
+	n := 0
+	for _, b := range fn.Blocks {
+		for _, instr := range b.Instrs {
+			for _, op := range instr.Operands(nil) {
+				if *op == nil {
+					continue
+				}
+				switch (*op).(type) {
+				case *ssa.Const, *ssa.Global, *ssa.Function:
+				default:
+					continue
+				}
+				n++
+				if got, want := fresh.NormalizeOperand(*op, instr), pooled.NormalizeOperand(*op, instr); got != want {
+					t.Errorf("NormalizeOperand(%v) on a zero value = %q; want %q", *op, got, want)
+				}
+			}
+		}
 	}
-	if !strings.Contains(out, "p0") {
-		t.Errorf("TripCount should refer to canonical parameter 'p0'. Output snippet:\n%s", out)
+	if n == 0 {
+		t.Fatal("no constant, global or function operands to compare")
 	}
 }
 

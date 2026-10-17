@@ -9,9 +9,6 @@ import (
 	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
 )
 
-// TestShortFunctionName covers the cases that used to live in
-// internal/cli's test suite, pinning the moved implementation against
-// regressions.
 func TestShortFunctionName(t *testing.T) {
 	cases := []struct {
 		in, want string
@@ -20,9 +17,13 @@ func TestShortFunctionName(t *testing.T) {
 		{"main.main", "main"},
 		{"github.com/user/repo/pkg.Func", "Func"},
 		{"pkg.(*Type).Method", "(*Type).Method"},
+		{"pkg.Type.Method", "Type.Method"},
+		{"(*Type).Method", "(*Type).Method"},
 		{"(*pkg.Type).Method", "(*Type).Method"},
+		{"(pkg.Type).Method", "(Type).Method"},
 		{"pkg.Func[int]", "Func[int]"},
 		{"pkg.Func[a/b.T]", "Func[a/b.T]"},
+		{"github.com/pkg.Func[github.com/other.Type]", "Func[github.com/other.Type]"},
 		{"pkg.Type[sub.T].Method", "Type[sub.T].Method"},
 		{"Type[sub.T].Method", "Type[sub.T].Method"},
 	}
@@ -31,6 +32,23 @@ func TestShortFunctionName(t *testing.T) {
 			t.Errorf("ShortFunctionName(%q) = %q; want %q", tc.in, got, tc.want)
 		}
 	}
+}
+
+// FuzzShortFunctionName checks that no input makes ShortFunctionName panic.
+func FuzzShortFunctionName(f *testing.F) {
+	for _, s := range []string{
+		"fmt.Println",
+		"pkg.(*Type).Method",
+		"github.com/pkg.Func[int]",
+		"very.long.package.name/with.dots.Func",
+		"broken[brackets",
+		"((()))",
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, input string) {
+		_ = api.ShortFunctionName(input)
+	})
 }
 
 const srcA = `package x

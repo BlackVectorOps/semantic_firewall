@@ -36,9 +36,9 @@ func applyOp(op token.Token, x, y *big.Int) *big.Int {
 
 // assertValuePreserving checks that folding left op right yields a SCEV whose
 // value matches the operator applied pointwise across several iterations.
-func assertValuePreserving(t *testing.T, op token.Token, left, right SCEV, l *Loop) SCEV {
+func assertValuePreserving(t *testing.T, op token.Token, left, right SCEV) SCEV {
 	t.Helper()
-	folded := foldSCEV(op, left, right, l)
+	folded := foldSCEV(op, left, right)
 	for k := int64(0); k < 6; k++ {
 		got := evalAt(t, folded, k)
 		want := applyOp(op, evalAt(t, left, k), evalAt(t, right, k))
@@ -52,8 +52,7 @@ func assertValuePreserving(t *testing.T, op token.Token, left, right SCEV, l *Lo
 
 func TestFoldConstants(t *testing.T) {
 	t.Parallel()
-	l := &Loop{}
-	got := foldSCEV(token.ADD, scevConst(7), scevConst(5), l)
+	got := foldSCEV(token.ADD, scevConst(7), scevConst(5))
 	c, ok := got.(*SCEVConstant)
 	if !ok {
 		t.Fatalf("constant ADD did not fold to a constant: %T", got)
@@ -62,7 +61,7 @@ func TestFoldConstants(t *testing.T) {
 		t.Errorf("7 + 5: got %s, want 12", c.Value)
 	}
 	// QUO is intentionally not folded so truncation never hides in the IR.
-	if _, ok := foldSCEV(token.QUO, scevConst(8), scevConst(2), l).(*SCEVGenericExpr); !ok {
+	if _, ok := foldSCEV(token.QUO, scevConst(8), scevConst(2)).(*SCEVGenericExpr); !ok {
 		t.Error("QUO of constants should remain an opaque expression")
 	}
 }
@@ -73,7 +72,7 @@ func TestFoldAddRecWithInvariant(t *testing.T) {
 	rec := &SCEVAddRec{Start: scevConst(1), Step: scevConst(2), Loop: l} // {1,+,2}
 
 	// {1,+,2} + 5  ->  {6,+,2}
-	folded := assertValuePreserving(t, token.ADD, rec, scevConst(5), l)
+	folded := assertValuePreserving(t, token.ADD, rec, scevConst(5))
 	ar, ok := folded.(*SCEVAddRec)
 	if !ok {
 		t.Fatalf("AddRec + const did not stay affine: %T", folded)
@@ -83,17 +82,17 @@ func TestFoldAddRecWithInvariant(t *testing.T) {
 	}
 
 	// 5 + {1,+,2}  ->  {6,+,2}  (commuted)
-	if _, ok := assertValuePreserving(t, token.ADD, scevConst(5), rec, l).(*SCEVAddRec); !ok {
+	if _, ok := assertValuePreserving(t, token.ADD, scevConst(5), rec).(*SCEVAddRec); !ok {
 		t.Error("const + AddRec did not stay affine")
 	}
 
 	// {1,+,2} - 5  ->  {-4,+,2}
-	if _, ok := assertValuePreserving(t, token.SUB, rec, scevConst(5), l).(*SCEVAddRec); !ok {
+	if _, ok := assertValuePreserving(t, token.SUB, rec, scevConst(5)).(*SCEVAddRec); !ok {
 		t.Error("AddRec - const did not stay affine")
 	}
 
 	// 10 - {1,+,2}  ->  {9,+,-2}  (step negated)
-	folded = assertValuePreserving(t, token.SUB, scevConst(10), rec, l)
+	folded = assertValuePreserving(t, token.SUB, scevConst(10), rec)
 	ar, ok = folded.(*SCEVAddRec)
 	if !ok {
 		t.Fatalf("const - AddRec did not stay affine: %T", folded)
@@ -103,7 +102,7 @@ func TestFoldAddRecWithInvariant(t *testing.T) {
 	}
 
 	// {1,+,2} * 3  ->  {3,+,6}
-	if _, ok := assertValuePreserving(t, token.MUL, rec, scevConst(3), l).(*SCEVAddRec); !ok {
+	if _, ok := assertValuePreserving(t, token.MUL, rec, scevConst(3)).(*SCEVAddRec); !ok {
 		t.Error("AddRec * const did not stay affine")
 	}
 }
@@ -111,20 +110,20 @@ func TestFoldAddRecWithInvariant(t *testing.T) {
 func TestFoldAddRecWithAddRec(t *testing.T) {
 	t.Parallel()
 	l := &Loop{}
-	a := &SCEVAddRec{Start: scevConst(1), Step: scevConst(2), Loop: l}  // {1,+,2}
-	b := &SCEVAddRec{Start: scevConst(3), Step: scevConst(4), Loop: l}  // {3,+,4}
+	a := &SCEVAddRec{Start: scevConst(1), Step: scevConst(2), Loop: l} // {1,+,2}
+	b := &SCEVAddRec{Start: scevConst(3), Step: scevConst(4), Loop: l} // {3,+,4}
 
 	// {1,+,2} + {3,+,4}  ->  {4,+,6}
-	if _, ok := assertValuePreserving(t, token.ADD, a, b, l).(*SCEVAddRec); !ok {
+	if _, ok := assertValuePreserving(t, token.ADD, a, b).(*SCEVAddRec); !ok {
 		t.Error("AddRec + AddRec (same loop) did not stay affine")
 	}
 	// {1,+,2} - {3,+,4}  ->  {-2,+,-2}
-	if _, ok := assertValuePreserving(t, token.SUB, a, b, l).(*SCEVAddRec); !ok {
+	if _, ok := assertValuePreserving(t, token.SUB, a, b).(*SCEVAddRec); !ok {
 		t.Error("AddRec - AddRec (same loop) did not stay affine")
 	}
 
 	// Recurrence * recurrence is quadratic and must stay opaque.
-	if _, ok := foldSCEV(token.MUL, a, b, l).(*SCEVGenericExpr); !ok {
+	if _, ok := foldSCEV(token.MUL, a, b).(*SCEVGenericExpr); !ok {
 		t.Error("AddRec * AddRec should not be folded into an affine recurrence")
 	}
 }

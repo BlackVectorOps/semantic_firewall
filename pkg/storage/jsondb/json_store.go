@@ -18,20 +18,17 @@ import (
 )
 
 const (
-	// Prevents memory exhaustion attacks via massive JSON payloads.
-	// 64MB is generous enough for thousands of signatures but stops an attacker
-	// from blowing the heap with a 10GB padding bomb.
+	// MaxDBSizeBytes bounds how much of a database file LoadDatabase reads,
+	// so an oversized or padded file cannot exhaust memory.
 	MaxDBSizeBytes = 64 * 1024 * 1024
 
-	// SecureFilePerms enforces owner only read write access.
-	// We do not want the web server or other low privilege users snooping on our logic.
+	// SecureFilePerms is the mode SaveDatabase writes the database with:
+	// owner read and write only.
 	SecureFilePerms = 0600
 )
 
-// Implements a JSON backed signature store.
-// We use a Read/Write mutex here because detection is heavily read biased.
-// We only want to stop the world when we are actually mutating the state,
-// otherwise we let the readers swarm.
+// Scanner is a signature store held in memory and persisted as one JSON
+// file. Scans take a read lock; loads and additions take the write lock.
 type Scanner struct {
 	db               *detection.SignatureDatabase
 	sigMap           map[string]int
@@ -40,42 +37,33 @@ type Scanner struct {
 	mu               sync.RWMutex
 }
 
-// Creates a new scanner instance.
-// We initialize with safe defaults so the thing works out of the box.
-// Returning a nil db pointer would just be setting traps for our future selves.
+// NewScanner returns an empty store with the default match threshold
+// (0.75) and entropy tolerance (0.5).
 func NewScanner() *Scanner {
 	return &Scanner{
 		db:               &detection.SignatureDatabase{},
 		sigMap:           make(map[string]int),
-		matchThreshold:   0.75, // 75% minimum confidence keeps the false positives manageable
+		matchThreshold:   0.75,
 		entropyTolerance: 0.5,
 	}
 }
 
-// Loads signatures from a JSON file.
-// This operation holds a Write lock because we are performing a brain transplant
-// on the scanner. We cannot have readers looking at a half loaded struct.
+// LoadDatabase replaces the store's contents with the database at path. The
+// file must be a regular file (a FIFO or device could block the read) and
+// may contain no fields the database format does not define.
 func (s *Scanner) LoadDatabase(path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Sanitize the input path to prevent directory traversal shenanigans.
 	cleanPath := filepath.Clean(path)
 
-	// Verify file existence explicitly.
-	// While Open handles this, a Stat check lets us give a more useful error message.
 	info, err := os.Stat(cleanPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("signature database file does not exist at %s", cleanPath)
 		}
-		// Any other stat error (permission denied, EIO, etc.) must surface as an
-		// error rather than dereferencing the nil FileInfo below.
 		return fmt.Errorf("failed to stat %s: %w", cleanPath, err)
 	}
-
-	// Refuse to read named pipes or devices.
-	// Reading from /dev/random or a blocking pipe would hang the scanner indefinitely.
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("database path %s is not a regular file", cleanPath)
 	}
@@ -86,35 +74,24 @@ func (s *Scanner) LoadDatabase(path string) error {
 	}
 	defer f.Close()
 
-	// Wrap the reader. If the file claims to be 1GB, we stop reading at 64MB.
-	// This protects the application availability.
-	limitedReader := io.LimitReader(f, MaxDBSizeBytes)
-
 	var db detection.SignatureDatabase
-	decoder := json.NewDecoder(limitedReader)
-
-	// We are strict on schema. If the JSON has fields we don't know about,
-	// it implies version drift or a corrupted config. Fail fast.
+	decoder := json.NewDecoder(io.LimitReader(f, MaxDBSizeBytes))
 	decoder.DisallowUnknownFields()
-
 	if err := decoder.Decode(&db); err != nil {
 		return fmt.Errorf("failed to parse signature database: %w", err)
 	}
 
 	s.db = &db
-
-	// Rebuild the map index.
 	s.sigMap = make(map[string]int, len(s.db.Signatures))
 	for i, sig := range s.db.Signatures {
 		s.sigMap[sig.ID] = i
 	}
-
 	return nil
 }
 
-// Sets the minimum confidence threshold for alerts.
-// We validate inputs here to prevent NaN poisoning. If NaN gets into the
-// confidence logic, comparisons will fail silently and we will miss detections.
+// SetThreshold sets the minimum confidence ScanTopology reports. NaN, an
+// infinity, or a value outside [0, 1] is refused: NaN in particular would
+// fail every comparison and silently suppress all alerts.
 func (s *Scanner) SetThreshold(threshold float64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -122,24 +99,18 @@ func (s *Scanner) SetThreshold(threshold float64) error {
 	if math.IsNaN(threshold) || math.IsInf(threshold, 0) {
 		return fmt.Errorf("invalid threshold value: %v", threshold)
 	}
-
 	if threshold < 0.0 || threshold > 1.0 {
 		return fmt.Errorf("threshold must be between 0.0 and 1.0, got: %f", threshold)
 	}
-
 	s.matchThreshold = threshold
 	return nil
 }
 
-// Writes the signature database to a JSON file.
-// We use a streaming encoder to avoid loading the entire JSON string into
-// memory (heap protection), and an atomic write strategy (write to temp,
-// sync, rename) so a power failure doesn't leave us with a 0 byte DB.
+// SaveDatabase writes the database to path atomically: it encodes into a
+// temporary file in the same directory with SecureFilePerms, syncs it, and
+// renames it over path, so a crash never leaves a truncated database.
 func (s *Scanner) SaveDatabase(path string) error {
 	s.mu.RLock()
-	// We hold the lock for the duration of the stream to ensure consistency.
-	// If we didn't lock, a concurrent AddSignature could mutate the slice
-	// while we are iterating it, causing a panic or corrupt JSON output.
 	defer s.mu.RUnlock()
 
 	cleanPath := filepath.Clean(path)
@@ -148,55 +119,41 @@ func (s *Scanner) SaveDatabase(path string) error {
 	if err := pathguard.CheckWritable(cleanPath); err != nil {
 		return err
 	}
-
-	// Ensure directory exists and is writable
 	if _, err := os.Stat(dir); err != nil {
 		return fmt.Errorf("destination directory invalid: %w", err)
 	}
 
-	// Create temp file in the same directory to ensure the Rename is atomic.
-	// Moving files across partitions is not atomic, so we stay local.
 	tmpFile, err := os.CreateTemp(dir, "sig-db-*.tmp")
 	if err != nil {
 		return fmt.Errorf("failed to create temporary file: %w", err)
 	}
-
-	// Clean up temp file if we fail before the rename dance is finished.
 	defer os.Remove(tmpFile.Name())
 
-	// Enforce strict permissions immediately.
-	// We don't want a race window where the file is world readable before we chmod it.
 	if err := tmpFile.Chmod(SecureFilePerms); err != nil {
 		tmpFile.Close()
 		return fmt.Errorf("failed to set secure permissions on temp file: %w", err)
 	}
 
 	encoder := json.NewEncoder(tmpFile)
-	encoder.SetIndent("", "  ") // Humans need to read this too.
+	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(s.db); err != nil {
 		tmpFile.Close()
 		return fmt.Errorf("failed to encode database to file: %w", err)
 	}
-
-	// Force flush to disk hardware. OS buffers lie to us.
 	if err := tmpFile.Sync(); err != nil {
 		tmpFile.Close()
 		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
-
 	if err := tmpFile.Close(); err != nil {
 		return fmt.Errorf("failed to close temporary file: %w", err)
 	}
-
-	// Atomic replace. This is the only time the actual DB file is touched.
 	if err := os.Rename(tmpFile.Name(), cleanPath); err != nil {
 		return fmt.Errorf("failed to replace database file: %w", err)
 	}
-
 	return nil
 }
 
-// Generates a secure random ID if the signature doesn't have one.
+// ensureID gives sig a random ID from crypto/rand when it has none.
 func (s *Scanner) ensureID(sig *detection.Signature) error {
 	if sig.ID == "" {
 		b := make([]byte, 8)
@@ -208,42 +165,21 @@ func (s *Scanner) ensureID(sig *detection.Signature) error {
 	return nil
 }
 
-// Adds a new signature to the database.
-// We use crypto/rand for ID generation because math/rand is deterministic
-// and we don't want ID collisions if the seed isn't set properly.
+// AddSignature appends a copy of sig, first giving sig an ID if it has none.
 func (s *Scanner) AddSignature(sig *detection.Signature) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if sig == nil {
 		return fmt.Errorf("cannot add nil signature")
 	}
-
-	if s.db == nil {
-		s.db = &detection.SignatureDatabase{
-			Version:     "1.0",
-			Description: "Semantic Firewall Malware Signature Database",
-		}
-	}
-
-	if err := s.ensureID(sig); err != nil {
+	batch := []detection.Signature{*sig}
+	if err := s.AddSignatures(batch); err != nil {
 		return err
 	}
-
-	// Append copies the struct value.
-	s.db.Signatures = append(s.db.Signatures, *sig)
-
-	// Update the map index.
-	if s.sigMap == nil {
-		s.sigMap = make(map[string]int)
-	}
-	s.sigMap[sig.ID] = len(s.db.Signatures) - 1
-
+	sig.ID = batch[0].ID
 	return nil
 }
 
-// Adds multiple signatures to the database in a batch.
-// This reduces locking overhead when indexing many files.
+// AddSignatures appends copies of sigs under one lock, first giving each
+// signature without an ID one, in place.
 func (s *Scanner) AddSignatures(sigs []detection.Signature) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -251,7 +187,6 @@ func (s *Scanner) AddSignatures(sigs []detection.Signature) error {
 	if len(sigs) == 0 {
 		return nil
 	}
-
 	if s.db == nil {
 		s.db = &detection.SignatureDatabase{
 			Version:     "1.0",
@@ -261,27 +196,18 @@ func (s *Scanner) AddSignatures(sigs []detection.Signature) error {
 	if s.sigMap == nil {
 		s.sigMap = make(map[string]int, len(sigs))
 	}
-
 	for i := range sigs {
 		sig := &sigs[i]
-
 		if err := s.ensureID(sig); err != nil {
 			return err
 		}
-
-		s.db.Signatures = append(s.db.Signatures, *sig)
-		// Keep the ID index in sync. Without this, GetSignature returns
-		// "not found" for every signature added via a batch until the
-		// database is reloaded -- the bulk-import path of MigrateFromJSON
-		// is the realistic trigger.
+		s.db.Signatures = append(s.db.Signatures, sig.Clone())
 		s.sigMap[sig.ID] = len(s.db.Signatures) - 1
 	}
 	return nil
 }
 
-// Retrieves a signature by ID.
-// Returns a deep copy to prevent the caller from modifying the internal
-// database state without a lock. Shared mutable state is the root of all evil.
+// GetSignature returns a copy of the signature with the given ID.
 func (s *Scanner) GetSignature(id string) (*detection.Signature, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -289,59 +215,26 @@ func (s *Scanner) GetSignature(id string) (*detection.Signature, error) {
 	if s.db == nil {
 		return nil, fmt.Errorf("database not loaded")
 	}
-
-	if idx, ok := s.sigMap[id]; ok {
-		// Bounds check just in case of state drift, though locks should prevent it.
-		if idx >= 0 && idx < len(s.db.Signatures) {
-			return s.deepCopySignature(&s.db.Signatures[idx]), nil
-		}
+	if idx, ok := s.sigMap[id]; ok && idx >= 0 && idx < len(s.db.Signatures) {
+		sig := s.db.Signatures[idx].Clone()
+		return &sig, nil
 	}
-
 	return nil, fmt.Errorf("signature %q not found", id)
 }
 
-// Finds potential matches based on entropy and hash.
-// CRITICAL: This returns pointers to NEW COPIES of the signatures.
-// If we returned pointers to the existing slice, a subsequent AddSignature
-// could trigger a slice realloc, invalidating our pointers and crashing the app.
-func (s *Scanner) ScanCandidates(topo *topology.FunctionTopology) ([]*detection.Signature, error) {
+// CountSignatures returns the number of signatures in the store.
+func (s *Scanner) CountSignatures() (int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if s.db == nil || len(s.db.Signatures) == 0 || topo == nil {
-		return nil, nil
+	if s.db == nil {
+		return 0, nil
 	}
-
-	topoHash := detection.GenerateTopologyHash(topo)
-	fuzzyHash := topology.GenerateFuzzyHash(topo)
-
-	var candidates []*detection.Signature
-	for i := range s.db.Signatures {
-		sig := &s.db.Signatures[i]
-		match := sig.TopologyHash == topoHash || (sig.FuzzyHash != "" && sig.FuzzyHash == fuzzyHash)
-
-		if match {
-			// Respect the signature's tolerance, falling back to the scanner
-			// default when the signature leaves it unset (0). A zero value means
-			// "unspecified", not "demand an exact entropy match" -- this matches
-			// the behaviour of MatchSignature and the PebbleDB scanner.
-			effectiveTol := sig.EntropyTolerance
-			if effectiveTol == 0 {
-				effectiveTol = s.entropyTolerance
-			}
-
-			if math.Abs(sig.EntropyScore-topo.EntropyScore) <= effectiveTol {
-				// Deep copy allows the caller to mutate their candidate list safely.
-				candidates = append(candidates, s.deepCopySignature(sig))
-			}
-		}
-	}
-	return candidates, nil
+	return len(s.db.Signatures), nil
 }
 
-// Returns a deep copy of the current signature database.
-// We manually duplicate slice structures. If we just returned *s.db,
-// the slice headers would still point to the same backing array.
+// GetDatabase returns a copy of the database that shares nothing with the
+// store.
 func (s *Scanner) GetDatabase() *detection.SignatureDatabase {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -349,34 +242,18 @@ func (s *Scanner) GetDatabase() *detection.SignatureDatabase {
 	if s.db == nil {
 		return nil
 	}
-
 	newDB := *s.db
 	newDB.Signatures = make([]detection.Signature, len(s.db.Signatures))
-
 	for i := range s.db.Signatures {
-		// Element wise deep copy prevents shared references.
-		newDB.Signatures[i] = *s.deepCopySignature(&s.db.Signatures[i])
+		newDB.Signatures[i] = s.db.Signatures[i].Clone()
 	}
-
 	return &newDB
 }
 
-// Creates a safe clone of a single signature.
-// Currently performs a value copy. If the Signature struct is updated
-// to include slices (e.g. Tags, CVEs), they MUST be manually copied here
-// or we introduce a subtle data race.
-func (s *Scanner) deepCopySignature(src *detection.Signature) *detection.Signature {
-	dst := *src
-	// NOTE: If reference types are added to Signature, copy them here.
-	return &dst
-}
-
-// Checks a function topology against all signatures.
-// We explicitly lock here. Iterating a slice is not thread safe in Go.
+// ScanTopology checks topo against every signature and returns the matches
+// at or above the threshold, most confident first.
 func (s *Scanner) ScanTopology(topo *topology.FunctionTopology, funcName string) ([]detection.ScanResult, error) {
 	s.mu.RLock()
-	// Defer unlock is critical. If MatchSignature panics, we need to release
-	// the lock during the stack unwind or the whole server deadlocks.
 	defer s.mu.RUnlock()
 
 	if s.db == nil || len(s.db.Signatures) == 0 {
@@ -384,11 +261,9 @@ func (s *Scanner) ScanTopology(topo *topology.FunctionTopology, funcName string)
 	}
 
 	var results []detection.ScanResult
-
+	m := detection.NewMatcher(topo, funcName)
 	for _, sig := range s.db.Signatures {
-		// We trust MatchSignature to handle the heavy lifting,
-		// but we guard the access to the signature data.
-		result := detection.MatchSignature(topo, funcName, sig, s.entropyTolerance)
+		result := m.Match(sig, s.entropyTolerance)
 		if result.Confidence >= s.matchThreshold {
 			results = append(results, result)
 		}
@@ -397,17 +272,20 @@ func (s *Scanner) ScanTopology(topo *topology.FunctionTopology, funcName string)
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Confidence > results[j].Confidence
 	})
-
 	return results, nil
 }
 
-// Close is a placeholder.
-// Sometimes interfaces demand things we don't need, but we play along.
+// Close releases nothing; it lets Scanner stand in for the PebbleDB store.
 func (s *Scanner) Close() error {
 	return nil
 }
 
-// Checks a function topology against all signatures for an exact match.
+// ScanTopologyExact returns the first signature topo matches with a
+// confidence of at least 0.99, or nil. It ignores the scanner's entropy
+// tolerance and passes no fallback (0), so only a signature's own tolerance
+// admits an entropy difference; a signature that sets none can never match:
+// at equal entropy its entropy score is 0/0 (NaN), and otherwise 0.5, which
+// keeps confidence below 0.99.
 func (s *Scanner) ScanTopologyExact(topo *topology.FunctionTopology, funcName string) (*detection.ScanResult, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -416,13 +294,12 @@ func (s *Scanner) ScanTopologyExact(topo *topology.FunctionTopology, funcName st
 		return nil, nil
 	}
 
+	m := detection.NewMatcher(topo, funcName)
 	for _, sig := range s.db.Signatures {
-		// Using a strict 0.0 tolerance. We are looking for twins, not cousins.
-		result := detection.MatchSignature(topo, funcName, sig, 0.0)
+		result := m.Match(sig, 0.0)
 		if result.Confidence >= 0.99 {
 			return &result, nil
 		}
 	}
-
 	return nil, nil
 }

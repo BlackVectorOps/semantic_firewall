@@ -40,10 +40,16 @@ type Zipper struct {
 	queue []valuePair
 
 	fpCache map[ssa.Instruction]string
+	// strCache holds instr.String(), which is costly (fmt and type
+	// rendering): the sort tie-break and the reported instructions read it
+	// repeatedly.
+	strCache map[ssa.Instruction]string
 
 	// oldTP and newTP render each side's type parameters by position, so a
 	// type-parameter rename does not unmatch the instructions that use it.
 	oldTP, newTP *ir.TypeParamRenamer
+	// oldQ and newQ render each side's own package unqualified.
+	oldQ, newQ types.Qualifier
 }
 
 type valuePair struct {
@@ -62,10 +68,12 @@ func NewZipper(oldFn, newFn *ssa.Function, policy ir.LiteralPolicy) (*Zipper, er
 		valMap:      make(map[ssa.Value]ssa.Value),
 		instrMap:    make(map[ssa.Instruction]ssa.Instruction),
 		revInstrMap: make(map[ssa.Instruction]ssa.Instruction),
-		queue:       make([]valuePair, 0),
 		fpCache:     make(map[ssa.Instruction]string),
+		strCache:    make(map[ssa.Instruction]string),
 		oldTP:       ir.NewTypeParamRenamer(oldFn),
 		newTP:       ir.NewTypeParamRenamer(newFn),
+		oldQ:        localQualifier(oldFn),
+		newQ:        localQualifier(newFn),
 	}, nil
 }
 
@@ -75,7 +83,6 @@ func (z *Zipper) ComputeDiff() (*ZipperArtifacts, error) {
 	z.newCanon = ir.AcquireCanonicalizer(z.policy)
 	defer ir.ReleaseCanonicalizer(z.newCanon)
 
-	// Calls exported methods from the ir package
 	z.oldCanon.AnalyzeLoops(z.oldFn)
 	z.oldCanon.NormalizeInductionVariables()
 	z.newCanon.AnalyzeLoops(z.newFn)
@@ -404,40 +411,24 @@ func (z *Zipper) compareOperands(a, b ssa.Instruction) bool {
 		return false
 	}
 
-	// Logic Refinement: We strictly gate the commutativity check.
-	// Previously, we allowed partial fallthroughs which could trigger on strings.
-	// Now we define `allowSwap` explicitly based on strict Op and Type rules.
+	// A commutative operator may match with its operands swapped.
 	if binOp, ok := a.(*ssa.BinOp); ok && len(opsA) == 2 {
 		allowSwap := false
-
-		// Identify the underlying basic type info (e.g. IsInteger, IsString)
-		var basicInfo types.BasicInfo
-		isBasic := false
-		if basic, ok := binOp.Type().Underlying().(*types.Basic); ok {
-			isBasic = true
-			basicInfo = basic.Info()
-		}
-
 		switch binOp.Op {
 		case token.ADD, token.MUL, token.AND, token.OR, token.XOR:
-			// For arithmetic/logical ops, commutativity is strictly for numeric types.
-			// Specifically exclude String (ADD) here by explicitly checking that IsString is NOT set.
-			// This prevents false positives if there's any unexpected overlap in type bits or untyped constants.
-			if isBasic && (basicInfo&types.IsString) == 0 && (basicInfo&(types.IsInteger|types.IsFloat|types.IsComplex)) != 0 {
+			// Only numeric operands commute; string + does not.
+			if basic, ok := binOp.Type().Underlying().(*types.Basic); ok && basic.Info()&(types.IsInteger|types.IsFloat|types.IsComplex) != 0 {
 				allowSwap = true
 			}
 		case token.EQL, token.NEQ:
-			// Equality is commutative for ANY comparable type (Integers, Strings, Pointers, Interfaces).
-			// Logic: (a == b) is always equivalent to (b == a).
+			// Equality commutes for every comparable type.
 			allowSwap = true
 		}
 
 		if allowSwap {
-			// Optimization: Try the direct match first as it is cheaper (cache hits).
 			if z.compareOperandPair(opsA[0], opsA[1], opsB[0], opsB[1]) {
 				return true
 			}
-			// If direct match fails, attempt the commutative swap.
 			return z.compareOperandPair(opsA[0], opsA[1], opsB[1], opsB[0])
 		}
 	}
@@ -463,9 +454,7 @@ func (z *Zipper) compareOperands(a, b ssa.Instruction) bool {
 			continue
 		}
 
-		IsLinkable := z.isLinkable(valA)
-
-		if IsLinkable {
+		if z.isLinkable(valA) {
 			if _, isPhi := a.(*ssa.Phi); isPhi {
 				if !z.isLinkable(valB) {
 					return false
@@ -480,7 +469,6 @@ func (z *Zipper) compareOperands(a, b ssa.Instruction) bool {
 			return false
 		}
 
-		// Calls exported NormalizeOperand method
 		canonA := z.oldCanon.NormalizeOperand(valA, a)
 		canonB := z.newCanon.NormalizeOperand(valB, b)
 
@@ -525,7 +513,6 @@ func (z *Zipper) compareOneOperand(ptrA, ptrB *ssa.Value) bool {
 		return false
 	}
 
-	// Calls exported NormalizeOperand method
 	canonA := z.oldCanon.NormalizeOperand(valA, nil)
 	canonB := z.newCanon.NormalizeOperand(valB, nil)
 	return canonA == canonB
@@ -545,7 +532,6 @@ func (z *Zipper) isolateDivergence() *ZipperArtifacts {
 
 	for _, b := range z.oldFn.Blocks {
 		for _, instr := range b.Instrs {
-			// Accesses exported VirtualizedInstrs field
 			if z.oldCanon.VirtualizedInstrs[instr] {
 				continue
 			}
@@ -557,7 +543,6 @@ func (z *Zipper) isolateDivergence() *ZipperArtifacts {
 
 	for _, b := range z.newFn.Blocks {
 		for _, instr := range b.Instrs {
-			// Accesses exported VirtualizedInstrs field
 			if z.newCanon.VirtualizedInstrs[instr] {
 				continue
 			}
@@ -664,9 +649,18 @@ func (z *Zipper) misplacedPairs() map[ssa.Instruction]bool {
 
 func (z *Zipper) formatInstr(instr ssa.Instruction) string {
 	if v, ok := instr.(ssa.Value); ok && v.Name() != "" {
-		return fmt.Sprintf("%s = %s", v.Name(), instr.String())
+		return v.Name() + " = " + z.instrString(instr)
 	}
-	return instr.String()
+	return z.instrString(instr)
+}
+
+func (z *Zipper) instrString(instr ssa.Instruction) string {
+	s, ok := z.strCache[instr]
+	if !ok {
+		s = instr.String()
+		z.strCache[instr] = s
+	}
+	return s
 }
 
 type instrSorter struct {
@@ -682,7 +676,7 @@ func (s instrSorter) Less(i, j int) bool {
 	if fi != fj {
 		return fi < fj
 	}
-	return s.instrs[i].String() < s.instrs[j].String()
+	return s.z.instrString(s.instrs[i]) < s.z.instrString(s.instrs[j])
 }
 
 func (z *Zipper) sortInstrs(instrs []ssa.Instruction) {
@@ -771,7 +765,7 @@ func (z *Zipper) sameType(a, b types.Type) bool {
 		return true
 	}
 	a, b = z.oldTP.Rename(a), z.newTP.Rename(b)
-	return types.TypeString(a, localQualifier(z.oldFn)) == types.TypeString(b, localQualifier(z.newFn))
+	return types.TypeString(a, z.oldQ) == types.TypeString(b, z.newQ)
 }
 
 // typeString renders t, a type used by instr, with full package paths and

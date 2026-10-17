@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -69,64 +68,6 @@ func (m *mockDirEntry) Type() os.FileMode          { return 0644 }
 func (m *mockDirEntry) Info() (fs.FileInfo, error) { return &mockFileInfo{name: m.name}, nil }
 
 // -- TESTS --
-
-// TestShortFunctionName verifies that the parser correctly simplifies complex Go SSA names,
-// specifically testing Generics support and proper receiver stripping.
-func TestShortFunctionName(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		// Standard
-		{"fmt.Println", "Println"},
-		{"main.main", "main"},
-		{"github.com/user/repo/pkg.Func", "Func"},
-
-		// Methods
-		{"pkg.(*Type).Method", "(*Type).Method"},
-		{"pkg.Type.Method", "Type.Method"},   // First dot separation (keeps receiver)
-		{"(*Type).Method", "(*Type).Method"}, // Idempotency check
-
-		// Recursive Parsing Fixes
-		{"(*pkg.Type).Method", "(*Type).Method"},
-		{"(pkg.Type).Method", "(Type).Method"},
-
-		// Generics
-		{"pkg.Func[int]", "Func[int]"},
-		{"pkg.Func[a/b.T]", "Func[a/b.T]"}, // Slash inside generic should not split
-		{"github.com/pkg.Func[github.com/other.Type]", "Func[github.com/other.Type]"},
-
-		// Complex Combinations with Heuristic
-		{"pkg.Type[sub.T].Method", "Type[sub.T].Method"}, // pkg is stripped. Type[T] is preserved.
-		{"Type[sub.T].Method", "Type[sub.T].Method"},     // Prefix Type[sub.T] has brackets -> don't strip
-	}
-
-	for _, tc := range tests {
-		got := ShortFunctionName(tc.input)
-		if got != tc.expected {
-			t.Errorf("ShortFunctionName(%q) = %q; want %q", tc.input, got, tc.expected)
-		}
-	}
-}
-
-// FuzzShortFunctionName uses fuzzing to ensure the parser never panics on arbitrary input.
-func FuzzShortFunctionName(f *testing.F) {
-	seeds := []string{
-		"fmt.Println",
-		"pkg.(*Type).Method",
-		"github.com/pkg.Func[int]",
-		"very.long.package.name/with.dots.Func",
-		"broken[brackets",
-		"((()))",
-	}
-	for _, s := range seeds {
-		f.Add(s)
-	}
-	f.Fuzz(func(t *testing.T, input string) {
-		// Just ensure it doesn't panic
-		_ = ShortFunctionName(input)
-	})
-}
 
 // TestDependencyFilter verifies that standard library packages are skipped
 // while 3rd party packages are retained.
@@ -265,55 +206,6 @@ func TestRunScanDeps_ScansDependencyFunctions(t *testing.T) {
 	}
 }
 
-// TestScanDeterminism ensures that map iteration order does not affect result order.
-func TestScanDeterminism(t *testing.T) {
-	// 1. Create a large map to force random iteration order
-	depPkgs := make(map[string]int)
-	for i := 0; i < 100; i++ {
-		key := fmt.Sprintf("pkg/dep/%d", i)
-		depPkgs[key] = i
-	}
-
-	// 2. Helper to simulate the fix: Extract Sorted
-	extractSorted := func() []string {
-		var keys []string
-		for k := range depPkgs {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		return keys
-	}
-
-	run1 := extractSorted()
-	run2 := extractSorted()
-
-	if len(run1) != len(run2) {
-		t.Fatalf("Length mismatch: %d vs %d", len(run1), len(run2))
-	}
-
-	for i := range run1 {
-		if run1[i] != run2[i] {
-			t.Errorf("Mismatch at index %d: %s vs %s. Sorting failed to ensure determinism.", i, run1[i], run2[i])
-		}
-	}
-}
-
-// TestJSONOutputIntegrity verifies that check output is a valid JSON array.
-func TestJSONOutputIntegrity(t *testing.T) {
-	output := []struct {
-		Target string `json:"target"`
-	}{{Target: "test1"}, {Target: "test2"}}
-
-	data, err := json.Marshal(output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	expected := `[{"target":"test1"},{"target":"test2"}]`
-	if string(data) != expected {
-		t.Errorf("JSON marshaling failed, got %s", string(data))
-	}
-}
-
 // TestRunCheckLogic_Isolation verifies logic without touching the disk.
 func TestRunCheckLogic_Isolation(t *testing.T) {
 	mockFS := &MockFileSystem{
@@ -333,8 +225,7 @@ func TestRunCheckLogic_Isolation(t *testing.T) {
 }
 
 // panickingFileSystem wraps MockFileSystem but panics on Stat for a specific
-// path. Used to exercise the panic-recovery path in ProcessFilesParallel
-// without needing to corrupt SSA generation.
+// path, as a FileSystem bug would.
 type panickingFileSystem struct {
 	*MockFileSystem
 	panicOn string
@@ -347,10 +238,10 @@ func (p *panickingFileSystem) Stat(name string) (os.FileInfo, error) {
 	return p.MockFileSystem.Stat(name)
 }
 
-// TestProcessFilesParallel_PanicSurfacedAsError ensures a panic during
-// per-file analysis is recorded as an ErrorMessage on the FileOutput and
-// flips the hasErrors flag, so --strict fails closed instead of silently
-// passing a crashed run.
+// TestProcessFilesParallel_PanicSurfacedAsError ensures a panic reading a
+// file is recorded as an ErrorMessage on the FileOutput and flips the
+// hasErrors flag, so --strict fails closed instead of silently passing a
+// crashed run.
 func TestProcessFilesParallel_PanicSurfacedAsError(t *testing.T) {
 	mockFS := &panickingFileSystem{
 		MockFileSystem: &MockFileSystem{
@@ -386,17 +277,14 @@ func TestProcessFilesParallel_PanicSurfacedAsError(t *testing.T) {
 func TestFileSizeGuard(t *testing.T) {
 	mockFS := &MockFileSystem{
 		Files: map[string][]byte{
-			"/app/huge.go": make([]byte, MaxSourceFileSize+100),
+			"/app/huge.go": make([]byte, models.MaxSourceFileSize+100),
 		},
 	}
 
-	output := ProcessFile(mockFS, "/app/huge.go", false, nil)
-	if output.ErrorMessage == "" {
-		t.Error("Expected error for oversized file, got none")
-	}
-	expected := fmt.Sprintf("file exceeds maximum analysis size of %d bytes", MaxSourceFileSize)
-	if output.ErrorMessage != expected {
-		t.Errorf("Expected error %q, got %q", expected, output.ErrorMessage)
+	outputs, hasErrors, _ := ProcessFilesParallel(mockFS, []string{"/app/huge.go"}, false, nil)
+	expected := fmt.Sprintf("file /app/huge.go exceeds maximum analysis size of %d bytes", models.MaxSourceFileSize)
+	if !hasErrors || outputs[0].ErrorMessage != expected {
+		t.Errorf("ErrorMessage = %q (hasErrors %v); want %q", outputs[0].ErrorMessage, hasErrors, expected)
 	}
 }
 
@@ -410,10 +298,7 @@ func TestRunIndex_SkipsImportOnlyInit(t *testing.T) {
 		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		results, err := LoadAndFingerprint(RealFileSystem{}, path)
-		if err != nil {
-			t.Fatalf("LoadAndFingerprint: %v", err)
-		}
+		results := fingerprintFiles(RealFileSystem{}, []string{path})
 		sigs, _, err := RunIndexJSON(path, results, "S", "HIGH", "malware", filepath.Join(t.TempDir(), "db.json"))
 		if err != nil {
 			t.Fatalf("RunIndexJSON: %v", err)

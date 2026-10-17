@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"bytes"
 	"fmt"
 	"go/constant"
 	"go/token"
@@ -17,34 +18,8 @@ import (
 // MaxLoopAnalysisDepth prevents stack overflow attacks from deeply nested loops during IV normalization.
 const MaxLoopAnalysisDepth = 64
 
-type virtualInstr struct {
-	instr        ssa.Instruction
-	virtualBlock *ssa.BasicBlock
-}
-
-type virtualBlock struct {
-	block        *ssa.BasicBlock
-	virtualSuccs [2]*ssa.BasicBlock
-	swapped      bool
-}
-
 var canonicalizerPool = sync.Pool{
-	New: func() interface{} {
-		return &Canonicalizer{
-			registerMap:          make(map[ssa.Value]string),
-			blockMap:             make(map[*ssa.BasicBlock]string),
-			virtualInstrs:        make(map[ssa.Instruction]*virtualInstr),
-			virtualBlocks:        make(map[*ssa.BasicBlock]*virtualBlock),
-			virtualBinOps:        make(map[*ssa.BinOp]token.Token),
-			hoistedInstrs:        make(map[ssa.Instruction]bool),
-			sunkInstrs:           make(map[ssa.Instruction]bool),
-			virtualPhiConstants:  make(map[*ssa.Phi]map[int]string),
-			virtualSubstitutions: make(map[ssa.Value]ssa.Value),
-			VirtualizedInstrs:    make(map[ssa.Instruction]bool),
-			selectCasePerm:       make(map[*ssa.Select][]int),
-			selectRecvPerm:       make(map[*ssa.Select][]int),
-		}
-	},
+	New: func() any { return new(Canonicalizer) },
 }
 
 func AcquireCanonicalizer(policy LiteralPolicy) *Canonicalizer {
@@ -68,20 +43,35 @@ type Canonicalizer struct {
 
 	loopInfo *loop.LoopInfo
 
-	registerMap          map[ssa.Value]string
-	blockMap             map[*ssa.BasicBlock]string
-	regCounter           int
-	output               strings.Builder
-	scratch              strings.Builder
-	virtualInstrs        map[ssa.Instruction]*virtualInstr
-	virtualBlocks        map[*ssa.BasicBlock]*virtualBlock
+	registerMap map[ssa.Value]string
+	blockMap    map[*ssa.BasicBlock]string
+	regCounter  int
+	output      strings.Builder
+	// scratch holds one instruction's rendering until its result register
+	// is named, which happens after its operands are. A bytes.Buffer keeps
+	// its storage across Reset; a strings.Builder would reallocate it for
+	// every instruction.
+	scratch bytes.Buffer
+	// virtualInstrs maps a moved instruction to the block it renders in;
+	// virtualBlocks maps a block whose branches are swapped to its
+	// successors in rendering order.
+	virtualInstrs        map[ssa.Instruction]*ssa.BasicBlock
+	virtualBlocks        map[*ssa.BasicBlock][]*ssa.BasicBlock
 	virtualBinOps        map[*ssa.BinOp]token.Token
 	hoistedInstrs        map[ssa.Instruction]bool
-	sunkInstrs           map[ssa.Instruction]bool
-	virtualPhiConstants  map[*ssa.Phi]map[int]string
 	virtualSubstitutions map[ssa.Value]ssa.Value
-	effectiveInstrs      map[*ssa.BasicBlock][]ssa.Instruction
-	VirtualizedInstrs    map[ssa.Instruction]bool
+	// effectiveInstrs is each block's instructions in rendering order,
+	// indexed by ssa.BasicBlock.Index.
+	effectiveInstrs   [][]ssa.Instruction
+	VirtualizedInstrs map[ssa.Instruction]bool
+
+	// renamer renders SCEV operands; built once, it is reentrant and
+	// returns to its initial state after every top-level call.
+	renamer loop.Renamer
+
+	// typeStrings caches sanitizeType for the function being canonicalized:
+	// its result depends only on the type, ownPkg and tparams.
+	typeStrings map[types.Type]string
 
 	// ownPkg is the package of the function being canonicalized. Names from
 	// it are rendered unqualified so two versions of a function loaded under
@@ -106,20 +96,10 @@ func NewCanonicalizer(policy LiteralPolicy) *Canonicalizer {
 }
 
 func (c *Canonicalizer) ApplyVirtualControlFlowFromState(swappedBlocks map[*ssa.BasicBlock]bool, virtualBinOps map[*ssa.BinOp]token.Token) {
-	// Sort blocks to ensure deterministic population of virtualBlocks
-	var blocks []*ssa.BasicBlock
+	c.initMaps()
 	for block := range swappedBlocks {
-		blocks = append(blocks, block)
-	}
-	sort.Slice(blocks, func(i, j int) bool { return blocks[i].Index < blocks[j].Index })
-
-	for _, block := range blocks {
 		if len(block.Succs) == 2 {
-			c.virtualBlocks[block] = &virtualBlock{
-				block:        block,
-				virtualSuccs: [2]*ssa.BasicBlock{block.Succs[1], block.Succs[0]},
-				swapped:      true,
-			}
+			c.virtualBlocks[block] = []*ssa.BasicBlock{block.Succs[1], block.Succs[0]}
 		}
 	}
 	for binOp, op := range virtualBinOps {
@@ -133,7 +113,6 @@ func (c *Canonicalizer) CanonicalizeFunction(fn *ssa.Function) string {
 	}
 
 	c.resetScratch()
-	c.setOwnPackage(fn)
 	estimatedSize := 0
 	for _, block := range fn.Blocks {
 		estimatedSize += len(block.Instrs) * 50
@@ -143,40 +122,37 @@ func (c *Canonicalizer) CanonicalizeFunction(fn *ssa.Function) string {
 	// Normalize parameters first to ensure they receive reserved names (p0, p1...)
 	// before any analysis passes (like SCEV) potentially reference them.
 	for i, param := range fn.Params {
-		c.normalizeValue(param, fmt.Sprintf("p%d", i))
+		c.normalizeValue(param, "p"+strconv.Itoa(i))
 	}
 	for i, fv := range fn.FreeVars {
-		c.normalizeValue(fv, fmt.Sprintf("fv%d", i))
+		c.normalizeValue(fv, "fv"+strconv.Itoa(i))
 	}
 
 	c.AnalyzeLoops(fn)
 	c.hoistInvariantCalls(fn)
 	c.NormalizeInductionVariables()
 
+	// Blocks the traversal does not reach follow it in index order.
+	// fn.Blocks is in index order: Blocks[i].Index == i.
 	sortedBlocks := c.deterministicTraversal(fn)
-	visited := make(map[*ssa.BasicBlock]bool)
+	reached := make([]bool, len(fn.Blocks))
 	for _, b := range sortedBlocks {
-		visited[b] = true
+		reached[b.Index] = true
 	}
-	var unreachables []*ssa.BasicBlock
 	for _, b := range fn.Blocks {
-		if !visited[b] {
-			unreachables = append(unreachables, b)
+		if !reached[b.Index] {
+			sortedBlocks = append(sortedBlocks, b)
 		}
 	}
-	sort.Slice(unreachables, func(i, j int) bool { return unreachables[i].Index < unreachables[j].Index })
-	sortedBlocks = append(sortedBlocks, unreachables...)
 
 	for i, block := range sortedBlocks {
-		c.blockMap[block] = fmt.Sprintf("b%d", i)
+		c.blockMap[block] = "b" + strconv.Itoa(i)
 	}
 
 	c.writeFunctionSignature(fn)
 	c.reconstructBlockInstructions(fn)
 	for _, block := range sortedBlocks {
-		if _, exists := c.blockMap[block]; exists {
-			c.processBlock(block)
-		}
+		c.processBlock(block)
 	}
 
 	return c.output.String()
@@ -192,11 +168,13 @@ func (c *Canonicalizer) AnalyzeLoops(fn *ssa.Function) {
 }
 
 func (c *Canonicalizer) setOwnPackage(fn *ssa.Function) {
+	c.initMaps()
 	c.ownPkg = nil
 	if fn.Pkg != nil {
 		c.ownPkg = fn.Pkg.Pkg
 	}
 	c.tparams = NewTypeParamRenamer(fn)
+	clear(c.typeStrings)
 }
 
 // qualifier renders the canonicalized function's own package unqualified and
@@ -251,67 +229,42 @@ func (c *Canonicalizer) normalizeInductionVariablesRecursive(loops []*loop.Loop,
 	}
 }
 
+// reconstructBlockInstructions orders each block's instructions for
+// rendering: its phis, its own instructions, the instructions hoisted into
+// it (in source block and instruction order, which keeps a hoisted call
+// after the hoisted calls from its own block that it depends on), then its
+// terminator. Virtualized instructions are left out.
 func (c *Canonicalizer) reconstructBlockInstructions(fn *ssa.Function) {
-	c.effectiveInstrs = make(map[*ssa.BasicBlock][]ssa.Instruction)
-
-	// Separate instruction lists to enforce safe ordering:
-	// 1. Phis (must be first)
-	// 2. Heads (Sunk instructions - execute before body)
-	// 3. Bodies (Native instructions)
-	// 4. Tails (Hoisted instructions - execute at end)
-	// 5. Terminators
-	phis := make(map[*ssa.BasicBlock][]ssa.Instruction)
-	heads := make(map[*ssa.BasicBlock][]ssa.Instruction)
-	bodies := make(map[*ssa.BasicBlock][]ssa.Instruction)
-	tails := make(map[*ssa.BasicBlock][]ssa.Instruction)
-	terminators := make(map[*ssa.BasicBlock]ssa.Instruction)
-
+	n := len(fn.Blocks)
+	own := make([][]ssa.Instruction, n)
+	tails := make([][]ssa.Instruction, n)
+	terms := make([]ssa.Instruction, n)
 	for _, b := range fn.Blocks {
+		own[b.Index] = make([]ssa.Instruction, 0, len(b.Instrs))
 		for _, instr := range b.Instrs {
 			if c.VirtualizedInstrs[instr] {
 				continue
 			}
-
-			targetBlock := c.getVirtualBlock(instr)
-			isTerm := isTerminator(instr)
-
-			if isTerm && targetBlock == b {
-				terminators[b] = instr
-				continue
-			}
-
-			// Keep Phis at the start of their native block
-			if _, ok := instr.(*ssa.Phi); ok && targetBlock == b {
-				phis[b] = append(phis[b], instr)
-				continue
-			}
-
-			// Classify instruction placement
-			if c.sunkInstrs[instr] {
-				// Sunk instructions (moved down) typically must execute before the native body
-				heads[targetBlock] = append(heads[targetBlock], instr)
-			} else if c.hoistedInstrs[instr] || targetBlock != b {
-				// Hoisted instructions (moved up) or generic moves usually go to tail (e.g. preheader)
-				tails[targetBlock] = append(tails[targetBlock], instr)
-			} else {
-				// Native instructions stay in body
-				bodies[targetBlock] = append(bodies[targetBlock], instr)
+			target := c.getVirtualBlock(instr)
+			switch {
+			case target != b || c.hoistedInstrs[instr]:
+				tails[target.Index] = append(tails[target.Index], instr)
+			case isTerminator(instr):
+				terms[b.Index] = instr
+			default:
+				// SSA puts a block's phis first, so they lead.
+				own[b.Index] = append(own[b.Index], instr)
 			}
 		}
 	}
 
-	for _, b := range fn.Blocks {
-		var combined []ssa.Instruction
-		combined = append(combined, phis[b]...)
-		combined = append(combined, heads[b]...)
-		combined = append(combined, bodies[b]...)
-		// Appending in discovery order (which is usually topological for hoists) preserves dependencies.
-		combined = append(combined, tails[b]...)
-
-		if t, ok := terminators[b]; ok {
-			combined = append(combined, t)
+	c.effectiveInstrs = make([][]ssa.Instruction, n)
+	for i := range own {
+		instrs := append(own[i], tails[i]...)
+		if terms[i] != nil {
+			instrs = append(instrs, terms[i])
 		}
-		c.effectiveInstrs[b] = combined
+		c.effectiveInstrs[i] = instrs
 	}
 }
 
@@ -395,77 +348,71 @@ func (c *Canonicalizer) hoistInvariantCalls(fn *ssa.Function) {
 	}
 }
 
+// computeSCCs returns fn's strongly connected components (Tarjan). Per-block
+// state is indexed by ssa.BasicBlock.Index; an order of -1 means unvisited.
 func (c *Canonicalizer) computeSCCs(fn *ssa.Function) [][]*ssa.BasicBlock {
-	type tarjanState struct {
-		index    int
-		stack    []*ssa.BasicBlock
-		onStack  map[*ssa.BasicBlock]bool
-		indices  map[*ssa.BasicBlock]int
-		lowLinks map[*ssa.BasicBlock]int
-		sccs     [][]*ssa.BasicBlock
+	n := len(fn.Blocks)
+	order := make([]int, n)
+	lowLink := make([]int, n)
+	onStack := make([]bool, n)
+	for i := range order {
+		order[i] = -1
 	}
-
-	state := &tarjanState{
-		onStack:  make(map[*ssa.BasicBlock]bool),
-		indices:  make(map[*ssa.BasicBlock]int),
-		lowLinks: make(map[*ssa.BasicBlock]int),
-	}
+	var (
+		next  int
+		stack []*ssa.BasicBlock
+		sccs  [][]*ssa.BasicBlock
+	)
 
 	var strongConnect func(v *ssa.BasicBlock)
 	strongConnect = func(v *ssa.BasicBlock) {
-		state.indices[v] = state.index
-		state.lowLinks[v] = state.index
-		state.index++
-		state.stack = append(state.stack, v)
-		state.onStack[v] = true
+		vi := v.Index
+		order[vi], lowLink[vi] = next, next
+		next++
+		stack = append(stack, v)
+		onStack[vi] = true
 
 		for _, w := range v.Succs {
-			if _, visited := state.indices[w]; !visited {
+			wi := w.Index
+			if order[wi] < 0 {
 				strongConnect(w)
-				if state.lowLinks[w] < state.lowLinks[v] {
-					state.lowLinks[v] = state.lowLinks[w]
-				}
-			} else if state.onStack[w] {
-				if state.indices[w] < state.lowLinks[v] {
-					state.lowLinks[v] = state.indices[w]
-				}
+				lowLink[vi] = min(lowLink[vi], lowLink[wi])
+			} else if onStack[wi] {
+				lowLink[vi] = min(lowLink[vi], order[wi])
 			}
 		}
 
-		if state.lowLinks[v] == state.indices[v] {
+		if lowLink[vi] == order[vi] {
 			var component []*ssa.BasicBlock
 			for {
-				w := state.stack[len(state.stack)-1]
-				state.stack = state.stack[:len(state.stack)-1]
-				state.onStack[w] = false
+				w := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				onStack[w.Index] = false
 				component = append(component, w)
 				if w == v {
 					break
 				}
 			}
-			state.sccs = append(state.sccs, component)
+			sccs = append(sccs, component)
 		}
 	}
 
 	for _, block := range fn.Blocks {
-		if _, visited := state.indices[block]; !visited {
+		if order[block.Index] < 0 {
 			strongConnect(block)
 		}
 	}
 
-	return state.sccs
+	return sccs
 }
 
 func (c *Canonicalizer) moveInstrToOtherBlock(target ssa.Instruction, dest *ssa.BasicBlock) {
-	c.virtualInstrs[target] = &virtualInstr{
-		instr:        target,
-		virtualBlock: dest,
-	}
+	c.virtualInstrs[target] = dest
 }
 
 func (c *Canonicalizer) getVirtualBlock(instr ssa.Instruction) *ssa.BasicBlock {
-	if vi, ok := c.virtualInstrs[instr]; ok {
-		return vi.virtualBlock
+	if b, ok := c.virtualInstrs[instr]; ok {
+		return b
 	}
 	return instr.Block()
 }
@@ -474,8 +421,8 @@ func (c *Canonicalizer) getVirtualSuccessors(b *ssa.BasicBlock) []*ssa.BasicBloc
 	if b == nil {
 		return nil
 	}
-	if vb, ok := c.virtualBlocks[b]; ok && vb.swapped {
-		return []*ssa.BasicBlock{vb.virtualSuccs[0], vb.virtualSuccs[1]}
+	if succs, ok := c.virtualBlocks[b]; ok {
+		return succs
 	}
 	return b.Succs
 }
@@ -547,107 +494,51 @@ func (c *Canonicalizer) areArgsInvariantLoop(call *ssa.Call, loopBlocks map[*ssa
 	return true
 }
 
+// initMaps makes the maps a zero Canonicalizer lacks, so one used without
+// AcquireCanonicalizer works too.
+func (c *Canonicalizer) initMaps() {
+	if c.registerMap != nil {
+		return
+	}
+	c.registerMap = make(map[ssa.Value]string)
+	c.blockMap = make(map[*ssa.BasicBlock]string)
+	c.virtualInstrs = make(map[ssa.Instruction]*ssa.BasicBlock)
+	c.virtualBlocks = make(map[*ssa.BasicBlock][]*ssa.BasicBlock)
+	c.virtualBinOps = make(map[*ssa.BinOp]token.Token)
+	c.hoistedInstrs = make(map[ssa.Instruction]bool)
+	c.virtualSubstitutions = make(map[ssa.Value]ssa.Value)
+	c.VirtualizedInstrs = make(map[ssa.Instruction]bool)
+	c.selectCasePerm = make(map[*ssa.Select][]int)
+	c.selectRecvPerm = make(map[*ssa.Select][]int)
+	c.typeStrings = make(map[types.Type]string)
+}
+
 func (c *Canonicalizer) fullReset() {
-	c.resetConfig()
+	c.initMaps()
+	clear(c.virtualBlocks)
+	clear(c.virtualBinOps)
 	c.resetScratch()
 }
 
-func (c *Canonicalizer) resetConfig() {
-	if c.virtualBlocks != nil {
-		for k := range c.virtualBlocks {
-			delete(c.virtualBlocks, k)
-		}
-	} else {
-		c.virtualBlocks = make(map[*ssa.BasicBlock]*virtualBlock)
-	}
-
-	if c.virtualBinOps != nil {
-		for k := range c.virtualBinOps {
-			delete(c.virtualBinOps, k)
-		}
-	} else {
-		c.virtualBinOps = make(map[*ssa.BinOp]token.Token)
-	}
-}
-
+// resetScratch clears the per-function state; the virtual control flow
+// applied before CanonicalizeFunction survives it.
 func (c *Canonicalizer) resetScratch() {
-	if c.registerMap != nil {
-		for k := range c.registerMap {
-			delete(c.registerMap, k)
-		}
-	} else {
-		c.registerMap = make(map[ssa.Value]string)
-	}
-
-	if c.blockMap != nil {
-		for k := range c.blockMap {
-			delete(c.blockMap, k)
-		}
-	} else {
-		c.blockMap = make(map[*ssa.BasicBlock]string)
-	}
-
+	c.initMaps()
+	clear(c.registerMap)
+	clear(c.blockMap)
 	c.regCounter = 0
 	c.output.Reset()
 	c.loopInfo = nil
-
-	if c.virtualInstrs != nil {
-		for k := range c.virtualInstrs {
-			delete(c.virtualInstrs, k)
-		}
-	} else {
-		c.virtualInstrs = make(map[ssa.Instruction]*virtualInstr)
-	}
-
-	if c.hoistedInstrs != nil {
-		for k := range c.hoistedInstrs {
-			delete(c.hoistedInstrs, k)
-		}
-	} else {
-		c.hoistedInstrs = make(map[ssa.Instruction]bool)
-	}
-
-	if c.sunkInstrs != nil {
-		for k := range c.sunkInstrs {
-			delete(c.sunkInstrs, k)
-		}
-	} else {
-		c.sunkInstrs = make(map[ssa.Instruction]bool)
-	}
-
-	if c.virtualPhiConstants != nil {
-		for k := range c.virtualPhiConstants {
-			delete(c.virtualPhiConstants, k)
-		}
-	} else {
-		c.virtualPhiConstants = make(map[*ssa.Phi]map[int]string)
-	}
-
-	if c.virtualSubstitutions != nil {
-		for k := range c.virtualSubstitutions {
-			delete(c.virtualSubstitutions, k)
-		}
-	} else {
-		c.virtualSubstitutions = make(map[ssa.Value]ssa.Value)
-	}
-
-	if c.VirtualizedInstrs != nil {
-		for k := range c.VirtualizedInstrs {
-			delete(c.VirtualizedInstrs, k)
-		}
-	} else {
-		c.VirtualizedInstrs = make(map[ssa.Instruction]bool)
-	}
-
+	clear(c.virtualInstrs)
+	clear(c.hoistedInstrs)
+	clear(c.virtualSubstitutions)
+	clear(c.VirtualizedInstrs)
 	c.effectiveInstrs = nil
 	c.ownPkg = nil
 	c.tparams = nil
-	for k := range c.selectCasePerm {
-		delete(c.selectCasePerm, k)
-	}
-	for k := range c.selectRecvPerm {
-		delete(c.selectRecvPerm, k)
-	}
+	clear(c.typeStrings)
+	clear(c.selectCasePerm)
+	clear(c.selectRecvPerm)
 }
 
 func (c *Canonicalizer) normalizeValue(v ssa.Value, preferredName ...string) string {
@@ -658,7 +549,7 @@ func (c *Canonicalizer) normalizeValue(v ssa.Value, preferredName ...string) str
 	if len(preferredName) > 0 {
 		name = preferredName[0]
 	} else {
-		name = fmt.Sprintf("v%d", c.regCounter)
+		name = "v" + strconv.Itoa(c.regCounter)
 		c.regCounter++
 	}
 	c.registerMap[v] = name
@@ -667,56 +558,53 @@ func (c *Canonicalizer) normalizeValue(v ssa.Value, preferredName ...string) str
 
 const MaxRenamerDepth = 20
 
+// renamerFunc returns the canonicalizer's SCEV renamer. It names a value
+// by its substitution, following chains of substitutions, and guards against
+// cycles both in a chain and through recursive SCEV formatting.
 func (c *Canonicalizer) renamerFunc() loop.Renamer {
-	// Optimization: Slice-based stack avoids map allocation overhead
+	if c.renamer != nil {
+		return c.renamer
+	}
 	var stack []ssa.Value
-	depth := 0
 
-	var renamer loop.Renamer
-	renamer = func(v ssa.Value) string {
-		if depth >= MaxRenamerDepth {
+	c.renamer = func(v ssa.Value) string {
+		if len(stack) >= MaxRenamerDepth {
 			return "<depth-limit>"
 		}
-
-		// Check for cycle in current recursion stack
 		for _, s := range stack {
 			if s == v {
 				return "<cycle>"
 			}
 		}
-
 		stack = append(stack, v)
-		depth++
-		defer func() {
-			depth--
-			stack = stack[:len(stack)-1]
-		}()
+		defer func() { stack = stack[:len(stack)-1] }()
 
-		visited := make(map[ssa.Value]bool)
+		// visited holds the values of the chain after v, so a single
+		// substitution allocates nothing.
 		current := v
-
+		var visited map[ssa.Value]bool
 		for {
-			// BUG FIX: Detect cycle in iterative substitution
-			if visited[current] {
-				return "<cycle>"
-			}
-			visited[current] = true
-
 			sub, ok := c.virtualSubstitutions[current]
 			if !ok {
 				break
 			}
-
 			if scev, isScev := sub.(loop.SCEV); isScev {
-				return loop.FormatSCEV(scev, renamer, c.recurrenceLabel)
+				return loop.FormatSCEV(scev, c.renamer, c.recurrenceLabel)
 			}
-
+			if current != v {
+				if visited == nil {
+					visited = make(map[ssa.Value]bool)
+				}
+				visited[current] = true
+			}
+			if sub == v || visited[sub] {
+				return "<cycle>"
+			}
 			current = sub
 		}
-
 		return c.normalizeValue(current)
 	}
-	return renamer
+	return c.renamer
 }
 
 // recurrenceLabel tags a recurrence with its loop's canonical header block
@@ -736,86 +624,34 @@ func (c *Canonicalizer) recurrenceLabel(rec *loop.SCEVAddRec) string {
 	return "<" + header + ">"
 }
 
+// deterministicTraversal returns the blocks reachable from the entry in
+// depth-first preorder, visiting each block's (virtual) successors in
+// order. go/ssa blocks have at most two successors (If); select and type
+// switches are lowered to chains of Ifs.
 func (c *Canonicalizer) deterministicTraversal(fn *ssa.Function) []*ssa.BasicBlock {
-	var sortedBlocks []*ssa.BasicBlock
 	if len(fn.Blocks) == 0 {
-		return sortedBlocks
+		return nil
 	}
-	entryBlock := fn.Blocks[0]
-	if entryBlock == nil {
-		return sortedBlocks
-	}
-
-	visited := make(map[*ssa.BasicBlock]bool)
-	stack := []*ssa.BasicBlock{entryBlock}
+	sortedBlocks := make([]*ssa.BasicBlock, 0, len(fn.Blocks))
+	visited := make([]bool, len(fn.Blocks))
+	stack := []*ssa.BasicBlock{fn.Blocks[0]}
 
 	for len(stack) > 0 {
 		block := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 
-		if visited[block] {
+		if visited[block.Index] {
 			continue
 		}
-		visited[block] = true
+		visited[block.Index] = true
 		sortedBlocks = append(sortedBlocks, block)
 
 		succs := c.getVirtualSuccessors(block)
-		if len(succs) == 2 {
-			// Binary branches (if-then-else): preserve true/false order.
-			stack = append(stack, succs[1])
-			stack = append(stack, succs[0])
-		} else if len(succs) > 2 {
-			// Multi-way branches (select, typeswitch) can have successors
-			// in an order that depends on AST position or compiler version. Sort them
-			// canonically by their structural fingerprint to ensure deterministic traversal.
-			//
-			// Sort by: block's first instruction type, then instruction count, then original index.
-			// This produces a stable order based on block content rather than emission order.
-			orderedSuccs := make([]*ssa.BasicBlock, len(succs))
-			copy(orderedSuccs, succs)
-			sort.SliceStable(orderedSuccs, func(i, j int) bool {
-				return c.blockSortKey(orderedSuccs[i]) < c.blockSortKey(orderedSuccs[j])
-			})
-			// Push in reverse order so first in sorted order is processed first
-			for i := len(orderedSuccs) - 1; i >= 0; i-- {
-				stack = append(stack, orderedSuccs[i])
-			}
-		} else {
-			// 0 or 1 successor: no ambiguity
-			for i := len(succs) - 1; i >= 0; i-- {
-				stack = append(stack, succs[i])
-			}
+		for i := len(succs) - 1; i >= 0; i-- {
+			stack = append(stack, succs[i])
 		}
 	}
 	return sortedBlocks
-}
-
-// Generates a canonical key for sorting basic blocks.
-// The key is designed to be stable across AST reorderings and compiler versions
-// by focusing on structural properties rather than positional indices.
-func (c *Canonicalizer) blockSortKey(b *ssa.BasicBlock) string {
-	if b == nil || len(b.Instrs) == 0 {
-		return "\xff" // Sort empty blocks last
-	}
-
-	// Build key from: first instruction type, instruction count, original index as tiebreaker
-	firstInstr := b.Instrs[0]
-	instrType := fmt.Sprintf("%T", firstInstr)
-
-	// Include a structural fingerprint of the first few instructions
-	var keyParts []string
-	keyParts = append(keyParts, instrType)
-	keyParts = append(keyParts, fmt.Sprintf("%03d", len(b.Instrs)))
-
-	// Sample up to 3 instruction types for better discrimination
-	for i := 0; i < 3 && i < len(b.Instrs); i++ {
-		keyParts = append(keyParts, fmt.Sprintf("%T", b.Instrs[i]))
-	}
-
-	// Original index as final tiebreaker for complete determinism
-	keyParts = append(keyParts, fmt.Sprintf("%05d", b.Index))
-
-	return strings.Join(keyParts, "|")
 }
 
 func (c *Canonicalizer) writeFunctionSignature(fn *ssa.Function) {
@@ -824,7 +660,9 @@ func (c *Canonicalizer) writeFunctionSignature(fn *ssa.Function) {
 		if i > 0 {
 			c.output.WriteString(", ")
 		}
-		c.output.WriteString(fmt.Sprintf("%s: %s", c.registerMap[p], c.sanitizeType(p.Type())))
+		c.output.WriteString(c.registerMap[p])
+		c.output.WriteString(": ")
+		c.output.WriteString(c.sanitizeType(p.Type()))
 	}
 	c.output.WriteString(")")
 	sig := fn.Signature
@@ -842,21 +680,23 @@ func (c *Canonicalizer) writeFunctionSignature(fn *ssa.Function) {
 }
 
 func (c *Canonicalizer) processBlock(block *ssa.BasicBlock) {
-	c.output.WriteString(c.blockMap[block] + ":\n")
+	c.output.WriteString(c.blockMap[block])
+	c.output.WriteString(":\n")
 
 	if c.loopInfo != nil {
 		if l, ok := c.loopInfo.LoopMap[block]; ok {
 			c.output.WriteString("  ; LoopHeader")
 			if l.TripCount != nil {
-				// BUG FIX: Use renamer to ensure TripCount variables match the rest of the IR
-				c.output.WriteString(fmt.Sprintf(" TripCount: %s", loop.FormatSCEV(l.TripCount, c.renamerFunc(), c.recurrenceLabel)))
+				// The trip count names values through the renamer so they
+				// match their names in the rest of the IR.
+				c.output.WriteString(" TripCount: ")
+				c.output.WriteString(loop.FormatSCEV(l.TripCount, c.renamerFunc(), c.recurrenceLabel))
 			}
 			c.output.WriteString("\n")
 		}
 	}
 
-	instrs := c.effectiveInstrs[block]
-	for _, instr := range instrs {
+	for _, instr := range c.effectiveInstrs[block.Index] {
 		c.processInstruction(instr)
 	}
 }
@@ -971,53 +811,53 @@ func (c *Canonicalizer) processInstruction(instr ssa.Instruction) {
 			c.scratch.WriteString(c.NormalizeOperand(res, instr))
 		}
 	case *ssa.IndexAddr:
-		c.scratch.WriteString(fmt.Sprintf("IndexAddr %s, %s", c.NormalizeOperand(i.X, instr), c.NormalizeOperand(i.Index, instr)))
+		fmt.Fprintf(&c.scratch, "IndexAddr %s, %s", c.NormalizeOperand(i.X, instr), c.NormalizeOperand(i.Index, instr))
 	case *ssa.Index:
-		c.scratch.WriteString(fmt.Sprintf("Index %s, %s", c.NormalizeOperand(i.X, instr), c.NormalizeOperand(i.Index, instr)))
+		fmt.Fprintf(&c.scratch, "Index %s, %s", c.NormalizeOperand(i.X, instr), c.NormalizeOperand(i.Index, instr))
 	case *ssa.Select:
 		c.writeSelect(&c.scratch, i, instr)
 	case *ssa.Range:
-		c.scratch.WriteString(fmt.Sprintf("Range %s", c.NormalizeOperand(i.X, instr)))
+		fmt.Fprintf(&c.scratch, "Range %s", c.NormalizeOperand(i.X, instr))
 	case *ssa.Next:
-		c.scratch.WriteString(fmt.Sprintf("Next %s", c.NormalizeOperand(i.Iter, instr)))
+		fmt.Fprintf(&c.scratch, "Next %s", c.NormalizeOperand(i.Iter, instr))
 	case *ssa.Extract:
-		c.scratch.WriteString(fmt.Sprintf("Extract %s, %d", c.NormalizeOperand(i.Tuple, instr), c.remappedExtractIndex(i)))
+		fmt.Fprintf(&c.scratch, "Extract %s, %d", c.NormalizeOperand(i.Tuple, instr), c.remappedExtractIndex(i))
 	case *ssa.Slice:
-		c.scratch.WriteString(fmt.Sprintf("Slice %s", c.NormalizeOperand(i.X, instr)))
+		fmt.Fprintf(&c.scratch, "Slice %s", c.NormalizeOperand(i.X, instr))
 		if i.Low != nil {
-			c.scratch.WriteString(fmt.Sprintf(", Low:%s", c.NormalizeOperand(i.Low, instr)))
+			fmt.Fprintf(&c.scratch, ", Low:%s", c.NormalizeOperand(i.Low, instr))
 		}
 		if i.High != nil {
-			c.scratch.WriteString(fmt.Sprintf(", High:%s", c.NormalizeOperand(i.High, instr)))
+			fmt.Fprintf(&c.scratch, ", High:%s", c.NormalizeOperand(i.High, instr))
 		}
 		if i.Max != nil {
-			c.scratch.WriteString(fmt.Sprintf(", Max:%s", c.NormalizeOperand(i.Max, instr)))
+			fmt.Fprintf(&c.scratch, ", Max:%s", c.NormalizeOperand(i.Max, instr))
 		}
 	case *ssa.MakeSlice:
-		c.scratch.WriteString(fmt.Sprintf("MakeSlice %s, Len:%s, Cap:%s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.Len, instr), c.NormalizeOperand(i.Cap, instr)))
+		fmt.Fprintf(&c.scratch, "MakeSlice %s, Len:%s, Cap:%s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.Len, instr), c.NormalizeOperand(i.Cap, instr))
 	case *ssa.MakeMap:
-		c.scratch.WriteString(fmt.Sprintf("MakeMap %s", c.sanitizeType(i.Type())))
+		fmt.Fprintf(&c.scratch, "MakeMap %s", c.sanitizeType(i.Type()))
 		if i.Reserve != nil {
-			c.scratch.WriteString(fmt.Sprintf(", Reserve:%s", c.NormalizeOperand(i.Reserve, instr)))
+			fmt.Fprintf(&c.scratch, ", Reserve:%s", c.NormalizeOperand(i.Reserve, instr))
 		}
 	case *ssa.MapUpdate:
-		c.scratch.WriteString(fmt.Sprintf("MapUpdate %s, Key:%s, Val:%s", c.NormalizeOperand(i.Map, instr), c.NormalizeOperand(i.Key, instr), c.NormalizeOperand(i.Value, instr)))
+		fmt.Fprintf(&c.scratch, "MapUpdate %s, Key:%s, Val:%s", c.NormalizeOperand(i.Map, instr), c.NormalizeOperand(i.Key, instr), c.NormalizeOperand(i.Value, instr))
 	case *ssa.Lookup:
-		c.scratch.WriteString(fmt.Sprintf("Lookup %s, Key:%s", c.NormalizeOperand(i.X, instr), c.NormalizeOperand(i.Index, instr)))
+		fmt.Fprintf(&c.scratch, "Lookup %s, Key:%s", c.NormalizeOperand(i.X, instr), c.NormalizeOperand(i.Index, instr))
 		if i.CommaOk {
 			c.scratch.WriteString(", CommaOk")
 		}
 	case *ssa.TypeAssert:
-		c.scratch.WriteString(fmt.Sprintf("TypeAssert %s, AssertedType:%s", c.NormalizeOperand(i.X, instr), c.sanitizeType(i.AssertedType)))
+		fmt.Fprintf(&c.scratch, "TypeAssert %s, AssertedType:%s", c.NormalizeOperand(i.X, instr), c.sanitizeType(i.AssertedType))
 		if i.CommaOk {
 			c.scratch.WriteString(", CommaOk")
 		}
 	case *ssa.MakeInterface:
-		c.scratch.WriteString(fmt.Sprintf("MakeInterface %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		fmt.Fprintf(&c.scratch, "MakeInterface %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr))
 	case *ssa.ChangeType:
-		c.scratch.WriteString(fmt.Sprintf("ChangeType %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		fmt.Fprintf(&c.scratch, "ChangeType %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr))
 	case *ssa.Convert:
-		c.scratch.WriteString(fmt.Sprintf("Convert %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		fmt.Fprintf(&c.scratch, "Convert %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr))
 	case *ssa.Go:
 		c.scratch.WriteString("Go ")
 		c.writeCallCommon(&c.scratch, &i.Call, instr)
@@ -1027,9 +867,9 @@ func (c *Canonicalizer) processInstruction(instr ssa.Instruction) {
 	case *ssa.RunDefers:
 		c.scratch.WriteString("RunDefers")
 	case *ssa.Panic:
-		c.scratch.WriteString(fmt.Sprintf("Panic %s", c.NormalizeOperand(i.X, instr)))
+		fmt.Fprintf(&c.scratch, "Panic %s", c.NormalizeOperand(i.X, instr))
 	case *ssa.MakeClosure:
-		c.scratch.WriteString(fmt.Sprintf("MakeClosure %s", c.NormalizeOperand(i.Fn, instr)))
+		fmt.Fprintf(&c.scratch, "MakeClosure %s", c.NormalizeOperand(i.Fn, instr))
 		if len(i.Bindings) > 0 {
 			c.scratch.WriteString(" [")
 			for j, binding := range i.Bindings {
@@ -1041,19 +881,19 @@ func (c *Canonicalizer) processInstruction(instr ssa.Instruction) {
 			c.scratch.WriteString("]")
 		}
 	case *ssa.FieldAddr:
-		c.scratch.WriteString(fmt.Sprintf("FieldAddr %s, field(%s)", c.NormalizeOperand(i.X, instr), FieldName(i.X, i.Field)))
+		fmt.Fprintf(&c.scratch, "FieldAddr %s, field(%s)", c.NormalizeOperand(i.X, instr), FieldName(i.X, i.Field))
 	case *ssa.Field:
-		c.scratch.WriteString(fmt.Sprintf("Field %s, field(%s)", c.NormalizeOperand(i.X, instr), FieldName(i.X, i.Field)))
+		fmt.Fprintf(&c.scratch, "Field %s, field(%s)", c.NormalizeOperand(i.X, instr), FieldName(i.X, i.Field))
 	case *ssa.Send:
-		c.scratch.WriteString(fmt.Sprintf("Send %s, %s", c.NormalizeOperand(i.Chan, instr), c.NormalizeOperand(i.X, instr)))
+		fmt.Fprintf(&c.scratch, "Send %s, %s", c.NormalizeOperand(i.Chan, instr), c.NormalizeOperand(i.X, instr))
 	case *ssa.MakeChan:
-		c.scratch.WriteString(fmt.Sprintf("MakeChan %s, Size:%s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.Size, instr)))
+		fmt.Fprintf(&c.scratch, "MakeChan %s, Size:%s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.Size, instr))
 	case *ssa.ChangeInterface:
-		c.scratch.WriteString(fmt.Sprintf("ChangeInterface %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		fmt.Fprintf(&c.scratch, "ChangeInterface %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr))
 	case *ssa.SliceToArrayPointer:
-		c.scratch.WriteString(fmt.Sprintf("SliceToArrayPointer %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		fmt.Fprintf(&c.scratch, "SliceToArrayPointer %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr))
 	case *ssa.MultiConvert:
-		c.scratch.WriteString(fmt.Sprintf("MultiConvert %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr)))
+		fmt.Fprintf(&c.scratch, "MultiConvert %s, %s", c.sanitizeType(i.Type()), c.NormalizeOperand(i.X, instr))
 	case *ssa.DebugRef:
 		return
 
@@ -1061,7 +901,7 @@ func (c *Canonicalizer) processInstruction(instr ssa.Instruction) {
 		if c.StrictMode {
 			panic(fmt.Sprintf("STRICT MODE: Unhandled SSA instruction %T", instr))
 		}
-		c.scratch.WriteString(fmt.Sprintf("UnhandledInstr<%T>", instr))
+		fmt.Fprintf(&c.scratch, "UnhandledInstr<%T>", instr)
 	}
 
 	c.output.WriteString("  ")
@@ -1073,14 +913,15 @@ func (c *Canonicalizer) processInstruction(instr ssa.Instruction) {
 			}
 		}
 		if !isVoid {
-			name := c.normalizeValue(val)
-			c.output.WriteString(fmt.Sprintf("%s = ", name))
+			c.output.WriteString(c.normalizeValue(val))
+			c.output.WriteString(" = ")
 		}
 	}
-	c.output.WriteString(c.scratch.String() + "\n")
+	c.output.Write(c.scratch.Bytes())
+	c.output.WriteByte('\n')
 }
 
-func (c *Canonicalizer) writeSelect(w *strings.Builder, i *ssa.Select, context ssa.Instruction) {
+func (c *Canonicalizer) writeSelect(w *bytes.Buffer, i *ssa.Select, context ssa.Instruction) {
 	w.WriteString("Select")
 	if i.Blocking {
 		w.WriteString(" [blocking]")
@@ -1187,9 +1028,9 @@ func (c *Canonicalizer) writeSelect(w *strings.Builder, i *ssa.Select, context s
 	c.selectRecvPerm[i] = recvPerm
 
 	for _, state := range states {
-		w.WriteString(fmt.Sprintf(" (%s %s", state.dir, state.chanRepr))
+		fmt.Fprintf(w, " (%s %s", state.dir, state.chanRepr)
 		if state.sendValRepr != "" {
-			w.WriteString(fmt.Sprintf(" <- %s", state.sendValRepr))
+			fmt.Fprintf(w, " <- %s", state.sendValRepr)
 		}
 		w.WriteString(")")
 	}
@@ -1245,61 +1086,38 @@ func (c *Canonicalizer) remappedExtractIndex(ext *ssa.Extract) int {
 	return 2 + perm[ext.Index-2]
 }
 
-func (c *Canonicalizer) writePhi(w *strings.Builder, i *ssa.Phi, instr ssa.Instruction) {
+// writePhi renders a phi's edges ordered by their predecessors' canonical
+// block numbers, so the rendering does not depend on go/ssa's predecessor
+// order.
+func (c *Canonicalizer) writePhi(w *bytes.Buffer, i *ssa.Phi, instr ssa.Instruction) {
 	w.WriteString("Phi")
 	type edge struct {
-		predID    string
-		predIndex int
-		value     string
+		pred  string // the predecessor's canonical name, "b<n>"
+		n     int
+		value string
 	}
-	edges := make([]edge, 0, len(i.Edges))
 	preds := i.Block().Preds
+	edges := make([]edge, 0, len(i.Edges))
 	for j, val := range i.Edges {
 		if j >= len(preds) {
 			break
 		}
-		predBlock := preds[j]
-		predID := c.blockMap[predBlock]
-
-		// BUG FIX: Robust predecessor index parsing and fallback
-		if predID == "" || len(predID) < 2 {
-			predID = fmt.Sprintf("b%d", predBlock.Index)
-		}
-		idx := -1
-		if len(predID) > 1 && predID[0] == 'b' {
-			if val, err := strconv.Atoi(predID[1:]); err == nil {
-				idx = val
-			}
-		}
-
-		valStr := c.NormalizeOperand(val, instr)
-		if overrides, ok := c.virtualPhiConstants[i]; ok {
-			if ov, ok := overrides[j]; ok {
-				valStr = ov
-			}
-		}
-
-		edges = append(edges, edge{predID: predID, predIndex: idx, value: valStr})
+		pred := c.blockMap[preds[j]]
+		n, _ := strconv.Atoi(strings.TrimPrefix(pred, "b"))
+		edges = append(edges, edge{pred: pred, n: n, value: c.NormalizeOperand(val, instr)})
 	}
-
-	// Deterministic sorting logic for Phi edges
-	sort.SliceStable(edges, func(a, b int) bool {
-		// Primary: Numeric index if available
-		if edges[a].predIndex != -1 && edges[b].predIndex != -1 {
-			return edges[a].predIndex < edges[b].predIndex
-		}
-		// Secondary: Lexicographical sort on ID (fallback)
-		return edges[a].predID < edges[b].predID
-	})
-
+	sort.SliceStable(edges, func(a, b int) bool { return edges[a].n < edges[b].n })
 	for _, e := range edges {
-		w.WriteString(fmt.Sprintf(" [%s: %s]", e.predID, e.value))
+		fmt.Fprintf(w, " [%s: %s]", e.pred, e.value)
 	}
 }
 
-func (c *Canonicalizer) writeCallCommon(w *strings.Builder, common *ssa.CallCommon, context ssa.Instruction) {
+func (c *Canonicalizer) writeCallCommon(w *bytes.Buffer, common *ssa.CallCommon, context ssa.Instruction) {
 	if common.IsInvoke() {
-		w.WriteString("Invoke " + c.NormalizeOperand(common.Value, context) + "." + common.Method.Name())
+		w.WriteString("Invoke ")
+		w.WriteString(c.NormalizeOperand(common.Value, context))
+		w.WriteString(".")
+		w.WriteString(common.Method.Name())
 	} else {
 		w.WriteString(c.NormalizeOperand(common.Value, context))
 	}
@@ -1317,28 +1135,28 @@ func (c *Canonicalizer) NormalizeOperand(v ssa.Value, context ssa.Instruction) s
 	if v == nil {
 		return "<nil>"
 	}
-	visited := make(map[ssa.Value]bool)
+	c.initMaps()
+	// Follow v's substitutions, short of the instruction being rendered,
+	// stopping at the first value seen twice. visited holds the values seen
+	// after start, so a single substitution allocates nothing.
+	start := v
+	var visited map[ssa.Value]bool
 	for {
-		if visited[v] {
-			break
-		}
-		visited[v] = true
-
 		sub, ok := c.virtualSubstitutions[v]
 		if !ok {
 			break
 		}
-
-		shouldSubstitute := true
-		if subInstr, isInstr := sub.(ssa.Instruction); isInstr {
-			if subInstr == context {
-				shouldSubstitute = false
-			}
+		if subInstr, isInstr := sub.(ssa.Instruction); isInstr && subInstr == context {
+			break
 		}
-
-		if shouldSubstitute {
-			v = sub
-		} else {
+		if v != start {
+			if visited == nil {
+				visited = make(map[ssa.Value]bool)
+			}
+			visited[v] = true
+		}
+		v = sub
+		if v == start || visited[v] {
 			break
 		}
 	}
@@ -1367,7 +1185,7 @@ func (c *Canonicalizer) NormalizeOperand(v ssa.Value, context ssa.Instruction) s
 		}
 		return fmt.Sprintf("<global:%s.%s:%s>", pkgPath, operand.Name(), c.sanitizeType(operand.Type()))
 	case *ssa.Builtin:
-		return fmt.Sprintf("<builtin:%s>", operand.Name())
+		return "<builtin:" + operand.Name() + ">"
 	case *ssa.Function:
 		if name, exists := c.registerMap[v]; exists {
 			return name
@@ -1408,7 +1226,12 @@ func FieldName(x ssa.Value, index int) string {
 }
 
 func (c *Canonicalizer) sanitizeType(t types.Type) string {
-	return sanitizeTypeWith(c.tparams.Rename(t), c.qualifier)
+	if s, ok := c.typeStrings[t]; ok {
+		return s
+	}
+	s := sanitizeTypeWith(c.tparams.Rename(t), c.qualifier)
+	c.typeStrings[t] = s
+	return s
 }
 
 func sanitizeTypeWith(t types.Type, q types.Qualifier) string {

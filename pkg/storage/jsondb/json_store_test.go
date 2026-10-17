@@ -143,3 +143,19 @@ func TestSaveDatabase_RefusesSystemDir(t *testing.T) {
 		t.Errorf("SaveDatabase(%q) = %v; want nil", ok, err)
 	}
 }
+
+// AddSignature gives a signature without an ID one and writes it back to
+// the caller's struct, as the PebbleDB store does.
+func TestAddSignature_WritesBackID(t *testing.T) {
+	s := NewScanner()
+	sig := detection.Signature{Name: "S"}
+	if err := s.AddSignature(&sig); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(sig.ID, "SFW-AUTO-") {
+		t.Fatalf("ID = %q; want a generated SFW-AUTO- ID", sig.ID)
+	}
+	if got, err := s.GetSignature(sig.ID); err != nil || got.Name != "S" {
+		t.Errorf("GetSignature(%q) = %+v, %v", sig.ID, got, err)
+	}
+}

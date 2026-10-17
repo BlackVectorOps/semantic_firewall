@@ -198,9 +198,9 @@ func f(xs []int) int {
 	}
 }
 
-// TestAnalyzeObfuscation_ByteRunNotDoubled pins the structural-operand fix: a
-// 256-element []byte literal must report exactly 256 payload bytes (not ~513),
-// and removing the index ramp must let window entropy reach its true maximum.
+// TestAnalyzeObfuscation_ByteRunNotDoubled checks that a 256-element []byte
+// literal reports exactly 256 payload bytes, its element indexes not counted,
+// and that its window entropy reaches the maximum without them.
 func TestAnalyzeObfuscation_ByteRunNotDoubled(t *testing.T) {
 	t.Parallel()
 	src := "package main\nfunc f() byte { p := " + arr(256) + "\n\treturn p[0] }"
@@ -331,19 +331,15 @@ func BenchmarkAnalyzeObfuscation(b *testing.B) {
 	}
 }
 
-
-// TestIndirectCallRatio_CountsReflectionDispatch is the behavioral regression
-// guard for the reflection-undercount bug: reflect.Value.Call emits the dot-form
-// "reflect.Call" (verified against real SSA), which the original isIndirectCallSig
-// missed because it matched only the never-emitted colon-form "reflect:Call".
-// Result was IndirectCallRatio == 0 for reflection-hidden dispatch -- exactly the
-// evasion the signal exists to catch. This test compiles real reflection dispatch
-// and asserts the ratio now counts it.
+// TestIndirectCallRatio_CountsReflectionDispatch compiles real reflection
+// dispatch, whose call signature is the dot-form "reflect.Call", and checks
+// that IndirectCallRatio counts it: reflection-hidden dispatch is the evasion
+// the signal exists to catch.
 func TestIndirectCallRatio_CountsReflectionDispatch(t *testing.T) {
 	t.Parallel()
 
-	// A function whose ONLY call is reflect.Value.Call. Pre-fix this scored
-	// IndirectCallRatio 0.0; it must now be 1.0 (1 of 1 calls is indirect).
+	// A function whose only call is reflect.Value.Call: 1 of 1 calls is
+	// indirect, so the ratio is 1.0.
 	src := "package main\n" +
 		"import \"reflect\"\n" +
 		"func f(v reflect.Value, a []reflect.Value) { v.Call(a) }"

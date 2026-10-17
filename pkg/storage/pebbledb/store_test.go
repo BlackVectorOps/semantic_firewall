@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/detection"
 	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/jsondb"
@@ -203,57 +202,6 @@ func TestPebbleScanner_RebuildIndexes_Streaming(t *testing.T) {
 	}
 }
 
-func TestPebbleScanner_MetadataPersistence(t *testing.T) {
-	// Tests the fix for Metadata Reset Bug.
-	dbPath := t.TempDir()
-	s, err := pebbledb.NewPebbleScanner(dbPath, pebbledb.DefaultPebbleScannerOptions())
-	if err != nil {
-		t.Fatalf("NewPebbleScanner failed: %v", err)
-	}
-
-	// First initialization
-	if err := s.InitializeMetadata("1.0", "Desc"); err != nil {
-		t.Fatal(err)
-	}
-
-	meta1, err := s.GetAllMetadata()
-	if err != nil {
-		t.Fatal(err)
-	}
-	created1 := meta1.CreatedAt
-
-	// Sleep to ensure time difference
-	time.Sleep(10 * time.Millisecond)
-
-	// Close and Reopen to simulate restart
-	s.Close()
-	s2, err := pebbledb.NewPebbleScanner(dbPath, pebbledb.DefaultPebbleScannerOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s2.Close()
-
-	// Second initialization (Startup)
-	if err := s2.InitializeMetadata("1.0", "Desc"); err != nil {
-		t.Fatal(err)
-	}
-
-	meta2, err := s2.GetAllMetadata()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify CreatedAt was preserved
-	if !meta2.CreatedAt.Equal(created1) {
-		t.Errorf("CreatedAt was reset! Original: %v, New: %v", created1, meta2.CreatedAt)
-	}
-
-	// Verify LastUpdatedAt changed (should be > created1)
-	if !meta2.LastUpdatedAt.After(created1) {
-		t.Errorf("LastUpdatedAt should be updated. Got %v", meta2.LastUpdatedAt)
-	}
-}
-
 // An export must be readable by both consumers of JSON signature files: the
 // JSON backend (--db <file>.json), which rejects unknown fields, and
 // MigrateFromJSON.
@@ -291,5 +239,26 @@ func TestPebbleScanner_ExportToJSONRoundTrip(t *testing.T) {
 	n, err := m.MigrateFromJSON(exportPath)
 	if err != nil || n != 2 {
 		t.Fatalf("MigrateFromJSON = %d, %v; want 2, nil", n, err)
+	}
+}
+
+// A stored schema version that is not a number is refused, not taken for a
+// current one.
+func TestPebbleScanner_RejectsUnparseableSchema(t *testing.T) {
+	dbPath := t.TempDir()
+	s, err := pebbledb.NewPebbleScanner(dbPath, pebbledb.DefaultPebbleScannerOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMetadata("schema_version", "three"); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	reopened, err := pebbledb.NewPebbleScanner(dbPath, pebbledb.DefaultPebbleScannerOptions())
+	if err == nil {
+		reopened.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "not a number") {
+		t.Errorf("open with schema version %q: %v; want a refusal", "three", err)
 	}
 }

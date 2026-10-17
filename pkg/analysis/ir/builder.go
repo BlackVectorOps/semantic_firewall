@@ -15,6 +15,8 @@ func BuildSSAFromPackages(initialPkgs []*packages.Package) (*ssa.Program, *ssa.P
 		return nil, nil, fmt.Errorf("input packages list is empty")
 	}
 
+	// Package errors do not stop the build: SSA skips ill-typed packages.
+	// They are reported only if the first package could not be built.
 	var errorMessages strings.Builder
 	packages.Visit(initialPkgs, nil, func(pkg *packages.Package) {
 		for _, e := range pkg.Errors {
@@ -22,18 +24,14 @@ func BuildSSAFromPackages(initialPkgs []*packages.Package) (*ssa.Program, *ssa.P
 		}
 	})
 
-	// Log errors but proceed if possible
-	if errorMessages.Len() > 0 {
-		// In a real system, log these errors
-	}
-
 	mode := ssa.InstantiateGenerics
 	prog, pkgs := ssautil.AllPackages(initialPkgs, mode)
 	if prog == nil {
 		return nil, nil, fmt.Errorf("failed to initialize SSA program builder")
 	}
 
-	// Performance optimization: Only build the packages we explicitly loaded.
+	// Build bodies only for the loaded packages; their dependencies' members
+	// exist, without bodies.
 	for _, p := range initialPkgs {
 		if ssaPkg := prog.Package(p.Types); ssaPkg != nil {
 			ssaPkg.Build()

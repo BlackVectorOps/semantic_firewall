@@ -2,7 +2,6 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,9 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"sync"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/topology"
 	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/detection"
 	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
 	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
@@ -181,78 +178,32 @@ func RunScanLogic(fsys FileSystem, pkgLoader PackageLoader, target string, opts 
 
 // -- Helpers --
 
+// RunScanParallel scans every function of files once, GOMAXPROCS at a
+// time, and returns the alerts and the number of functions scanned.
 func RunScanParallel(fsys FileSystem, files []string, scanner SignatureScanner, exactOnly bool) ([]detection.ScanResult, int, error) {
-	var (
-		allAlerts      []detection.ScanResult
-		totalFunctions int
-		mu             sync.Mutex
-	)
+	results := fingerprintFiles(fsys, files)
+	alerts := make([][]detection.ScanResult, len(results))
 
-	g, ctx := errgroup.WithContext(context.Background())
+	g := new(errgroup.Group)
 	g.SetLimit(runtime.GOMAXPROCS(0))
-
-	for _, file := range files {
-		f := file
+	for i, r := range results {
 		g.Go(func() error {
-			// Panic recovery for robust scanning
 			defer func() {
-				if r := recover(); r != nil {
-					fmt.Fprintf(os.Stderr, "warning: panic recovered analyzing %s: %v\n", f, r)
+				if p := recover(); p != nil {
+					fmt.Fprintf(os.Stderr, "warning: panic recovered analyzing %s: %v\n", r.FunctionName, p)
 				}
 			}()
-
-			results, err := LoadAndFingerprint(fsys, f)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", f, err)
-				return nil
-			}
-
-			localAlerts := []detection.ScanResult{}
-			localCount := 0
-
-			for _, result := range results {
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				default:
-				}
-
-				fn := result.GetSSAFunction()
-				if fn == nil {
-					continue
-				}
-				topo := topology.ExtractTopology(fn)
-				if topo == nil {
-					continue
-				}
-
-				localCount++
-				funcName := resultName(result)
-
-				if exactOnly {
-					if alert, err := scanner.ScanTopologyExact(topo, funcName); err == nil && alert != nil {
-						localAlerts = append(localAlerts, *alert)
-					}
-				} else {
-					if alerts, err := scanner.ScanTopology(topo, funcName); err == nil {
-						localAlerts = append(localAlerts, alerts...)
-					}
-				}
-			}
-
-			mu.Lock()
-			allAlerts = append(allAlerts, localAlerts...)
-			totalFunctions += localCount
-			mu.Unlock()
+			alerts[i] = scanFunction(r.GetSSAFunction(), resultName(r), scanner, exactOnly)
 			return nil
 		})
 	}
+	_ = g.Wait()
 
-	if err := g.Wait(); err != nil {
-		return nil, 0, err
+	var all []detection.ScanResult
+	for _, a := range alerts {
+		all = append(all, a...)
 	}
-
-	return allAlerts, totalFunctions, nil
+	return all, len(results), nil
 }
 
 func RunScanDeps(pkgLoader PackageLoader, target string, opts models.ScanOptions, scanner SignatureScanner) ([]detection.ScanResult, int, []string, error) {
@@ -318,7 +269,7 @@ func buildPackage(pkg *ssa.Package) (ok bool) {
 }
 
 func scanFunction(fn *ssa.Function, funcName string, scanner SignatureScanner, exactOnly bool) []detection.ScanResult {
-	topo := topology.ExtractTopology(fn)
+	topo := extractTopology(fn)
 	if topo == nil {
 		return nil
 	}

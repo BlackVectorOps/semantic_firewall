@@ -66,18 +66,17 @@ func computeVirtualControlFlow(fn *ssa.Function) *virtualControlFlowState {
 					continue
 				}
 
-				// FIX: Re-enabled Referrers check.
-				// We can only swap the operator (e.g. GEQ -> LSS) if we compensate by swapping the branches
-				// of the If instruction. If the BinOp result is used by ANY other instruction (e.g. Return, Store, or another If),
-				// the value they receive would be inverted, causing logic corruption.
-				// We filter out DebugRef, as it doesn't impact program semantics.
+				// Swapping the operator (GEQ -> LSS) is compensated by
+				// swapping the If's branches, which only this If sees: any
+				// other user of the comparison (a Return, a Store, another
+				// If) would receive the inverted value. DebugRefs carry no
+				// semantics and are ignored.
 				if refs := binOp.Referrers(); refs != nil {
 					isSafe := true
 					for _, ref := range *refs {
 						if _, ok := ref.(*ssa.DebugRef); ok {
 							continue
 						}
-						// If the user is not THIS specific If instruction, it is unsafe to swap.
 						if ref != ifInstr {
 							isSafe = false
 							break
@@ -330,7 +329,6 @@ func goDirective(data []byte) string {
 // cgo, no network (GOPROXY=off), a read-only module graph, no workspace
 // (see HardenedEnvFor) and the local toolchain.
 func GetHardenedEnv() []string {
-	// FIX: Ensure return is OUTSIDE the loop so we don't truncate the environment.
 	env := make([]string, 0, len(os.Environ())+7)
 	for _, e := range os.Environ() {
 		upperE := strings.ToUpper(e)

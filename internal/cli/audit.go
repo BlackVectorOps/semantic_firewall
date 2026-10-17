@@ -34,7 +34,7 @@ func RunAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 		}
 	} else {
 		args := []string{cleanOld, cleanNew}
-		// FIX: Pass os.Stderr instead of nil to capture sandbox runtime errors.
+		// The sandbox runtime reports its own failures on stderr.
 		err := SandboxExec(sb, &outputBuf, os.Stderr, "diff", args, cleanOld, cleanNew)
 		if err != nil {
 			// FAIL-CLOSED: Infrastructure error must not allow bypass.

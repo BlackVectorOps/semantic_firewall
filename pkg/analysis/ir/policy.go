@@ -8,8 +8,6 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// -- Implementation Details --
-
 // LiteralPolicy defines the configurable strategy for determining which literal values should
 // be abstracted into placeholders during canonicalization.
 type LiteralPolicy struct {
@@ -75,10 +73,7 @@ func (p *LiteralPolicy) ShouldAbstract(c *ssa.Const, usageContext ssa.Instructio
 	}
 
 	if c.Value.Kind() == constant.String {
-		if p.KeepStringLiterals {
-			return false
-		}
-		return true
+		return !p.KeepStringLiterals
 	}
 
 	isInteger := c.Value.Kind() == constant.Int
