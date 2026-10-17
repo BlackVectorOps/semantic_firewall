@@ -96,7 +96,7 @@ func MatchFunctionsByTopology(oldResults, newResults []FingerprintResult, thresh
 			sim    float64
 		}
 
-		// Optimization: Group new functions by FuzzyHash.
+		// Only functions with the same fuzzy hash are compared.
 		newBuckets := make(map[string][]int)
 		for j, newTopo := range newTopos {
 			if newTopo == nil {
@@ -105,32 +105,19 @@ func MatchFunctionsByTopology(oldResults, newResults []FingerprintResult, thresh
 			newBuckets[newTopo.FuzzyHash] = append(newBuckets[newTopo.FuzzyHash], j)
 		}
 
-		// Pre-allocate to avoid frequent resizing
 		candidates := make([]candidate, 0, len(oldTopos)*2)
-
 		for i, oldTopo := range oldTopos {
 			if oldTopo == nil {
 				continue
 			}
-
-			// Only compare against candidates in the same structural bucket
-			if indices, ok := newBuckets[oldTopo.FuzzyHash]; ok {
-				for _, j := range indices {
-					newTopo := newTopos[j]
-
-					if newTopo == nil {
-						continue
-					}
-
-					sim := topology.TopologySimilarity(oldTopo, newTopo)
-					if sim >= threshold {
-						candidates = append(candidates, candidate{i, j, sim})
-					}
+			for _, j := range newBuckets[oldTopo.FuzzyHash] {
+				if sim := topology.TopologySimilarity(oldTopo, newTopos[j]); sim >= threshold {
+					candidates = append(candidates, candidate{i, j, sim})
 				}
 			}
 		}
 
-		// Use sort.SliceStable for deterministic ordering.
+		// Stable, so equally similar candidates keep their index order.
 		sort.SliceStable(candidates, func(i, j int) bool {
 			return candidates[i].sim > candidates[j].sim
 		})
@@ -425,12 +412,9 @@ func sortedKeys(m map[string]FingerprintResult) []string {
 }
 
 func ShortFuncName(fullName string) string {
+	// Shorten each word, a run of characters other than ( ) [ ] * , space
+	// { }; '.' and '/' belong to words.
 	var sb strings.Builder
-	// We want to process "words".
-	// A word is a sequence of non-separator characters.
-	// Separators: ( ) [ ] * , <space> { }
-	// Note: '.' and '/' are part of the word.
-
 	lastSep := -1
 	for i := 0; i < len(fullName); i++ {
 		c := fullName[i]
@@ -441,7 +425,6 @@ func ShortFuncName(fullName string) string {
 		}
 
 		if isSep {
-			// Process the previous word
 			if i > lastSep+1 {
 				word := fullName[lastSep+1 : i]
 				sb.WriteString(shortenWord(word))
@@ -450,7 +433,6 @@ func ShortFuncName(fullName string) string {
 			lastSep = i
 		}
 	}
-	// Process last word
 	if len(fullName) > lastSep+1 {
 		word := fullName[lastSep+1:]
 		sb.WriteString(shortenWord(word))
@@ -468,24 +450,10 @@ func shortenWord(w string) string {
 		return "." + shortenWord(w[1:])
 	}
 
+	// The name follows the last slash, or the last dot after it.
 	lastSlash := strings.LastIndexByte(w, '/')
-
-	// Search for last dot after lastSlash
-	lastDot := strings.LastIndexByte(w, '.')
-
-	if lastDot > lastSlash {
-		// Dot is in the name part
+	if lastDot := strings.LastIndexByte(w, '.'); lastDot > lastSlash {
 		return w[lastDot+1:]
 	}
-
-	// No dot in the name part. Return the name part (after slash).
-	if lastSlash != -1 {
-		return w[lastSlash+1:]
-	}
-
-	// No slash, no dot (or dot was before slash - impossible if lastDot checked properly?
-	// Wait, LastIndexByte finds the very last one.
-	// If lastDot < lastSlash, it means there are dots in path, but none in name.
-
-	return w
+	return w[lastSlash+1:]
 }

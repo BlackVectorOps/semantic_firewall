@@ -277,5 +277,3 @@ func TestFloatExclusion(t *testing.T) {
 		t.Errorf("Expected 0 IVs for float loop, got %d", len(l.Inductions))
 	}
 }
-
-

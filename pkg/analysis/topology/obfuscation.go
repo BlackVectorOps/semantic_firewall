@@ -170,12 +170,11 @@ func AnalyzeObfuscation(t *FunctionTopology) ObfuscationProfile {
 	}
 	p.ByteArrayPayloadBytes = maxByteRun
 
-	// 2. Max-window entropy over the combined pool. This is the key fix for the
-	//    "one blob averaged away by log strings" evasion.
+	// 2. Max-window entropy over the combined pool, so one high-entropy blob
+	//    is not averaged away by ordinary log strings.
 	p.MaxWindowEntropy = maxWindowEntropy(pool)
 
-	// 3. Entropy of the numeric-only pool (strings excluded), the signal the old
-	//    path never computed.
+	// 3. Entropy of the numeric-only pool (strings excluded).
 	numericPool := pool
 	if n := totalStringLen(t.StringLiterals); n > 0 && n <= len(pool) {
 		numericPool = pool[n:]
@@ -185,10 +184,7 @@ func AnalyzeObfuscation(t *FunctionTopology) ObfuscationProfile {
 	}
 
 	// 4. Indirect / reflective call ratio from the call signatures the topology
-	//    already collected. extractCallSignature tags these "dynamic:" / "invoke:";
-	//    reflection invocation emits the dot-form "reflect.Call" (see
-	//    isIndirectCallSig for the verified form set and why "reflect:" alone was
-	//    insufficient).
+	//    already collected (see isIndirectCallSig for the signature forms).
 	totalCalls, indirectCalls := 0, 0
 	for sig, n := range t.CallSignatures {
 		totalCalls += n
@@ -283,14 +279,7 @@ func AnalyzeObfuscation(t *FunctionTopology) ObfuscationProfile {
 		score /= wsum
 	}
 
-	// Dispositive floor (fixes corroboration-dilution). A weighted mean lets a
-	// corroborating signal DRAG DOWN a score that strong dispositive evidence
-	// alone would justify — observed concretely: payload+decoder scored LOWER
-	// than the same payload alone, because the decoder's 0.5 pulled the mean
-	// below the payload's own normalized value. That is backwards: corroboration
-	// must only ever raise confidence. So the dispositive evidence sets a floor
-	// equal to its own strength; the weighted mean (which folds in corroboration)
-	// can lift above that floor but never sink below it.
+	// Dispositive floor; see (b) above.
 	if strongestDispositive > score {
 		score = strongestDispositive
 	}
@@ -393,36 +382,34 @@ func structuralConstOperands(instr ssa.Instruction) map[*ssa.Value]bool {
 	return nil
 }
 
-// isIndirectCallSig reports whether a call signature represents dynamic,
-// reflective, or interface-dispatched calls — the shapes that defeat
-// name-based required-call matching.
-//
-// Known gap: go:/defer: wrappers around an interface invoke (e.g.
-// "go:invoke:T.M", "defer:invoke:T.M") are NOT matched — only the bare
-// "invoke:" prefix and "go:dynamic:"/"defer:dynamic:" are. Pinned by
-// TestIsIndirectCallSig; closing the gap should update that test deliberately.
 // isIndirectCallSig reports whether a call signature represents indirect or
-// reflective dispatch -- the calls whose target is not statically a named
-// function and which therefore evade call-target detection.
+// reflective dispatch: a call whose target is not statically a named
+// function, which defeats name-based required-call matching and call-target
+// detection. The signature forms, as ExtractTopology emits them on SSA built
+// with ssa.InstantiateGenerics, are:
 //
-// SIGNATURE FORMS ARE EMPIRICALLY VERIFIED against topology.ExtractTopology on
-// real SSA built with ssa.InstantiateGenerics (the mode both ir/builder.go and
-// scan.go use). Do not infer forms from the emitter source alone -- the
-// optimizing SSA build resolves some calls differently than NaiveForm would.
+//   - "dynamic:"        a call through a function value.
+//   - "reflect:Call"    a call through a function value whose type string
+//     contains "reflect.Value" (a func([]reflect.Value) []reflect.Value, but
+//     also a reflection walker's func(reflect.Value) bool callback). A value
+//     of a named function type renders as its name and emits "dynamic:".
+//   - "invoke:"         interface method dispatch.
+//   - "go:dynamic:"     a dynamic call spawned in a goroutine.
+//   - "defer:dynamic:"  a dynamic call in a defer.
+//   - "reflect.Call", "reflect.MethodByName", ...: reflect.Value's invocation
+//     methods, which extractFunctionSig names <pkg>.<func> (see
+//     isReflectInvokeSig).
 //
-//   - "dynamic:"        raw function-pointer call. VERIFIED.
-//   - "invoke:"         interface method dispatch. VERIFIED.
-//   - "go:dynamic:"     dynamic call spawned in a goroutine.
-//   - "defer:dynamic:"  dynamic call in a defer.
-//   - reflect invocation: reflect.Value.Call and friends. VERIFIED to emit the
-//     DOT-form "reflect.Call" / "reflect.MethodByName" via extractFunctionSig
-//     (<pkg>.<func>), NOT the colon-form "reflect:Call". The colon-form branch
-//     in extractCallSignature is UNREACHABLE under InstantiateGenerics (verified
-//     by exhausting method-value / method-expression / stored-value shapes), so
-//     matching only "reflect:" silently MISSED all reflection dispatch and
-//     under-counted IndirectCallRatio to zero for reflection-hidden capabilities
-//     -- precisely the evasion technique the signal exists to catch. Both forms
-//     are now matched; the colon-form is retained for loader-independence.
+// Known gaps, not matched:
+//   - go:/defer: wrappers around an interface invoke ("go:invoke:T.M",
+//     "defer:invoke:T.M"), pinned by TestIsIndirectCallSig; closing the gap
+//     should update that test deliberately;
+//   - go:/defer: wrappers around a reflect invocation ("go:reflect.Call",
+//     "defer:reflect.Call");
+//   - a reflect invocation through a method value (c := v.Call; c(nil)),
+//     which emits "closure:" ("go:closure:" in a goroutine);
+//   - a reflect invocation through a method expression
+//     (reflect.Value.Call(v, nil)), which emits "(reflect.Value).Call$thunk".
 //
 // Only the reflect *invocation* entry points count as indirect dispatch.
 // reflect.TypeOf / reflect.ValueOf and similar introspection helpers also emit
@@ -431,7 +418,7 @@ func structuralConstOperands(instr ssa.Instruction) map[*ssa.Value]bool {
 // capture a user package named reflect).
 func isIndirectCallSig(sig string) bool {
 	return hasPrefix(sig, "dynamic:") ||
-		hasPrefix(sig, "reflect:") || // colon-form: unreachable under this loader, kept defensively
+		hasPrefix(sig, "reflect:") ||
 		hasPrefix(sig, "invoke:") ||
 		hasPrefix(sig, "go:dynamic:") ||
 		hasPrefix(sig, "defer:dynamic:") ||
@@ -596,5 +583,3 @@ func totalStringLen(ss []string) int {
 func hasPrefix(s, prefix string) bool {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
-
-

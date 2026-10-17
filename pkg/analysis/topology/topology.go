@@ -6,6 +6,7 @@ import (
 	"go/constant"
 	"go/types"
 	"math"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -109,9 +110,9 @@ type FunctionTopology struct {
 }
 
 var (
-	// Hardening: Prevent Memory DoS from massive string literals
-	// These limits can be adjusted via SetTopologyLimits.
-	// Protected by configMu to prevent data races.
+	// MaxStringLiteralLen and MaxTotalStringBytes bound the string
+	// literals one topology keeps, so a function with huge literals cannot
+	// exhaust memory. Set them with SetTopologyLimits; configMu guards them.
 	configMu            sync.RWMutex
 	MaxStringLiteralLen = 4096      // 4KB limit per string
 	MaxTotalStringBytes = 1024 * 64 // 64KB limit per function
@@ -170,16 +171,14 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 	loopInfo := loop.DetectLoops(fn)
 	t.LoopCount = loop.CountLoops(loopInfo.Loops)
 
-	// Analyze AST for additional loop constructs.
-	// Fallback for broken CFGs
-	// SSA often drops back edges in these cases.
+	// Also count the function's loop statements: a loop whose body always
+	// exits (for { return }) has no back edge in the CFG.
 	if fn.Syntax() != nil {
 		astLoops := 0
 		root := fn.Syntax()
 		ast.Inspect(root, func(n ast.Node) bool {
-			// Bug Fix: Prevent recursion into nested closures.
-			// SSA handles closures as separate functions; we must not count their loops here.
-			// We only count loops belonging to the current function scope.
+			// A closure is its own SSA function; its loops are not this
+			// function's.
 			if n != root {
 				if _, isClosure := n.(*ast.FuncLit); isClosure {
 					return false
@@ -198,7 +197,8 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 			return true
 		})
 
-		// Security Heuristic: Trust the higher complexity.
+		// Take the higher count: an attacker gains nothing by hiding
+		// loops from one of the two views.
 		if astLoops > t.LoopCount {
 			t.LoopCount = astLoops
 		}
@@ -206,14 +206,17 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 
 	currentStringBytes := 0
 	edgeCount := 0
+	callsRecover := false
+	var ops []*ssa.Value
 
 	for _, block := range fn.Blocks {
 		t.InstrCount += len(block.Instrs)
 		edgeCount += len(block.Succs)
 
 		for _, instr := range block.Instrs {
-			// Track exact instruction types for granular similarity
-			t.InstrCounts[fmt.Sprintf("%T", instr)]++
+			// Track exact instruction types for granular similarity; the
+			// key is what %T prints.
+			t.InstrCounts[reflect.TypeOf(instr).String()]++
 
 			switch i := instr.(type) {
 			case *ssa.If:
@@ -223,6 +226,9 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 			case *ssa.Call:
 				sig := extractCallSignature(i)
 				t.CallSignatures[sig]++
+				if b, ok := i.Call.Value.(*ssa.Builtin); ok && b.Name() == "recover" {
+					callsRecover = true
+				}
 			case *ssa.Go:
 				t.HasGo = true
 				sig := extractGoSignature(i)
@@ -243,7 +249,8 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 				t.UnOpCounts[i.Op.String()]++
 			}
 
-			for _, op := range instr.Operands(nil) {
+			ops = instr.Operands(ops[:0])
+			for _, op := range ops {
 				if op == nil || *op == nil {
 					continue
 				}
@@ -278,24 +285,9 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 	// For a single function, P (connected components) is usually 1.
 	t.CyclomaticComplexity = edgeCount - t.BlockCount + 2
 
-	if t.HasDefer {
-		for _, block := range fn.Blocks {
-			for _, instr := range block.Instrs {
-				if call, ok := instr.(*ssa.Call); ok {
-					if builtin, ok := call.Call.Value.(*ssa.Builtin); ok {
-						if builtin.Name() == "recover" {
-							t.HasRecover = true
-						}
-					}
-				}
-			}
-		}
-	}
+	t.HasRecover = t.HasDefer && callsRecover
 
-	// Use sort.SliceStable for deterministic string ordering
-	sort.SliceStable(t.StringLiterals, func(i, j int) bool {
-		return t.StringLiterals[i] < t.StringLiterals[j]
-	})
+	sort.Strings(t.StringLiterals)
 
 	dataAccumulator := flattenStringLiterals(t.StringLiterals)
 
@@ -339,11 +331,15 @@ func GenerateFuzzyHash(t *FunctionTopology) string {
 	return fmt.Sprintf("B%dL%dBR%dP%dR%d", bBucket, lBucket, brBucket, t.ParamCount, t.ReturnCount)
 }
 
+// normalizeTypeName renders t with every package path's directories
+// removed ("map[string]*net/http.Request" -> "map[string]*http.Request");
+// a regexp keeps the type modifiers before a path, which cutting at the
+// last slash would drop.
 func normalizeTypeName(t types.Type) string {
 	s := t.String()
-	// Fix: Use regex to remove package paths (e.g., "github.com/pkg/")
-	// instead of finding the last slash, which incorrectly strips type
-	// modifiers like * (pointer) or map[...] that appear before the path.
+	if !strings.Contains(s, "/") {
+		return s
+	}
 	return typePathCleaner.ReplaceAllString(s, "")
 }
 
@@ -375,8 +371,7 @@ func extractCallSignature(call *ssa.Call) string {
 }
 
 func extractGoSignature(g *ssa.Go) string {
-	// FIX: Handle interface method invocations (go w.Do())
-	// In Invoke mode, Value is the receiver.
+	// In invoke mode (go w.Do()), Value is the receiver.
 	if g.Call.IsInvoke() {
 		recvType := g.Call.Value.Type()
 		return fmt.Sprintf("invoke:%s.%s", normalizeTypeName(recvType), g.Call.Method.Name())
@@ -398,7 +393,7 @@ func extractGoSignature(g *ssa.Go) string {
 }
 
 func extractDeferSignature(d *ssa.Defer) string {
-	// FIX: Handle interface method invocations (defer w.Close())
+	// In invoke mode (defer w.Close()), Value is the receiver.
 	if d.Call.IsInvoke() {
 		recvType := d.Call.Value.Type()
 		return fmt.Sprintf("invoke:%s.%s", normalizeTypeName(recvType), d.Call.Method.Name())
@@ -426,8 +421,9 @@ func extractClosureSignature(v *ssa.MakeClosure) string {
 }
 
 func extractFunctionSig(fn *ssa.Function) string {
-	// Fix: Detect anonymous/nested functions to provide stable signatures.
-	// This handles optimizations where simple closures become plain Functions.
+	// A closure without free variables is called directly, as a plain
+	// Function; name it by signature, as a MakeClosure is, so the name does
+	// not depend on its creation number.
 	if fn.Parent() != nil {
 		return fmt.Sprintf("closure:%s", fn.Signature.String())
 	}
@@ -515,9 +511,8 @@ func TopologySimilarity(a, b *FunctionTopology) float64 {
 }
 
 func typeListSimilarity(a, b []string) float64 {
-	// FIX: Robust similarity using Dice coefficient
-	// Previous implementation returned 0.0 if lengths differed, causing
-	// near-identical functions (e.g. one extra param) to have 0 similarity.
+	// The Dice coefficient of the position-wise matches, so lists that
+	// differ only in length (one extra parameter) still score as similar.
 	if len(a) == 0 && len(b) == 0 {
 		return 1.0
 	}
@@ -618,7 +613,6 @@ func TopologyFingerprint(t *FunctionTopology) string {
 func flattenStringLiterals(literals []string) []byte {
 	totalSize := 0
 	for _, s := range literals {
-		// With StringVal, we no longer need to strip quotes manually, but we keep logic simple
 		totalSize += len(s)
 	}
 
@@ -630,13 +624,11 @@ func flattenStringLiterals(literals []string) []byte {
 }
 
 // truncateToValidUTF8 returns the longest valid UTF-8 prefix of s.
-// It avoids O(N^2) behavior by performing a single linear scan if the string is invalid.
 func truncateToValidUTF8(s string) string {
 	if utf8.ValidString(s) {
 		return s
 	}
 
-	// Perform a linear scan O(N) to find the longest valid UTF-8 prefix.
 	validLen := 0
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])

@@ -4,7 +4,6 @@ import (
 	"math"
 )
 
-
 // Returns the Shannon entropy of a byte slice.
 // Result ranges from 0.0 (completely uniform/predictable) to 8.0 (maximum randomness).
 // High entropy (>7.0) often indicates packed/encrypted code.

@@ -85,15 +85,12 @@ func TestIsIndirectCallSig(t *testing.T) {
 		"invoke:T.M",
 		"go:dynamic:x",
 		"defer:dynamic:x",
-		// Reflection invocation: the DOT-form is what ExtractTopology actually
-		// emits under InstantiateGenerics (verified against real SSA). Matching
-		// only the colon-form previously let all reflection dispatch escape the
-		// IndirectCallRatio, under-counting obfuscation for reflection-hidden
-		// capabilities. Both forms must match.
+		// Reflection invocation: ExtractTopology emits the dot-form under
+		// InstantiateGenerics. Both forms must count toward IndirectCallRatio.
 		"reflect.Call",
 		"reflect.CallSlice",
 		"reflect.MethodByName",
-		"reflect:Call", // colon-form: unreachable under this loader, matched defensively
+		"reflect:Call", // a call through a func value whose type string contains reflect.Value
 	}
 	for _, s := range indirect {
 		if !isIndirectCallSig(s) {
@@ -211,12 +208,13 @@ func TestMaxWindowEntropy(t *testing.T) {
 	}
 }
 
-// TestStructuralConstOperands pins the pointer-identity assumption behind the
-// ByteRun 513->256 fix: the operand slots returned by structuralConstOperands
-// must be the SAME *ssa.Value pointers that instr.Operands() returns, so the
-// skip-set membership test works. If a future x/tools bump changes Operands()
-// to return copies (or reorders fields), this fails at the helper rather than
-// surfacing later as a mysterious entropy drift on every []byte literal.
+// TestStructuralConstOperands pins the pointer-identity assumption that
+// keeps a []byte literal's index constants out of its byte run: the operand
+// slots returned by structuralConstOperands must be the SAME *ssa.Value
+// pointers that instr.Operands() returns, so the skip-set membership test
+// works. If a future x/tools bump changes Operands() to return copies (or
+// reorders fields), this fails at the helper rather than surfacing later as
+// a mysterious entropy drift on every []byte literal.
 func TestStructuralConstOperands(t *testing.T) {
 	t.Parallel()
 	dummy := &ssa.Const{} // any non-nil ssa.Value; we only test slot identity
@@ -297,5 +295,3 @@ func FuzzMaxWindowEntropy(f *testing.F) {
 		}
 	})
 }
-
-

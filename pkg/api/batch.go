@@ -59,37 +59,68 @@ func DiffBatchWithFS(fsys FileSystem, pairs []DiffPair) []*models.DiffOutput {
 	}
 	// The two trees are independent; load them at the same time. They
 	// share the loader's cache of standard-library and pinned-module types.
-	var oldSide, newSide map[string]fileResult
+	var oldSide, newSide map[string]FileFingerprints
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); oldSide = fingerprintFiles(fsys, oldPaths) }()
-	go func() { defer wg.Done(); newSide = fingerprintFiles(fsys, newPaths) }()
+	go func() { defer wg.Done(); oldSide = fingerprintFiles(fsys, oldPaths, readDiffInput, false) }()
+	go func() { defer wg.Done(); newSide = fingerprintFiles(fsys, newPaths, readDiffInput, false) }()
 	wg.Wait()
 
 	out := make([]*models.DiffOutput, len(pairs))
 	for i, p := range pairs {
 		o, n := oldSide[p.Old], newSide[p.New]
 		switch {
-		case o.err != nil:
-			out[i] = failedDiff(p, fmt.Errorf("failed to process old file: %w", o.err))
-		case n.err != nil:
-			out[i] = failedDiff(p, fmt.Errorf("failed to process new file: %w", n.err))
+		case o.Err != nil:
+			out[i] = failedDiff(p, fmt.Errorf("failed to process old file: %w", o.Err))
+		case n.Err != nil:
+			out[i] = failedDiff(p, fmt.Errorf("failed to process new file: %w", n.Err))
 		default:
-			out[i] = diffResults(p.Old, p.New, o.results, n.results, riskProfile{})
+			out[i] = diffResults(p.Old, p.New, o.Results, n.Results, riskProfile{})
 		}
 	}
 	return out
+}
+
+// FingerprintFiles fingerprints the functions declared in each file at
+// paths. The result has one entry per distinct path, keyed by the path as
+// given. Each entry is what a load of that file alone gives: its functions
+// and its package's initializer, not its package siblings', or the error
+// that load fails with. Unlike DiffBatch's inputs, every path must name a
+// file: an empty path, a missing file, a file with only whitespace, a file
+// over models.MaxSourceFileSize and a path that cannot be resolved are
+// errors. Results is nil or empty when Err is set.
+//
+// With RealFileSystem, files are loaded as DiffBatch loads them: all files
+// under one module root and governed by the same go.work with one
+// go/packages call, so a package is loaded and canonicalized once however
+// many of its files are listed, and the results of one package share their
+// SSA functions. Any other FileSystem, every file the grouped load cannot
+// cover (outside a module, excluded by the default build, in an ill-typed
+// package), and every file of a group whose load or fingerprinting fails,
+// is loaded on its own.
+//
+// With strict, an SSA instruction the canonicalizer does not handle fails
+// the file ("panic while fingerprinting <path>: STRICT MODE: ...") instead
+// of rendering as a placeholder. A panic in the FileSystem fails its file
+// too.
+func FingerprintFiles(fsys FileSystem, paths []string, strict bool) map[string]FileFingerprints {
+	return fingerprintFiles(fsys, paths, readSourceInput, strict)
 }
 
 func failedDiff(p DiffPair, err error) *models.DiffOutput {
 	return &models.DiffOutput{OldFile: p.Old, NewFile: p.New, Functions: []models.FunctionDiff{}, ErrorMessage: err.Error()}
 }
 
-// fileResult is one file's fingerprinted functions, or why there are none.
-type fileResult struct {
-	results []diff.FingerprintResult
-	err     error
+// FileFingerprints is one file's fingerprinted functions, or why there are
+// none.
+type FileFingerprints struct {
+	Results []diff.FingerprintResult
+	Err     error
 }
+
+// inputReader reads a file to fingerprint: its content, or nil when the
+// path stands for a file with no functions, and its absolute path.
+type inputReader func(fsys FileSystem, path string) (content []byte, abs string, err error)
 
 // pendingFile is a file to load: its absolute path and content.
 type pendingFile struct {
@@ -97,8 +128,8 @@ type pendingFile struct {
 	content   []byte
 }
 
-// fingerprintFiles fingerprints each distinct path of one side, keyed by
-// the path as given.
+// fingerprintFiles fingerprints each distinct path, read with read, keyed
+// by the path as given.
 //
 // A group shares a module root and the workspace that governs its files'
 // directories, which Diff loads each file with: a .git entry between a
@@ -106,8 +137,8 @@ type pendingFile struct {
 // that file alone. Diff reads a file's package siblings from disk, so a
 // FileSystem other than the disk, whose files a group load would overlay
 // on each other, gets single-file loads only.
-func fingerprintFiles(fsys FileSystem, paths []string) map[string]fileResult {
-	out := make(map[string]fileResult)
+func fingerprintFiles(fsys FileSystem, paths []string, read inputReader, strict bool) map[string]FileFingerprints {
+	out := make(map[string]FileFingerprints)
 	groups := make(map[string][]pendingFile)
 	workspaces := make(map[string]string)
 	_, onDisk := fsys.(RealFileSystem)
@@ -116,12 +147,12 @@ func fingerprintFiles(fsys FileSystem, paths []string) map[string]fileResult {
 		if _, done := out[path]; done {
 			continue
 		}
-		content, abs, err := readDiffInput(fsys, path)
+		content, abs, err := readSafely(read, fsys, path)
 		if err != nil || content == nil {
-			out[path] = fileResult{results: []diff.FingerprintResult{}, err: err}
+			out[path] = FileFingerprints{Results: []diff.FingerprintResult{}, Err: err}
 			continue
 		}
-		out[path] = fileResult{} // claimed; filled in below
+		out[path] = FileFingerprints{} // claimed; filled in below
 		f := pendingFile{path: path, abs: abs, content: content}
 		root := ""
 		if onDisk {
@@ -147,31 +178,54 @@ func fingerprintFiles(fsys FileSystem, paths []string) map[string]fileResult {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		for path, res := range fingerprintGroup(groups[k]) {
+		for path, res := range fingerprintGroup(groups[k], strict) {
 			out[path] = res
 		}
 	}
 	for _, f := range loose {
-		out[f.path] = fingerprintOne(f)
+		out[f.path] = fingerprintOne(f, strict)
 	}
 	return out
 }
 
-// readDiffInput applies Diff's input rules to one path: an empty path or a
-// missing file has no functions (nil content, nil error), as has a file
-// with only whitespace (an empty file, or /dev/null standing in for the
-// absent side of an added or removed file); any other stat or read error,
-// or a file over models.MaxSourceFileSize, is an error. abs is the file's
-// absolute path, which the loader reports its functions under: from the
-// FileSystem, or from the working directory when the FileSystem gives no
-// absolute path.
+// readSafely is read, turning a panic in the FileSystem into the file's
+// error.
+func readSafely(read inputReader, fsys FileSystem, path string) (content []byte, abs string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			content, abs, err = nil, "", fmt.Errorf("panic while reading %s: %v", path, r)
+		}
+	}()
+	return read(fsys, path)
+}
+
+// readSourceInput reads a file to fingerprint: a stat or read error, a file
+// over models.MaxSourceFileSize and a file with only whitespace are errors.
+func readSourceInput(fsys FileSystem, path string) (content []byte, abs string, err error) {
+	return readInput(fsys, path, false)
+}
+
+// readDiffInput applies Diff's input rules to one path: an empty path, a
+// missing file and a file with only whitespace (an empty file, or /dev/null
+// standing in for the absent side of an added or removed file) have no
+// functions (nil content, nil error); any other stat or read error, or a
+// file over models.MaxSourceFileSize, is an error.
 func readDiffInput(fsys FileSystem, path string) (content []byte, abs string, err error) {
 	if path == "" {
 		return nil, "", nil
 	}
+	return readInput(fsys, path, true)
+}
+
+// readInput reads the file at path. With absentOK, a missing file and a file
+// with only whitespace have nil content and no error; otherwise they are
+// errors. abs is the file's absolute path, which the loader reports its
+// functions under: from the FileSystem, or from the working directory when
+// the FileSystem gives no absolute path.
+func readInput(fsys FileSystem, path string, absentOK bool) (content []byte, abs string, err error) {
 	info, err := fsys.Stat(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if absentOK && os.IsNotExist(err) {
 			return nil, "", nil
 		}
 		return nil, "", fmt.Errorf("failed to stat %s: %w", path, err)
@@ -184,7 +238,10 @@ func readDiffInput(fsys FileSystem, path string) (content []byte, abs string, er
 		return nil, "", err
 	}
 	if len(strings.TrimSpace(string(content))) == 0 {
-		return nil, "", nil
+		if absentOK {
+			return nil, "", nil
+		}
+		return nil, "", fmt.Errorf("%s: input source code is empty", path)
 	}
 	if abs, err = fsys.Abs(path); err != nil || !filepath.IsAbs(abs) {
 		if abs, err = filepath.Abs(path); err != nil {
@@ -213,8 +270,8 @@ func moduleRoot(fsys FileSystem, abs string) string {
 // fingerprintGroup loads a group's files together, from the directory of
 // the first, and fingerprints their packages, falling back to
 // fingerprintOne for each file the group cannot cover.
-func fingerprintGroup(files []pendingFile) map[string]fileResult {
-	out := make(map[string]fileResult)
+func fingerprintGroup(files []pendingFile, strict bool) map[string]FileFingerprints {
+	out := make(map[string]FileFingerprints)
 	overlay := make(map[string][]byte, len(files))
 	for _, f := range files {
 		overlay[f.abs] = f.content
@@ -241,42 +298,42 @@ func fingerprintGroup(files []pendingFile) map[string]fileResult {
 	}
 	var results []diff.FingerprintResult
 	if err == nil && len(wellTyped) > 0 {
-		results, err = fingerprintPackagesSafely(wellTyped, paths.keepFiles(abs...))
+		results, err = fingerprintPackagesSafely(wellTyped, paths.keepFiles(abs...), strict)
 	}
 	for _, f := range files {
 		if err != nil || !diff.PackagesContain(wellTyped, f.abs) {
-			out[f.path] = fingerprintOne(f)
+			out[f.path] = fingerprintOne(f, strict)
 			continue
 		}
-		out[f.path] = fileResult{results: inFileOf(results, f.abs, packagesOf(wellTyped, f.abs), paths)}
+		out[f.path] = FileFingerprints{Results: inFileOf(results, f.abs, packagesOf(wellTyped, f.abs), paths)}
 	}
 	return out
 }
 
 // fingerprintPackagesSafely fingerprints the functions of pkgs in the
 // files keep accepts, turning a panic into an error.
-func fingerprintPackagesSafely(pkgs []*packages.Package, keep func(string) bool) (results []diff.FingerprintResult, err error) {
+func fingerprintPackagesSafely(pkgs []*packages.Package, keep func(string) bool, strict bool) (results []diff.FingerprintResult, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic while fingerprinting: %v", r)
 		}
 	}()
-	return fingerprintPackages(pkgs, ir.DefaultLiteralPolicy, false, keep)
+	return fingerprintPackages(pkgs, ir.DefaultLiteralPolicy, strict, keep)
 }
 
 // fingerprintOne loads and fingerprints one file on its own, as Diff does.
-func fingerprintOne(f pendingFile) (res fileResult) {
+func fingerprintOne(f pendingFile, strict bool) (res FileFingerprints) {
 	defer func() {
 		if r := recover(); r != nil {
-			res = fileResult{err: fmt.Errorf("panic while fingerprinting %s: %v", f.path, r)}
+			res = FileFingerprints{Err: fmt.Errorf("panic while fingerprinting %s: %v", f.path, r)}
 		}
 	}()
 	paths := pathResolver{}
-	results, err := fingerprintSource(f.abs, string(f.content), ir.DefaultLiteralPolicy, false, paths.keepFiles(f.abs))
+	results, err := fingerprintSource(f.abs, string(f.content), ir.DefaultLiteralPolicy, strict, paths.keepFiles(f.abs))
 	if err != nil {
-		return fileResult{err: err}
+		return FileFingerprints{Err: err}
 	}
-	return fileResult{results: inFile(results, f.abs, paths)}
+	return FileFingerprints{Results: inFile(results, f.abs, paths)}
 }
 
 // packagesOf returns the type-checked packages among pkgs that compile the

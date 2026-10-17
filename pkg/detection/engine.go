@@ -10,19 +10,42 @@ import (
 	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/topology"
 )
 
-// MatchSignature checks a function topology against a signature.
+// MatchSignature checks a function topology against a signature. To check
+// one topology against many signatures, use a Matcher.
 func MatchSignature(topo *topology.FunctionTopology, funcName string, sig Signature, entropyTolerance float64) ScanResult {
+	return NewMatcher(topo, funcName).Match(sig, entropyTolerance)
+}
+
+// Matcher checks one function topology against signatures, computing its
+// topology hash once rather than for every signature. The topology must not
+// change while the Matcher is in use: the hash would no longer describe it.
+type Matcher struct {
+	topo     *topology.FunctionTopology
+	funcName string
+	hash     string
+}
+
+// NewMatcher returns a Matcher for topo, reporting matches as funcName.
+func NewMatcher(topo *topology.FunctionTopology, funcName string) Matcher {
+	return Matcher{topo: topo, funcName: funcName, hash: GenerateTopologyHash(topo)}
+}
+
+// Hash is GenerateTopologyHash of the matcher's topology.
+func (m Matcher) Hash() string { return m.hash }
+
+// Match is MatchSignature for the matcher's topology.
+func (m Matcher) Match(sig Signature, entropyTolerance float64) ScanResult {
+	topo := m.topo
 	result := ScanResult{
 		SignatureID:     sig.ID,
 		SignatureName:   sig.Name,
 		Severity:        sig.Severity,
-		MatchedFunction: funcName,
+		MatchedFunction: m.funcName,
 	}
 	var scores []float64
 	details := MatchDetails{}
 
-	currentHash := GenerateTopologyHash(topo)
-	if currentHash == sig.TopologyHash {
+	if m.hash == sig.TopologyHash {
 		details.TopologyMatch = true
 		details.TopologySimilarity = 1.0
 		scores = append(scores, 1.0)

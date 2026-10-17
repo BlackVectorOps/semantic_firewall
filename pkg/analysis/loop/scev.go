@@ -248,7 +248,7 @@ func identifyInductionVariables(loop *Loop) {
 			loopInstrs = append(loopInstrs, block.Instrs...)
 		}
 	}
-	sccs := findLoopSCCs(loop, loopInstrs)
+	sccs := findLoopSCCs(loopInstrs)
 	for _, scc := range sccs {
 		var headerPhi *ssa.Phi
 		for _, instr := range scc {
@@ -264,91 +264,85 @@ func identifyInductionVariables(loop *Loop) {
 	}
 }
 
-// findLoopSCCs implements an iterative Tarjan's algorithm to avoid stack overflow.
-func findLoopSCCs(loop *Loop, instrs []ssa.Instruction) [][]ssa.Instruction {
-	var sccs [][]ssa.Instruction
-	index := 0
-	indices := make(map[ssa.Instruction]int)
-	lowLink := make(map[ssa.Instruction]int)
-	stack := []ssa.Instruction{}
-	onStack := make(map[ssa.Instruction]bool)
-
-	type frame struct {
-		v         ssa.Instruction
-		neighbors []ssa.Instruction
-		nextIdx   int
+// findLoopSCCs returns the strongly connected components of the use-def
+// graph among instrs, where each instruction has an edge to each of its
+// operands in instrs. Tarjan's algorithm runs iteratively so a long
+// dependency chain cannot overflow the stack. Components are listed in
+// completion order, each in the order it is popped.
+func findLoopSCCs(instrs []ssa.Instruction) [][]ssa.Instruction {
+	n := len(instrs)
+	pos := make(map[ssa.Instruction]int, n)
+	for i, instr := range instrs {
+		pos[instr] = i
+	}
+	// The operands of instrs[i] within instrs are adj[start[i]:start[i+1]].
+	start := make([]int, n+1)
+	var adj []int
+	var ops []*ssa.Value
+	for i, instr := range instrs {
+		ops = instr.Operands(ops[:0])
+		for _, op := range ops {
+			if w, ok := (*op).(ssa.Instruction); ok {
+				if j, in := pos[w]; in {
+					adj = append(adj, j)
+				}
+			}
+		}
+		start[i+1] = len(adj)
 	}
 
-	nodes := make(map[ssa.Instruction]bool)
-	for _, instr := range instrs {
-		nodes[instr] = true
+	order := make([]int, n) // discovery order; -1 until visited
+	low := make([]int, n)
+	onStack := make([]bool, n)
+	for i := range order {
+		order[i] = -1
+	}
+	type frame struct{ v, next int }
+	var (
+		counter int
+		stack   []int
+		work    []frame
+		sccs    [][]ssa.Instruction
+	)
+	visit := func(v int) {
+		order[v], low[v] = counter, counter
+		counter++
+		stack = append(stack, v)
+		onStack[v] = true
+		work = append(work, frame{v: v, next: start[v]})
 	}
 
-	for _, root := range instrs {
-		if _, visited := indices[root]; visited {
+	for root := range instrs {
+		if order[root] >= 0 {
 			continue
 		}
-
-		workStack := []*frame{{v: root}}
-
-		for len(workStack) > 0 {
-			f := workStack[len(workStack)-1]
+		visit(root)
+		for len(work) > 0 {
+			f := &work[len(work)-1]
 			v := f.v
-
-			if f.nextIdx == 0 {
-				indices[v] = index
-				lowLink[v] = index
-				index++
-				stack = append(stack, v)
-				onStack[v] = true
-
-				ops := v.Operands(nil)
-				for _, op := range ops {
-					if w, ok := (*op).(ssa.Instruction); ok && nodes[w] {
-						f.neighbors = append(f.neighbors, w)
-					}
-				}
-			}
-
-			pushedNeighbor := false
-			for f.nextIdx < len(f.neighbors) {
-				w := f.neighbors[f.nextIdx]
-				f.nextIdx++
-
-				if _, visited := indices[w]; !visited {
-					workStack = append(workStack, &frame{v: w})
-					pushedNeighbor = true
-					break
+			if f.next < start[v+1] {
+				w := adj[f.next]
+				f.next++
+				if order[w] < 0 {
+					visit(w)
 				} else if onStack[w] {
-					if indices[w] < lowLink[v] {
-						lowLink[v] = indices[w]
-					}
+					low[v] = min(low[v], order[w])
 				}
-			}
-
-			if pushedNeighbor {
 				continue
 			}
 
-			workStack = workStack[:len(workStack)-1]
-
-			if len(workStack) > 0 {
-				parent := workStack[len(workStack)-1].v
-				if lowLink[v] < lowLink[parent] {
-					lowLink[parent] = lowLink[v]
-				}
+			work = work[:len(work)-1]
+			if len(work) > 0 {
+				parent := work[len(work)-1].v
+				low[parent] = min(low[parent], low[v])
 			}
-
-			if lowLink[v] == indices[v] {
+			if low[v] == order[v] {
 				var component []ssa.Instruction
-				for {
-					if len(stack) == 0 {
-						break
-					}
+				for len(stack) > 0 {
 					w := stack[len(stack)-1]
 					stack = stack[:len(stack)-1]
 					onStack[w] = false
-					component = append(component, w)
+					component = append(component, instrs[w])
 					if w == v {
 						break
 					}
@@ -411,7 +405,8 @@ func classifyIV(loop *Loop, phi *ssa.Phi, scc []ssa.Instruction) {
 				return
 			}
 		} else {
-			// Security/Correctness Fix: Back-edge verification
+			// Every back edge must carry the increment, or the phi is
+			// not a basic induction variable.
 			if phi.Edges[i] != binOp {
 				return
 			}
@@ -664,7 +659,7 @@ func computeSCEVBody(v ssa.Value, loop *Loop, depth int) SCEV {
 	if binOp, ok := v.(*ssa.BinOp); ok {
 		left := computeSCEV(binOp.X, loop, depth+1)
 		right := computeSCEV(binOp.Y, loop, depth+1)
-		return foldSCEV(binOp.Op, left, right, loop)
+		return foldSCEV(binOp.Op, left, right)
 	}
 	if instr, ok := v.(ssa.Instruction); ok {
 		block := instr.Block()
@@ -682,8 +677,8 @@ func SCEVFromConst(c *ssa.Const) SCEV {
 			return &SCEVConstant{Value: i}
 		}
 	}
-	// Security: Return Unknown for non-integer constants (floats, complex)
-	// to prevent logic errors where step 1.5 is treated as step 0.
+	// A non-integer constant (float, complex) is opaque, so a step of 1.5 is
+	// never read as an integer step.
 	return &SCEVUnknown{Value: c, IsInvariant: true}
 }
 
@@ -703,11 +698,10 @@ func SCEVFromConst(c *ssa.Const) SCEV {
 //	{a,+,b} * X        = {a*X, +, b*X}        (X invariant)
 //
 // A recurrence multiplied by another recurrence is quadratic, not affine, so it
-// is intentionally left as an opaque SCEVGenericExpr. Anything that does not
-// match a rule also falls through to SCEVGenericExpr, preserving the previous
-// behaviour. Recursion terminates because every recursive call operates on a
+// is left as an opaque SCEVGenericExpr, as is anything that matches no rule.
+// Recursion terminates because every recursive call operates on a
 // strictly smaller sub-expression of the input trees.
-func foldSCEV(op token.Token, left, right SCEV, loop *Loop) SCEV {
+func foldSCEV(op token.Token, left, right SCEV) SCEV {
 	// Constant op Constant collapses immediately.
 	if lc, ok := left.(*SCEVConstant); ok {
 		if rc, ok := right.(*SCEVConstant); ok {
@@ -724,21 +718,21 @@ func foldSCEV(op token.Token, left, right SCEV, loop *Loop) SCEV {
 	case token.ADD:
 		if lIsRec && rIsRec && lRec.Loop == rRec.Loop {
 			return &SCEVAddRec{
-				Start: foldSCEV(token.ADD, lRec.Start, rRec.Start, loop),
-				Step:  foldSCEV(token.ADD, lRec.Step, rRec.Step, loop),
+				Start: foldSCEV(token.ADD, lRec.Start, rRec.Start),
+				Step:  foldSCEV(token.ADD, lRec.Step, rRec.Step),
 				Loop:  lRec.Loop,
 			}
 		}
 		if lIsRec && right.IsLoopInvariant(lRec.Loop) {
 			return &SCEVAddRec{
-				Start: foldSCEV(token.ADD, lRec.Start, right, loop),
+				Start: foldSCEV(token.ADD, lRec.Start, right),
 				Step:  lRec.Step,
 				Loop:  lRec.Loop,
 			}
 		}
 		if rIsRec && left.IsLoopInvariant(rRec.Loop) {
 			return &SCEVAddRec{
-				Start: foldSCEV(token.ADD, left, rRec.Start, loop),
+				Start: foldSCEV(token.ADD, left, rRec.Start),
 				Step:  rRec.Step,
 				Loop:  rRec.Loop,
 			}
@@ -747,21 +741,21 @@ func foldSCEV(op token.Token, left, right SCEV, loop *Loop) SCEV {
 	case token.SUB:
 		if lIsRec && rIsRec && lRec.Loop == rRec.Loop {
 			return &SCEVAddRec{
-				Start: foldSCEV(token.SUB, lRec.Start, rRec.Start, loop),
-				Step:  foldSCEV(token.SUB, lRec.Step, rRec.Step, loop),
+				Start: foldSCEV(token.SUB, lRec.Start, rRec.Start),
+				Step:  foldSCEV(token.SUB, lRec.Step, rRec.Step),
 				Loop:  lRec.Loop,
 			}
 		}
 		if lIsRec && right.IsLoopInvariant(lRec.Loop) {
 			return &SCEVAddRec{
-				Start: foldSCEV(token.SUB, lRec.Start, right, loop),
+				Start: foldSCEV(token.SUB, lRec.Start, right),
 				Step:  lRec.Step,
 				Loop:  lRec.Loop,
 			}
 		}
 		if rIsRec && left.IsLoopInvariant(rRec.Loop) {
 			return &SCEVAddRec{
-				Start: foldSCEV(token.SUB, left, rRec.Start, loop),
+				Start: foldSCEV(token.SUB, left, rRec.Start),
 				Step:  negateSCEV(rRec.Step),
 				Loop:  rRec.Loop,
 			}
@@ -772,15 +766,15 @@ func foldSCEV(op token.Token, left, right SCEV, loop *Loop) SCEV {
 		// one recurrence by another does not.
 		if lIsRec && !rIsRec && right.IsLoopInvariant(lRec.Loop) {
 			return &SCEVAddRec{
-				Start: foldSCEV(token.MUL, lRec.Start, right, loop),
-				Step:  foldSCEV(token.MUL, lRec.Step, right, loop),
+				Start: foldSCEV(token.MUL, lRec.Start, right),
+				Step:  foldSCEV(token.MUL, lRec.Step, right),
 				Loop:  lRec.Loop,
 			}
 		}
 		if rIsRec && !lIsRec && left.IsLoopInvariant(rRec.Loop) {
 			return &SCEVAddRec{
-				Start: foldSCEV(token.MUL, left, rRec.Start, loop),
-				Step:  foldSCEV(token.MUL, left, rRec.Step, loop),
+				Start: foldSCEV(token.MUL, left, rRec.Start),
+				Step:  foldSCEV(token.MUL, left, rRec.Step),
 				Loop:  rRec.Loop,
 			}
 		}

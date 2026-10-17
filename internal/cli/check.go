@@ -2,27 +2,20 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync"
+	"sync/atomic"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/ir"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/detection"
 	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
 	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
 	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/jsondb"
 	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/pebbledb"
 	"golang.org/x/sync/errgroup"
-)
-
-// -- Constants --
-
-const (
-	MaxSourceFileSize = 10 * 1024 * 1024
 )
 
 // -- Public API --
@@ -89,8 +82,8 @@ func RunCheckLogic(fsys FileSystem, target string, strictMode bool, enableScan b
 			}
 			scanner = js
 		} else {
-			// Stability Fix: Use shared helper to ensure DB is writable in sandbox.
-			// PebbleDB requires a LOCK file even for read-only access.
+			// PebbleDB takes a LOCK file even when read-only; the helper
+			// makes the database writable inside the sandbox.
 			safeDBPath, cleanup, err := PrepareSandboxDB(dbPath)
 			if err != nil {
 				return fmt.Errorf("fatal: failed to prepare database environment: %w", err)
@@ -108,7 +101,6 @@ func RunCheckLogic(fsys FileSystem, target string, strictMode bool, enableScan b
 		}
 	}
 
-	// Efficiency Upgrade: Execute analysis in parallel
 	results, hasErrors, err := ProcessFilesParallel(fsys, files, strictMode, scanner)
 	if err != nil {
 		return err
@@ -129,95 +121,72 @@ func RunCheckLogic(fsys FileSystem, target string, strictMode bool, enableScan b
 
 // -- Processing & Analysis --
 
+// ProcessFilesParallel fingerprints files (see api.FingerprintFiles) and,
+// with a scanner, scans each function once: a function listed under
+// several files (the package initializer) is scanned under the first. A
+// file whose load fails, or whose scan panics, gets an ErrorMessage and
+// sets hasErrors. The error is always nil.
 func ProcessFilesParallel(fsys FileSystem, files []string, strictMode bool, scanner SignatureScanner) ([]models.FileOutput, bool, error) {
+	fingerprints := api.FingerprintFiles(fsys, files, strictMode)
+
 	var (
 		results   = make([]models.FileOutput, len(files))
-		hasErrors bool
-		mu        sync.Mutex
+		hasErrors atomic.Bool
+		scanned   = make(map[funcKey]bool)
+		keys      = funcKeys{}
 	)
-
-	g, ctx := errgroup.WithContext(context.Background())
-	// Limit concurrency to avoid thrashing on smaller instances
+	g := new(errgroup.Group)
 	g.SetLimit(runtime.GOMAXPROCS(0))
 
-	for i, file := range files {
-		idx := i
-		f := file
-		g.Go(func() error {
-			if ctx.Err() != nil {
-				return ctx.Err()
+	for i, f := range files {
+		fp, ok := fingerprints[f]
+		if !ok {
+			fp.Err = fmt.Errorf("no fingerprint result for %s", f)
+		}
+		if fp.Err != nil {
+			results[i] = models.FileOutput{File: f, ErrorMessage: fp.Err.Error()}
+			hasErrors.Store(true)
+			continue
+		}
+		var toScan []diff.FingerprintResult
+		if scanner != nil {
+			dir := fileDir(f)
+			for _, r := range fp.Results {
+				if k := keys.of(dir, r); r.GetSSAFunction() != nil && !scanned[k] {
+					scanned[k] = true
+					toScan = append(toScan, r)
+				}
 			}
-
-			// Robustness: Recover from panics in SSA generation to protect the run.
-			// Record the panic as a per-file error so it shows up in the JSON output
-			// and -- critically -- so strict mode still fails closed. Previously a
-			// panic produced a zero-value FileOutput, left hasErrors false, and let
-			// --strict silently succeed on a run that crashed mid-analysis.
+		}
+		g.Go(func() error {
 			defer func() {
 				if r := recover(); r != nil {
 					fmt.Fprintf(os.Stderr, "warning: panic recovered analyzing %s: %v\n", f, r)
-					mu.Lock()
-					results[idx] = models.FileOutput{
-						File:         f,
-						ErrorMessage: fmt.Sprintf("panic during analysis: %v", r),
-					}
-					hasErrors = true
-					mu.Unlock()
+					results[i] = models.FileOutput{File: f, ErrorMessage: fmt.Sprintf("panic during analysis: %v", r)}
+					hasErrors.Store(true)
 				}
 			}()
-
-			output := ProcessFile(fsys, f, strictMode, scanner)
-
-			mu.Lock()
-			results[idx] = output
-			if output.ErrorMessage != "" {
-				hasErrors = true
+			results[i] = fileOutput(f, fp.Results, toScan, scanner)
+			if results[i].ErrorMessage != "" {
+				hasErrors.Store(true)
 			}
-			mu.Unlock()
-
 			return nil
 		})
 	}
+	_ = g.Wait()
 
-	if err := g.Wait(); err != nil {
-		return nil, false, err
-	}
-
-	return results, hasErrors, nil
+	return results, hasErrors.Load(), nil
 }
 
-func ProcessFile(fsys FileSystem, filename string, strictMode bool, scanner SignatureScanner) models.FileOutput {
-	absPath, err := fsys.Abs(filename)
-	if err != nil {
-		return models.FileOutput{File: filename, ErrorMessage: err.Error()}
-	}
-
-	info, err := fsys.Stat(absPath)
-	if err != nil {
-		return models.FileOutput{File: filename, ErrorMessage: "stat failed: " + err.Error()}
-	}
-	if info.Size() > MaxSourceFileSize {
-		return models.FileOutput{
-			File:         filename,
-			ErrorMessage: fmt.Sprintf("file exceeds maximum analysis size of %d bytes", MaxSourceFileSize),
-		}
-	}
-
-	src, err := fsys.ReadFile(absPath)
-	if err != nil {
-		return models.FileOutput{File: filename, ErrorMessage: err.Error()}
-	}
-
-	results, err := diff.FingerprintSourceAdvanced(absPath, string(src), ir.DefaultLiteralPolicy, strictMode)
-	if err != nil {
-		return models.FileOutput{File: filename, ErrorMessage: err.Error()}
-	}
-
+// fileOutput lists a file's fingerprinted functions and the alerts for the
+// functions of toScan. A panic scanning one function is the file's
+// ErrorMessage; the file's other functions are still scanned, since some of
+// them (the package initializer) are scanned under this file only.
+func fileOutput(filename string, results, toScan []diff.FingerprintResult, scanner SignatureScanner) models.FileOutput {
 	output := models.FileOutput{
 		File:      filename,
 		Functions: make([]models.FunctionFingerprint, 0, len(results)),
 	}
-
 	for _, r := range results {
 		output.Functions = append(output.Functions, models.FunctionFingerprint{
 			Function:    r.FunctionName,
@@ -225,22 +194,32 @@ func ProcessFile(fsys FileSystem, filename string, strictMode bool, scanner Sign
 			File:        r.Filename,
 			Line:        r.Line,
 		})
-
-		if scanner != nil {
-			fn := r.GetSSAFunction()
-			if fn != nil {
-				topo := topology.ExtractTopology(fn)
-				if topo != nil {
-					alerts, scanErr := scanner.ScanTopology(topo, resultName(r))
-					if scanErr == nil {
-						output.ScanResults = append(output.ScanResults, alerts...)
-					} else {
-						fmt.Fprintf(os.Stderr, "error scanning topology for %s: %v\n", r.FunctionName, scanErr)
-					}
-				}
+	}
+	for _, r := range toScan {
+		alerts, panicked := scanResult(r, scanner)
+		if panicked != nil {
+			fmt.Fprintf(os.Stderr, "warning: panic recovered analyzing %s in %s: %v\n", r.FunctionName, filename, panicked)
+			if output.ErrorMessage == "" {
+				output.ErrorMessage = fmt.Sprintf("panic during analysis: %v", panicked)
 			}
 		}
+		output.ScanResults = append(output.ScanResults, alerts...)
 	}
-
 	return output
+}
+
+// scanResult scans one function, returning a panic's value instead of
+// propagating it.
+func scanResult(r diff.FingerprintResult, scanner SignatureScanner) (alerts []detection.ScanResult, panicked any) {
+	defer func() { panicked = recover() }()
+	topo := extractTopology(r.GetSSAFunction())
+	if topo == nil {
+		return nil, nil
+	}
+	alerts, err := scanner.ScanTopology(topo, resultName(r))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error scanning topology for %s: %v\n", r.FunctionName, err)
+		return nil, nil
+	}
+	return alerts, nil
 }

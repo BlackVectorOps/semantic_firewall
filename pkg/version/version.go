@@ -5,7 +5,6 @@ import (
 	"runtime/debug"
 )
 
-
 const featureFlags = "Pebble/Gob+PackedIdx"
 
 // EngineVersion automatically detects the version from the Git tag.

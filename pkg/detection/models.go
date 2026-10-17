@@ -1,5 +1,7 @@
 package detection
 
+import "slices"
+
 // SignatureDatabase represents the malware signature database.
 type SignatureDatabase struct {
 	Version     string      `json:"version"`
@@ -26,6 +28,20 @@ type Signature struct {
 	// ObfuscationScore is the indexed function's aggregate obfuscation score
 	// (0..1) at signature-creation time, for triage and threshold tuning.
 	ObfuscationScore float64 `json:"obfuscation_score,omitempty"`
+}
+
+// Clone returns a copy of s that shares no slice or pointer with it.
+func (s Signature) Clone() Signature {
+	f := &s.IdentifyingFeatures
+	f.RequiredCalls = slices.Clone(f.RequiredCalls)
+	f.OptionalCalls = slices.Clone(f.OptionalCalls)
+	f.StringPatterns = slices.Clone(f.StringPatterns)
+	if f.ControlFlow != nil {
+		cf := *f.ControlFlow
+		f.ControlFlow = &cf
+	}
+	s.Metadata.References = slices.Clone(s.Metadata.References)
+	return s
 }
 
 // IdentifyingFeatures captures behavioral markers for detection.

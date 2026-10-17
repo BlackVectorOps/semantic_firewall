@@ -2,13 +2,16 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/topology"
 	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/api"
 	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
 	"golang.org/x/tools/go/packages"
@@ -190,26 +193,109 @@ func GetPathSize(fsys FileSystem, path string) (int64, error) {
 	return size, err
 }
 
-// This reads a file and generates semantic fingerprints using the provided FS.
-func LoadAndFingerprint(fsys FileSystem, filename string) ([]diff.FingerprintResult, error) {
-	absPath, err := fsys.Abs(filename)
-	if err != nil {
-		return nil, err
+// fingerprintFiles fingerprints the functions declared in files (see
+// api.FingerprintFiles) and returns each function once: the package
+// initializer every file of a package lists is kept for the first. A file
+// that fails to load is skipped with a warning.
+func fingerprintFiles(fsys FileSystem, files []string) []diff.FingerprintResult {
+	fingerprints := api.FingerprintFiles(fsys, files, false)
+	seen := make(map[funcKey]bool)
+	keys := funcKeys{}
+	var out []diff.FingerprintResult
+	for _, f := range files {
+		fp, ok := fingerprints[f]
+		if !ok {
+			fp.Err = fmt.Errorf("no fingerprint result")
+		}
+		if fp.Err != nil {
+			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", f, fp.Err)
+			continue
+		}
+		dir := fileDir(f)
+		for _, r := range fp.Results {
+			if k := keys.of(dir, r); r.GetSSAFunction() != nil && !seen[k] {
+				seen[k] = true
+				out = append(out, r)
+			}
+		}
 	}
-
-	src, err := fsys.ReadFile(absPath)
-	if err != nil {
-		return nil, err
-	}
-	return diff.FingerprintSource(absPath, string(src), ir.DefaultLiteralPolicy)
+	return out
 }
 
-// ShortFunctionName delegates to pkg/api so the CLI and external
-// integrations share a single implementation. Kept as a wrapper rather
-// than a re-export to avoid forcing every internal/cli caller to
-// import pkg/api directly.
-func ShortFunctionName(fullName string) string {
-	return api.ShortFunctionName(fullName)
+// funcKey identifies a fingerprinted function across loads. Files the
+// grouped load cannot cover (outside a module, excluded by the default
+// build, in an ill-typed package) are loaded on their own, each into its
+// own SSA program, so one package initializer can come back as several
+// *ssa.Function values.
+type funcKey struct {
+	dir, pkg, name, file string
+	line                 int
+	fingerprint          string
+}
+
+// funcKeys computes funcKeys, hashing each initializer's content once: in a
+// grouped load every file of a package lists the same initializer.
+type funcKeys map[*ssa.Function]string
+
+// of is the funcKey of r, listed under a file in dir (see fileDir). A
+// function with a source file is identified by its name, position and
+// fingerprint. One without (the package initializer) is identified by its
+// name, its package, dir and what scanning reads of it (see contentHash):
+// two separate loads of a directory can give initializers that differ only
+// in a string or a type the fingerprint does not capture (a payload in a
+// _windows.go file beside a benign _linux.go one), and both must be scanned.
+func (c funcKeys) of(dir string, r diff.FingerprintResult) funcKey {
+	k := funcKey{name: r.FunctionName, file: r.Filename, line: r.Line, fingerprint: r.Fingerprint}
+	fn := r.GetSSAFunction()
+	if r.Filename != "" || fn == nil {
+		return k
+	}
+	k.dir = dir
+	if fn.Pkg != nil {
+		k.pkg = fn.Pkg.Pkg.Path()
+	}
+	h, ok := c[fn]
+	if !ok {
+		h = contentHash(fn)
+		c[fn] = h
+	}
+	k.fingerprint = h
+	return k
+}
+
+// contentHash hashes what scanning and indexing read of fn: its topology,
+// every exported field of it (detection sees no other). Two initializers
+// with equal hashes therefore give the same alerts and the same signature;
+// a fingerprint would not do, since it masks literals and, for a function
+// over diff.MaxFunctionBlocks, is taken from go/ssa's printing, which
+// truncates constants and omits operand types. A topology that cannot be
+// extracted (a panic, which the scan of fn then meets and reports) or
+// encoded (a NaN score) gets a hash of its own, so it merges with nothing.
+func contentHash(fn *ssa.Function) (hash string) {
+	unique := fmt.Sprintf("unhashable:%p", fn)
+	defer func() {
+		if recover() != nil {
+			hash = unique
+		}
+	}()
+	data, err := json.Marshal(extractTopology(fn))
+	if err != nil {
+		return unique
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// extractTopology is topology.ExtractTopology; tests make it panic.
+var extractTopology = topology.ExtractTopology
+
+// fileDir is the absolute directory of the file at path, so different
+// spellings of one directory give one funcKey.
+func fileDir(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return filepath.Dir(path)
 }
 
 // resultName is the reported name of a fingerprinted function; see

@@ -28,16 +28,7 @@ func RunIndex(target, name, severity, category, dbPath string) error {
 		return fmt.Errorf("no Go files found in %s", target)
 	}
 
-	var results []diff.FingerprintResult
-	for _, file := range files {
-		res, err := LoadAndFingerprint(fsys, file)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", file, err)
-			continue
-		}
-		results = append(results, res...)
-	}
-
+	results := fingerprintFiles(fsys, files)
 	if len(results) == 0 {
 		return fmt.Errorf("no functions found to index in %s", target)
 	}
@@ -126,7 +117,10 @@ func RunIndexPebble(target string, results []diff.FingerprintResult, name, sever
 	if err := scanner.AddSignatures(sigPtrs); err != nil {
 		return nil, 0, err
 	}
-	finalCount, _ := scanner.CountSignatures()
+	finalCount, err := scanner.CountSignatures()
+	if err != nil {
+		return nil, 0, fmt.Errorf("count signatures: %w", err)
+	}
 	return sigs, finalCount, nil
 }
 
@@ -144,7 +138,10 @@ func RunIndexJSON(target string, results []diff.FingerprintResult, name, severit
 		catShort = string(catRunes[:3])
 	}
 
-	initialCount := len(scanner.GetDatabase().Signatures)
+	initialCount, err := scanner.CountSignatures()
+	if err != nil {
+		return nil, 0, fmt.Errorf("count signatures: %w", err)
+	}
 	var indexed []detection.Signature
 
 	for _, result := range results {
@@ -178,7 +175,11 @@ func RunIndexJSON(target string, results []diff.FingerprintResult, name, severit
 	if err := scanner.SaveDatabase(dbPath); err != nil {
 		return nil, 0, err
 	}
-	return indexed, len(scanner.GetDatabase().Signatures), nil
+	total, err := scanner.CountSignatures()
+	if err != nil {
+		return nil, 0, fmt.Errorf("count signatures: %w", err)
+	}
+	return indexed, total, nil
 }
 
 // isImportOnlyInit reports whether fn is a package initializer that only runs
