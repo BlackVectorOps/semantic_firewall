@@ -42,7 +42,7 @@ const (
 	// an incompatible algorithm. Increment this whenever the serialization
 	// format (Gob struct shape) OR the fingerprint/canonicalization algorithm
 	// changes, since either makes previously stored signatures unmatchable.
-	CurrentSchemaVersion = 3
+	CurrentSchemaVersion = 4
 
 	// rebuildBatchBytes bounds a RebuildIndexes batch before it is committed.
 	rebuildBatchBytes = 10 * 1024 * 1024

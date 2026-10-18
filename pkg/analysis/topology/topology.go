@@ -13,6 +13,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/ir"
 	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/loop"
 	"golang.org/x/tools/go/ssa"
 )
@@ -432,7 +433,10 @@ func extractFunctionSig(fn *ssa.Function) string {
 		pkgName := fn.Pkg.Pkg.Name()
 		return fmt.Sprintf("%s.%s", pkgName, fn.Name())
 	}
-	return fn.RelString(nil)
+	// A generic instance has no package. Its RelString spells its type
+	// arguments as the caller that SSA built it for first did, which another
+	// caller in the program decides as much as this one does.
+	return ir.StableFuncName(fn)
 }
 
 // TopologySimilarity calculates the similarity between two function topologies.

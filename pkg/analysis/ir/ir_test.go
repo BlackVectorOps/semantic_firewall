@@ -612,3 +612,64 @@ func TestCanonicalizer_HoistSafety_Chan(t *testing.T) {
 		t.Errorf("Security Flaw: cap(chan) was incorrectly hoisted out of the loop.")
 	}
 }
+
+// SSA shares one instance between call sites whose type arguments are
+// identical, spelled as the call site built first. A function's canonical
+// form must not depend on which of the other callers that was.
+func TestCanonicalizer_InstanceSpellingStability(t *testing.T) {
+	t.Parallel()
+
+	const decls = `package main
+		type Alias = []byte
+		type Box[T any] struct{ v T }
+		func (b *Box[T]) Get() T { return b.v }
+		func has[S ~[]E, E comparable](s S, v E) bool {
+			for _, x := range s { if x == v { return true } }
+			return false
+		}
+		func first[T any](xs []T) T { return xs[0] }
+		func id[T any](v T) T { return v }
+	`
+	const target = `
+		func target(b []byte, r []rune, a Alias, x any, bx *Box[byte]) bool {
+			_ = first(r)
+			_ = first(a)
+			_ = id(x)
+			_ = bx.Get()
+			return has(b, 'x')
+		}
+	`
+	const other = `
+		func other(b []uint8, r []int32, a []uint8, x interface{}, bx *Box[uint8]) bool {
+			_ = first(r)
+			_ = first(a)
+			_ = id(x)
+			_ = bx.Get()
+			return has(b, 'x')
+		}
+	`
+
+	render := func(src string) string {
+		fn := testutil.CompileAndGetFunction(t, src, "target")
+		c := ir.NewCanonicalizer(ir.KeepAllLiteralsPolicy)
+		defer ir.ReleaseCanonicalizer(c)
+		return c.CanonicalizeFunction(fn)
+	}
+
+	targetFirst := render(decls + target + other)
+	otherFirst := render(decls + other + target)
+	if targetFirst != otherFirst {
+		t.Errorf("canonical form depends on which caller instantiated first:\n--- target built first:\n%s\n--- other built first:\n%s", targetFirst, otherFirst)
+	}
+	// The parameters keep target's own spelling; only the instances lose it.
+	for _, line := range strings.Split(targetFirst, "\n") {
+		if !strings.Contains(line, "func_ref") {
+			continue
+		}
+		for _, spelling := range []string{"byte", "rune", "Alias", "any"} {
+			if strings.Contains(line, spelling) {
+				t.Errorf("instance reference spelled with %q: %s", spelling, line)
+			}
+		}
+	}
+}
