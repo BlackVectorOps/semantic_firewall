@@ -111,6 +111,31 @@ func writeFiles(t *testing.T, root string, files map[string]string) {
 	}
 }
 
+// repoRequirement reads this repository's go.mod for its go version and the
+// version it requires of modPath. A fixture module that copies both borrows
+// go.sum lines that exist, with a go line high enough for the dependency, so a
+// dependency bump does not break it.
+func repoRequirement(t *testing.T, modPath string) (goVersion, modVersion string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Fields(strings.TrimPrefix(strings.TrimSpace(line), "require "))
+		switch {
+		case len(f) == 2 && f[0] == "go":
+			goVersion = f[1]
+		case len(f) >= 2 && f[0] == modPath:
+			modVersion = f[1]
+		}
+	}
+	if goVersion == "" || modVersion == "" {
+		t.Fatalf("go.mod: go version %q, %s version %q; want both", goVersion, modPath, modVersion)
+	}
+	return goVersion, modVersion
+}
+
 // goSumLines returns this repository's go.sum lines for a module version.
 func goSumLines(t *testing.T, modVersion string) string {
 	t.Helper()
@@ -146,9 +171,11 @@ func mustContain(t *testing.T, snap []string, wants ...string) {
 // tags, GOOS files, cross-package generics and the standard library.
 func TestLoadSource_ModuleParity(t *testing.T) {
 	root := t.TempDir()
+	goVersion, syncVersion := repoRequirement(t, "golang.org/x/sync")
+	syncMod := "golang.org/x/sync " + syncVersion
 	writeFiles(t, root, map[string]string{
-		"go.mod":     "module example.com/m\n\ngo 1.25.0\n\nrequire (\n\texample.com/dep v1.0.0\n\tgolang.org/x/sync v0.22.0\n)\n\nreplace example.com/dep => ./dep\n",
-		"go.sum":     goSumLines(t, "golang.org/x/sync v0.22.0"),
+		"go.mod":     "module example.com/m\n\ngo " + goVersion + "\n\nrequire (\n\texample.com/dep v1.0.0\n\t" + syncMod + "\n)\n\nreplace example.com/dep => ./dep\n",
+		"go.sum":     goSumLines(t, syncMod),
 		"dep/go.mod": "module example.com/dep\n\ngo 1.22\n",
 		"dep/list.go": "package dep\n\nimport \"sort\"\n\n// List is a generic list.\ntype List[T any] struct{ items []T }\n\nfunc (l *List[T]) Push(v T) { l.items = append(l.items, v) }\n\n" +
 			"func Map[A, B any](xs []A, f func(A) B) []B {\n\tout := make([]B, 0, len(xs))\n\tfor _, x := range xs {\n\t\tout = append(out, f(x))\n\t}\n\treturn out\n}\n\n" +
