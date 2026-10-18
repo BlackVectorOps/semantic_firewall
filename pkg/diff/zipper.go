@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/ir"
 	"golang.org/x/tools/go/ssa"
 )
 

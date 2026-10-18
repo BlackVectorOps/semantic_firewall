@@ -19,7 +19,7 @@ import (
 
 	"golang.org/x/tools/go/packages"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff/internal/purge"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/diff/internal/purge"
 )
 
 // LoaderEnvVar selects the source loader. Set to "packages" it makes every

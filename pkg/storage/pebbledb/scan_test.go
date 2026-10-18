@@ -3,11 +3,11 @@ package pebbledb_test
 import (
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/detection"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/jsondb"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/pebbledb"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/testutil"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/storage/jsondb"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/storage/pebbledb"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/testutil"
 )
 
 const scanSrc = `package main

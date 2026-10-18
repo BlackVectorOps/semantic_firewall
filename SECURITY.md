@@ -9,7 +9,7 @@ I adhere to Semantic Versioning. Security patches will be backported to the curr
 
 | Version | Supported | Status |
 | :--- | :---: | :--- |
-| 6.x | :white_check_mark: | **Active Support.** Diff and deletion signals, `sfw deps diff`, batch diff, source loader and type cache, LLM audit, Malware Scanner, PebbleDB, Sandbox, Entropy Engine, GitHub Action. |
+| 7.x | :white_check_mark: | **Active Support.** Diff and deletion signals, `sfw deps diff`, batch diff, source loader and type cache, LLM audit, Malware Scanner, PebbleDB, Sandbox, Entropy Engine, GitHub Action. |
 | 5.x | :warning: | **Critical fixes only.** Upgrade to 6.x; the module path is now `/v6`. |
 | < 1.0 | :x: | **End of Life.** Pre-release versions are not supported. |
 

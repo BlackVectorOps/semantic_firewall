@@ -8,7 +8,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/internal/sandbox"
+	"github.com/BlackVectorOps/semantic_firewall/v7/internal/sandbox"
 )
 
 // recordingSandbox records the configuration it is asked to run.

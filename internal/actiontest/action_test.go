@@ -43,7 +43,7 @@ func sfwOnPath(t *testing.T) string {
 			return
 		}
 		real := filepath.Join(binDir, "sfw-real")
-		cmd := exec.Command(goBin(), "build", "-o", real, "github.com/BlackVectorOps/semantic_firewall/v6/cmd/sfw")
+		cmd := exec.Command(goBin(), "build", "-o", real, "github.com/BlackVectorOps/semantic_firewall/v7/cmd/sfw")
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			buildErr = fmt.Errorf("building sfw: %v\n%s", err, out)

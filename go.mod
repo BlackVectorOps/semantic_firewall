@@ -1,7 +1,7 @@
 //go.mod
 go 1.26.3
 
-module github.com/BlackVectorOps/semantic_firewall/v6
+module github.com/BlackVectorOps/semantic_firewall/v7
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.80.0

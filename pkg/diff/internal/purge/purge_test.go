@@ -15,7 +15,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff/internal/purge"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/diff/internal/purge"
 	"golang.org/x/tools/go/packages"
 )
 

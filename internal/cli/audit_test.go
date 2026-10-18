@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/models"
 )
 
 // An audit with a Claude model sends the flagged function's source on both
