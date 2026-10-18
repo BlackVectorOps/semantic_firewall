@@ -7,22 +7,31 @@
 I adhere to Semantic Versioning. Security patches will be backported to the current major version.
 
 
-| Version | Supported | Status |
-| :--- | :---: | :--- |
-| 7.x | :white_check_mark: | **Active Support.** Diff and deletion signals, `sfw deps diff`, batch diff, source loader and type cache, LLM audit, Malware Scanner, PebbleDB, Sandbox, Entropy Engine, GitHub Action. |
-| 5.x | :warning: | **Critical fixes only.** Upgrade to 6.x; the module path is now `/v6`. |
-| < 1.0 | :x: | **End of Life.** Pre-release versions are not supported. |
+| Version | Supported | Status | End of support |
+| :--- | :---: | :--- | :--- |
+| 7.x | :white_check_mark: | **Active Support.** Diff and deletion signals, `sfw deps diff`, batch diff, source loader and type cache, LLM audit, Malware Scanner, PebbleDB, Sandbox, Entropy Engine, GitHub Action. | At least 12 months after 8.0.0 is released |
+| 6.x | :warning: | **Critical fixes only.** Upgrade to 7.x; the module path is now `/v7`. | 2027-10-18 |
+| 5.x | :warning: | **Critical fixes only.** Upgrade to 7.x; the module path is now `/v7`. | 2027-10-18 |
+| 1.x to 4.x | :x: | **End of Life.** Not supported. | Ended |
+| < 1.0 | :x: | **End of Life.** Pre-release versions are not supported. | Ended |
 
 
-### What counts as critical for 5.x
+### End-of-support policy
 
-A fix is backported to 5.x when the bug lets a change through a check that 5.x already ships, with no error:
+- When a new major version is released, the previous one moves to critical fixes only, for at least 12 months from that release.
+- Every end-of-support date is announced in the table above at least 12 months before it, and is never moved earlier. A date can move later.
+- A version past its end-of-support date gets no fixes, security fixes included. Bypasses found after that date stay open in it, so a CI gate still running it can pass changes that a supported version flags. Upgrade before the date.
+
+
+### What counts as critical
+
+A fix is backported to a version in critical-fixes-only support when the bug lets a change through a check that version already ships, with no error:
 - **Fail-open diffs:** `sfw diff` or `sfw check` drops, hides or misattributes a changed function, or reports it as unchanged or removed when it is not.
-- **Bypass of a 5.x signal:** a change that a 5.x signal is documented to score (a new capability call, a removed check, obfuscation) scores lower than its rule says.
+- **Bypass of a shipped signal:** a change that a signal of that version is documented to score (a new capability call, a removed check, obfuscation) scores lower than its rule says.
 - **Sandbox escape:** analyzed code runs or writes outside the gVisor sandbox's mounts.
 - **Action passes on a failure:** the GitHub Action reports success when `sfw` failed or analyzed nothing.
 
-Signals, capability classes and commands added in 6.x are not backported. Neither are false positives, crashes that fail the run, or speed fixes.
+Signals, capability classes and commands added in a later major version are not backported. Neither are false positives, crashes that fail the run, or speed fixes.
 
 
 ## Reporting a Vulnerability
