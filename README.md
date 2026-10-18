@@ -1131,7 +1131,7 @@ jobs:
   sfw:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0        # diff and audit read HEAD~1
       - id: sfw
@@ -1140,6 +1140,14 @@ jobs:
           mode: audit
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
+
+A tag can be moved to another commit; a commit cannot. To run exactly the release you reviewed, pin the Action by the commit its tag names, and keep the version in a comment (`uses: BlackVectorOps/semantic_firewall@<commit> # v7.1.1`). This prints the commit; for an annotated tag it is the line ending in `^{}`:
+
+```bash
+git ls-remote https://github.com/BlackVectorOps/semantic_firewall 'refs/tags/v7.1.1*'
+```
+
+The Action pins `actions/setup-go` by commit itself.
 
 The Action does the following before running `sfw`:
 - installs `sfw` v7.1.1 with `go install`, or uses an `sfw` already on `PATH`;
