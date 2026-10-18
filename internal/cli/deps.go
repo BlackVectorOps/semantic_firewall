@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/api"
 )
 
 // RunDepsDiff compares the third-party code compiled into two trees of a

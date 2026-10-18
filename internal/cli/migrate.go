@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/pebbledb"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/storage/pebbledb"
 )
 
 func RunMigrate(fromPath, toPath string) error {

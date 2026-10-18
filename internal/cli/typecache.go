@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/diff"
 )
 
 // ConfigureTypeCache decides, once at startup, whether this run uses the

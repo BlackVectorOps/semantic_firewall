@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/models"
 )
 
 // FileSystem abstracts the OS file operations the analysis pipeline

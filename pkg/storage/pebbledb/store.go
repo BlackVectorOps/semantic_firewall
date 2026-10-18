@@ -18,9 +18,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/detection"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/pathguard"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/storage/pathguard"
 	"github.com/cockroachdb/pebble"
 )
 

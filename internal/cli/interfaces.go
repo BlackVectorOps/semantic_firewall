@@ -5,10 +5,10 @@ import (
 	"context"
 	"io"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/internal/sandbox"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/api"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v7/internal/sandbox"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/detection"
 	"golang.org/x/tools/go/packages"
 )
 

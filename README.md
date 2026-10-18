@@ -1,6 +1,6 @@
 # Semantic Firewall
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/BlackVectorOps/semantic_firewall/v6.svg)](https://pkg.go.dev/github.com/BlackVectorOps/semantic_firewall/v6)
+[![Go Reference](https://pkg.go.dev/badge/github.com/BlackVectorOps/semantic_firewall/v7.svg)](https://pkg.go.dev/github.com/BlackVectorOps/semantic_firewall/v7)
 [![License: MIT](https://img.shields.io/badge/License-MIT-00d4aa.svg)](LICENSE)
 [![Marketplace](https://img.shields.io/badge/Marketplace-Semantic_Firewall-7c3aed.svg)](https://github.com/marketplace/actions/semantic-firewall)
 [![Semantic Check](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic_analysis.yml/badge.svg)](https://github.com/BlackVectorOps/semantic_firewall/actions/workflows/semantic_analysis.yml)
@@ -41,14 +41,14 @@ The analysis never executes the code under test.
 ## Install
 
 ```bash
-go install github.com/BlackVectorOps/semantic_firewall/v6/cmd/sfw@v6.0.0
+go install github.com/BlackVectorOps/semantic_firewall/v7/cmd/sfw@v7.0.0
 ```
 
 `go.mod` declares `go 1.26.3`. `sfw version` prints the build:
 
 ```
 Semantic Firewall CLI
-Build: v6.0.0 (Pebble/Gob+PackedIdx)
+Build: v7.0.0 (Pebble/Gob+PackedIdx)
 ```
 
 ## Commands
@@ -1133,14 +1133,14 @@ jobs:
         with:
           fetch-depth: 0        # diff and audit read HEAD~1
       - id: sfw
-        uses: BlackVectorOps/semantic_firewall@v6.0.0
+        uses: BlackVectorOps/semantic_firewall@v7.0.0
         with:
           mode: audit
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
 The Action does the following before running `sfw`:
-- installs `sfw` v6.0.0 with `go install`, or uses an `sfw` already on `PATH`;
+- installs `sfw` v7.0.0 with `go install`, or uses an `sfw` already on `PATH`;
 - installs `runsc` release `20260126.0` and checks its SHA-512;
 - relaxes the AppArmor user-namespace restriction for it.
 
@@ -1184,7 +1184,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/api"
 )
 
 func main() {
@@ -1211,8 +1211,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/ir"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/diff"
 )
 
 func main() {
@@ -1243,10 +1243,10 @@ import (
 	"log"
 	"os"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/ir"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/pebbledb"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/storage/pebbledb"
 )
 
 func main() {

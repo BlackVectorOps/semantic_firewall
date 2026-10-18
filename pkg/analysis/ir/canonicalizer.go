@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/loop"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/loop"
 	"golang.org/x/tools/go/ssa"
 )
 

@@ -11,9 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/api"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/diff"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 )

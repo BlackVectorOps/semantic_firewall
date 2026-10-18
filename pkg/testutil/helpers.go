@@ -1,6 +1,6 @@
 package testutil
 
-import "github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
+import "github.com/BlackVectorOps/semantic_firewall/v7/pkg/diff"
 
 // GetFunctionNames extracts function names from results for easier verification.
 // Exported for use in external test packages.

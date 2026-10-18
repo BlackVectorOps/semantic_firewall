@@ -9,12 +9,12 @@ import (
 	"runtime"
 	"sync/atomic"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/api"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/detection"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/jsondb"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/storage/pebbledb"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/detection"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/storage/jsondb"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/storage/pebbledb"
 	"golang.org/x/sync/errgroup"
 )
 

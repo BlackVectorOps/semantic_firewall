@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/ir"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/models"
 	"golang.org/x/tools/go/ssa"
 )
 

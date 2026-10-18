@@ -13,8 +13,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/internal/sandbox"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v7/internal/sandbox"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/diff"
 )
 
 // Implements the Sandboxer interface using the internal sandbox package.

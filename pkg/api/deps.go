@@ -23,10 +23,10 @@ import (
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/ir"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/topology"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/topology"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/models"
 )
 
 // Risk charged for changes to code the SSA analysis cannot see. A new or

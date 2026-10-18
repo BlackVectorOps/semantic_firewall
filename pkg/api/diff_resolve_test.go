@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/api"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/models"
 )
 
 // dirFS is the disk below dir: relative names are read from dir, and Abs

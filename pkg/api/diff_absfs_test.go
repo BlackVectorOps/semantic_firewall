@@ -7,8 +7,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/api"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/api"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/models"
 )
 
 // absFailFS is the disk, except that Abs fails, returning an absolute path

@@ -9,9 +9,9 @@ import (
 
 	"golang.org/x/tools/go/packages"
 
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/analysis/ir"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/diff"
-	"github.com/BlackVectorOps/semantic_firewall/v6/pkg/models"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/diff"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/models"
 )
 
 // Every path FingerprintFiles is given must name a file with source: the
