@@ -41,14 +41,14 @@ The analysis never executes the code under test.
 ## Install
 
 ```bash
-go install github.com/BlackVectorOps/semantic_firewall/v7/cmd/sfw@v7.1.0
+go install github.com/BlackVectorOps/semantic_firewall/v7/cmd/sfw@v7.1.1
 ```
 
-`go.mod` declares `go 1.26.3`. `sfw version` prints the build:
+`go.mod` declares `go 1.27.2`. `sfw version` prints the build:
 
 ```
 Semantic Firewall CLI
-Build: v7.1.0 (Pebble/Gob+PackedIdx)
+Build: v7.1.1 (Pebble/Gob+PackedIdx)
 ```
 
 ## Commands
@@ -936,7 +936,7 @@ b3:
 - **Escaping:** a kept string is emitted as an escaped `const("...")` (`"x\ny"` stays on one line), and struct tags are quoted, so literal content cannot inject IR lines.
 - **Fields** are named, not indexed: `FieldAddr p0, field(IsAdmin)`. Reordering or inserting a struct's fields does not change a function that reads them, but reading a different field does.
 - **Type parameters** are written by position: `$0`, `$1`, ... The receiver's and the function's type parameters are numbered together; in a closure, the enclosing function's come first. This covers value types and the receivers and type arguments of callees, e.g. `<func_ref:(*List[$0]).Push:func($0)>`. Renaming a type parameter keeps the fingerprint; reordering type parameters changes it.
-- **Generic instances** are written with aliases resolved, `byte` as `uint8` and `rune` as `int32`: `<func_ref:slices.Contains[[]uint8, uint8]:func([]uint8, uint8) (bool)>`. SSA builds one instance for every call site with identical type arguments and spells it as the first caller it builds for, so the spelling would otherwise depend on the other code loaded with the function. The function's own types keep their spelling.
+- **Generic instances** are written with aliases resolved (`any` as `interface{}`), `byte` as `uint8` and `rune` as `int32`: `<func_ref:slices.Contains[[]uint8, uint8]:func([]uint8, uint8) (bool)>`. SSA builds one instance for every call site with identical type arguments and spells it as the first caller it builds for, so the spelling would otherwise depend on the other code loaded with the function. The function's own types keep their spelling.
 
 ## Semantic Zipper
 
@@ -997,7 +997,7 @@ Two instructions are equivalent when all of the following hold:
 |------|----------------------|---------|
 | Static function | `<package name>.<func>` | `net.Dial`, `exec.Command` |
 | Concrete method | `<package name>.<method>` (receiver dropped) | `bytes.WriteString`, `http.Do` |
-| Generic instance | `<import path>.<func>[<type args>]`, `(<receiver>).<method>`; aliases resolved, `byte` as `uint8`, `rune` as `int32` | `slices.Contains[[]uint8, uint8]`, `(*sync/atomic.Pointer[int]).Load` |
+| Generic instance | `<import path>.<func>[<type args>]`, `(<receiver>).<method>`; aliases resolved (`any` as `interface{}`), `byte` as `uint8`, `rune` as `int32` | `slices.Contains[[]uint8, uint8]`, `(*sync/atomic.Pointer[int]).Load` |
 | Interface method | `invoke:<pkg>.<Iface>.<method>` | `invoke:net.Conn.Write` |
 | Builtin | `builtin:<name>` | `builtin:len` |
 | Closure or method value | `closure:<signature>` | `closure:func(a int) int` |
@@ -1135,14 +1135,14 @@ jobs:
         with:
           fetch-depth: 0        # diff and audit read HEAD~1
       - id: sfw
-        uses: BlackVectorOps/semantic_firewall@v7.1.0
+        uses: BlackVectorOps/semantic_firewall@v7.1.1
         with:
           mode: audit
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
 The Action does the following before running `sfw`:
-- installs `sfw` v7.1.0 with `go install`, or uses an `sfw` already on `PATH`;
+- installs `sfw` v7.1.1 with `go install`, or uses an `sfw` already on `PATH`;
 - installs `runsc` release `20260126.0` and checks its SHA-512;
 - relaxes the AppArmor user-namespace restriction for it.
 
@@ -1154,7 +1154,7 @@ The Action does the following before running `sfw`:
 |-------|---------|---------|
 | `path` | `.` | target for `check` and `scan`; the module root for `deps` |
 | `mode` | `check` | `check`, `diff`, `deps`, `scan` or `audit` |
-| `go-version` | `1.26` | passed to `actions/setup-go` |
+| `go-version` | `1.27` | passed to `actions/setup-go` |
 | `signatures` | — | database path, required for `scan`; `.json` selects the JSON backend |
 | `threshold` | `0.75` | scan threshold |
 | `strict` | `false` | `check --strict` |

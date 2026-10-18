@@ -1,5 +1,5 @@
 //go.mod
-go 1.26.3
+go 1.27.2
 
 module github.com/BlackVectorOps/semantic_firewall/v7
 
