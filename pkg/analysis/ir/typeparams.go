@@ -20,6 +20,9 @@ type TypeParamRenamer struct {
 	subst map[*types.TypeParam]types.Type
 	cache map[types.Type]types.Type
 	ctxt  *types.Context
+	// spelling, set only on the renamer instanceType uses, also resolves
+	// aliases and renders byte as uint8 and rune as int32.
+	spelling bool
 }
 
 // NewTypeParamRenamer returns the renamer for fn, or nil when no type
@@ -69,22 +72,22 @@ func (r *TypeParamRenamer) Rename(t types.Type) types.Type {
 
 // FuncName is fn.RelString(from), except that the receiver type and type
 // arguments in it are rendered from their types, so the type parameters r
-// renames appear by position.
+// renames appear by position, and an instance's as instanceType renders them.
 func (r *TypeParamRenamer) FuncName(fn *ssa.Function, from *types.Package) string {
-	rel := fn.RelString(from)
-	if r == nil {
-		return rel
-	}
 	if parent := fn.Parent(); parent != nil {
 		for i, anon := range parent.AnonFuncs {
 			if anon == fn {
 				return fmt.Sprintf("%s$%d", r.FuncName(parent, from), i+1)
 			}
 		}
+		return fn.RelString(from)
+	}
+	rel := fn.RelString(from)
+	if r == nil && !isInstance(fn) {
 		return rel
 	}
 	if recv := fn.Signature.Recv(); recv != nil {
-		return fmt.Sprintf("(%s).%s", types.TypeString(r.Rename(recv.Type()), types.RelativeTo(from)), fn.Name())
+		return fmt.Sprintf("(%s).%s", types.TypeString(r.instanceType(fn, recv.Type()), types.RelativeTo(from)), fn.Name())
 	}
 	targs := fn.TypeArgs()
 	if fn.Origin() == nil || len(targs) == 0 || !strings.HasSuffix(rel, fn.Name()) {
@@ -92,9 +95,44 @@ func (r *TypeParamRenamer) FuncName(fn *ssa.Function, from *types.Package) strin
 	}
 	args := make([]string, len(targs))
 	for i, t := range targs {
-		args[i] = r.Rename(t).String()
+		args[i] = r.instanceType(fn, t).String()
 	}
 	return strings.TrimSuffix(rel, fn.Name()) + fn.Origin().Name() + "[" + strings.Join(args, ", ") + "]"
+}
+
+// instanceType is r.Rename(t) for t, a type of fn: its signature, receiver
+// or a type argument. When fn is a generic instance, aliases in t are also
+// resolved and byte and rune render as uint8 and int32. SSA keeps one
+// instance per list of identical type arguments, and names and types it
+// after the call site that creates it first: slices.Contains[[]byte, byte]
+// and slices.Contains[[]uint8, uint8] are one function, spelled as whichever
+// caller was built first. That caller differs between a parallel build's
+// runs and between programs of different packages, so the spelling must
+// not reach the canonical form.
+func (r *TypeParamRenamer) instanceType(fn *ssa.Function, t types.Type) types.Type {
+	t = r.Rename(t)
+	if !isInstance(fn) {
+		return t
+	}
+	spelling := &TypeParamRenamer{
+		subst:    map[*types.TypeParam]types.Type{},
+		cache:    make(map[types.Type]types.Type),
+		ctxt:     types.NewContext(),
+		spelling: true,
+	}
+	return spelling.Rename(t)
+}
+
+// StableFuncName is fn.RelString(nil), except that a generic instance's
+// receiver and type arguments are rendered as instanceType renders them, so
+// the name does not depend on which caller SSA built the instance for first.
+func StableFuncName(fn *ssa.Function) string {
+	var r *TypeParamRenamer
+	return r.FuncName(fn, nil)
+}
+
+func isInstance(fn *ssa.Function) bool {
+	return fn.Parent() == nil && len(fn.TypeArgs()) > 0
 }
 
 func (r *TypeParamRenamer) rename(t types.Type) types.Type {
@@ -103,7 +141,19 @@ func (r *TypeParamRenamer) rename(t types.Type) types.Type {
 		if p, ok := r.subst[t]; ok {
 			return p
 		}
+	case *types.Basic:
+		if r.spelling {
+			switch t.Kind() {
+			case types.Uint8:
+				return types.Typ[types.Uint8]
+			case types.Int32:
+				return types.Typ[types.Int32]
+			}
+		}
 	case *types.Alias:
+		if r.spelling {
+			return r.Rename(types.Unalias(t))
+		}
 		if u := types.Unalias(t); u != t {
 			if out := r.Rename(u); out != u {
 				return out

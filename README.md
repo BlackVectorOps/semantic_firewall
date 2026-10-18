@@ -41,14 +41,14 @@ The analysis never executes the code under test.
 ## Install
 
 ```bash
-go install github.com/BlackVectorOps/semantic_firewall/v7/cmd/sfw@v7.0.0
+go install github.com/BlackVectorOps/semantic_firewall/v7/cmd/sfw@v7.1.0
 ```
 
 `go.mod` declares `go 1.26.3`. `sfw version` prints the build:
 
 ```
 Semantic Firewall CLI
-Build: v7.0.0 (Pebble/Gob+PackedIdx)
+Build: v7.1.0 (Pebble/Gob+PackedIdx)
 ```
 
 ## Commands
@@ -712,7 +712,7 @@ A `--db` path ending in `.json` selects the JSON backend for `check --scan`, `in
 | `topo:<TopologyHash>:<ID>` | `0x01`, entropy (float64 LE), tolerance (float64 LE), then the ID; 17 + len(ID) bytes |
 | `fuzzy:<FuzzyHash>:<ID>` | same packed value; written only when the fuzzy hash is non-empty |
 | `entr:<entropy>:<ID>` | ID |
-| `meta:schema_version` | `"3"` |
+| `meta:schema_version` | `"4"` |
 
 ```
 entr:005.8200:SFW-MAL-001
@@ -722,7 +722,7 @@ entr:005.8200:SFW-MAL-001
 
 The fixed-width `%08.4f` entropy sorts lexicographically in numeric order. The `entr:` index is read only by `ScanByEntropyRange`; the scan path does not use it.
 
-Lookups are prefix seeks, cost O(log N + k) in the LSM tree. `NewPebbleScanner` refuses a database whose `meta:schema_version` is not 3 (`CurrentSchemaVersion`).
+Lookups are prefix seeks, cost O(log N + k) in the LSM tree. `NewPebbleScanner` refuses a database whose `meta:schema_version` is not 4 (`CurrentSchemaVersion`).
 
 Write guarantees:
 - `AddSignature`, `AddSignatures` and `DeleteSignature` each commit a single batch with `pebble.Sync`.
@@ -936,6 +936,7 @@ b3:
 - **Escaping:** a kept string is emitted as an escaped `const("...")` (`"x\ny"` stays on one line), and struct tags are quoted, so literal content cannot inject IR lines.
 - **Fields** are named, not indexed: `FieldAddr p0, field(IsAdmin)`. Reordering or inserting a struct's fields does not change a function that reads them, but reading a different field does.
 - **Type parameters** are written by position: `$0`, `$1`, ... The receiver's and the function's type parameters are numbered together; in a closure, the enclosing function's come first. This covers value types and the receivers and type arguments of callees, e.g. `<func_ref:(*List[$0]).Push:func($0)>`. Renaming a type parameter keeps the fingerprint; reordering type parameters changes it.
+- **Generic instances** are written with aliases resolved, `byte` as `uint8` and `rune` as `int32`: `<func_ref:slices.Contains[[]uint8, uint8]:func([]uint8, uint8) (bool)>`. SSA builds one instance for every call site with identical type arguments and spells it as the first caller it builds for, so the spelling would otherwise depend on the other code loaded with the function. The function's own types keep their spelling.
 
 ## Semantic Zipper
 
@@ -996,6 +997,7 @@ Two instructions are equivalent when all of the following hold:
 |------|----------------------|---------|
 | Static function | `<package name>.<func>` | `net.Dial`, `exec.Command` |
 | Concrete method | `<package name>.<method>` (receiver dropped) | `bytes.WriteString`, `http.Do` |
+| Generic instance | `<import path>.<func>[<type args>]`, `(<receiver>).<method>`; aliases resolved, `byte` as `uint8`, `rune` as `int32` | `slices.Contains[[]uint8, uint8]`, `(*sync/atomic.Pointer[int]).Load` |
 | Interface method | `invoke:<pkg>.<Iface>.<method>` | `invoke:net.Conn.Write` |
 | Builtin | `builtin:<name>` | `builtin:len` |
 | Closure or method value | `closure:<signature>` | `closure:func(a int) int` |
@@ -1133,14 +1135,14 @@ jobs:
         with:
           fetch-depth: 0        # diff and audit read HEAD~1
       - id: sfw
-        uses: BlackVectorOps/semantic_firewall@v7.0.0
+        uses: BlackVectorOps/semantic_firewall@v7.1.0
         with:
           mode: audit
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
 The Action does the following before running `sfw`:
-- installs `sfw` v7.0.0 with `go install`, or uses an `sfw` already on `PATH`;
+- installs `sfw` v7.1.0 with `go install`, or uses an `sfw` already on `PATH`;
 - installs `runsc` release `20260126.0` and checks its SHA-512;
 - relaxes the AppArmor user-namespace restriction for it.
 

@@ -1195,7 +1195,11 @@ func (c *Canonicalizer) NormalizeOperand(v ssa.Value, context ssa.Instruction) s
 		// alone made same-named, same-signature functions from different
 		// packages (crypto/rand.Read vs math/rand.Read) or receivers
 		// indistinguishable.
-		return fmt.Sprintf("<func_ref:%s:%s>", c.tparams.FuncName(operand, c.ownPkg), c.sanitizeType(operand.Signature))
+		sig := c.sanitizeType(operand.Signature)
+		if isInstance(operand) {
+			sig = sanitizeTypeWith(c.tparams.instanceType(operand, operand.Signature), c.qualifier)
+		}
+		return fmt.Sprintf("<func_ref:%s:%s>", c.tparams.FuncName(operand, c.ownPkg), sig)
 	default:
 		return c.normalizeValue(v)
 	}
