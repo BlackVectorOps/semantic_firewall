@@ -13,6 +13,9 @@ type DiffOutput struct {
 	Functions       []FunctionDiff      `json:"functions"`
 	ErrorMessage    string              `json:"error,omitempty"`
 	TopologyMatches []TopologyMatchInfo `json:"topology_matches,omitempty"`
+	// Unanalyzed lists the //go:linkname directives added to or removed
+	// from the file.
+	Unanalyzed []FileChange `json:"unanalyzed,omitempty"`
 }
 
 type TopologyMatchInfo struct {

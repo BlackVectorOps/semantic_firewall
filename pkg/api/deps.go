@@ -255,7 +255,9 @@ func diffModule(oldSide, newSide *depsSide, om, nm *depModule) models.ModuleDiff
 	for _, path := range unionKeys(oldPkgs, newPkgs) {
 		oldRes := oldSide.fingerprintPackage(oldPkgs[path])
 		newRes := newSide.fingerprintPackage(newPkgs[path])
-		d := diffResults(path, path, oldRes, newRes, riskProfile{ownModule: nm.path, labelGoroutines: true})
+		// Without body-less functions or linkname directives: the module's
+		// unanalyzed list reports changes to its assembly files and directives.
+		d := diffResults(path, path, FileFingerprints{Results: oldRes}, FileFingerprints{Results: newRes}, riskProfile{ownModule: nm.path, labelGoroutines: true})
 		var changed []models.FunctionDiff
 		for _, f := range d.Functions {
 			if f.Status != models.StatusPreserved {
@@ -830,9 +832,7 @@ func importsC(f string) bool {
 // packageLinknames returns the //go:linkname directives of a package's Go
 // files: the compiled ones, read from the loaded syntax, and the ones the
 // build configuration excludes (cgo files, other platforms' files), which a
-// build with cgo or for another platform compiles. Directives are read from
-// the parsed comments, so one inside a block comment is not one, and they
-// are normalized to single spaces.
+// build with cgo or for another platform compiles.
 func packageLinknames(p *packages.Package) []string {
 	files := append([]*ast.File{}, p.Syntax...)
 	fset := token.NewFileSet()
@@ -847,11 +847,21 @@ func packageLinknames(p *packages.Package) []string {
 	}
 	var out []string
 	for _, file := range files {
-		for _, group := range file.Comments {
-			for _, c := range group.List {
-				if strings.HasPrefix(c.Text, "//go:linkname ") {
-					out = append(out, strings.Join(strings.Fields(c.Text), " "))
-				}
+		out = append(out, fileLinknames(file)...)
+	}
+	return out
+}
+
+// fileLinknames returns a file's //go:linkname directives, and their
+// //go:linknamestd spelling, which the compiler takes alike, normalized to
+// single spaces. They are read from the parsed comments, so one inside a
+// block comment is not one.
+func fileLinknames(f *ast.File) []string {
+	var out []string
+	for _, group := range f.Comments {
+		for _, c := range group.List {
+			if strings.HasPrefix(c.Text, "//go:linkname ") || strings.HasPrefix(c.Text, "//go:linknamestd ") {
+				out = append(out, strings.Join(strings.Fields(c.Text), " "))
 			}
 		}
 	}

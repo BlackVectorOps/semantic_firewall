@@ -223,7 +223,7 @@ The package `init` function is diffed like any other. Swapping an import changes
 
 ### Files
 
-The diff reports the functions declared in the given file, closures included, plus the package's synthesized `init`. That function has no source file and runs every file's package-level initializers. The package's other files are loaded for type-checking but their functions are not reported. A function belongs to the file it is written in: a `//line` directive changes the position the compiler reports, not which file's diff the function is in.
+The diff reports the functions declared in the given file, closures and [body-less functions](#body-less-functions) included, plus the package's synthesized `init`. That function has no source file and runs every file's package-level initializers. The package's other files are loaded for type-checking but their functions are not reported. A function belongs to the file it is written in: a `//line` directive changes the position the compiler reports, not which file's diff the function is in.
 
 A file that the host build excludes is loaded under a configuration that includes it, chosen before the file is loaded:
 - **`_test.go` file:** loaded with the package's tests.
@@ -416,6 +416,31 @@ Verification calls (`topology.IsVerificationCall`), whose removal is a `RemovedC
 
 Closures and range-over-func loop bodies are separate functions (`Handle$1`) and are scored on their own; a parent's capabilities do not include its closures' calls. Calls to imported packages' `init` functions are not call targets.
 
+### Body-less functions
+
+A function declared without a Go body (`func add(a, b int) int`) runs assembly from the package's `.s` files, or another function a [`//go:linkname` directive](#linkname-directives) names. Neither has SSA, so nothing in it is fingerprinted or scored. The diff reports each one by name instead:
+
+| Change | Status | `topology_delta` | Points |
+|--------|--------|------------------|--------|
+| Declared in the new file only | `added` | `NoBody` | 10 |
+| Parameter or result types changed | `modified` | `NoBody, Signature~` | 10 |
+| Declared in the old file only | `removed` | `NoBody` | 0 |
+| Otherwise (renamed parameters included) | `preserved` | | 0 |
+
+The `.s` file itself is not read. `sfw deps diff` does not report a dependency's body-less functions. Its `unanalyzed` list reports added, modified and removed assembly files and linkname directives, so a body-less function added against unchanged assembly, or one whose signature changed, is not reported there.
+
+### Linkname directives
+
+A `//go:linkname local target` directive, or its `//go:linknamestd` spelling, which the compiler takes alike, makes `local`, a function or variable declared in any file of the package, the same symbol as `target`, usually another package's unexported function or variable. The analysis sees `local` only as its own package's. The diff compares the file's directives as text, normalized to single spaces, and lists each one added or removed under `unanalyzed`, whatever it names:
+
+```json
+"unanalyzed": [
+  { "file": "new.go: //go:linkname x example.com/q.secret", "kind": "linkname", "change": "added", "risk_score": 10 }
+]
+```
+
+An added directive scores 10 and counts in `high_risk_changes`, not in the function counts. A removed one scores 0 and is listed with the old file's path. A changed target is a removed directive and an added one, and a directive moved to another file of the package is added in that file. Text the compiler does not take as a directive, inside a block comment or with a tab after `//go:linkname`, is not reported.
+
 ## Detection scope
 
 **Scored:**
@@ -424,6 +449,7 @@ Closures and range-over-func loop bodies are separate functions (`Handle$1`) and
 - Removal of a verification call or a check helper, or deletion of a function that made one.
 - A capability call left without any guard, and weakened security settings (see [Deletion signals](#deletion-signals)).
 - New goroutines, entropy class increases and obfuscation class increases.
+- An added or changed [body-less function](#body-less-functions), whose code is assembly or a linkname target, and an added [linkname directive](#linkname-directives).
 
 **Not scored (no concrete target):**
 - Interface method calls (`invoke:`), except those described under [Capability classes](#capability-classes): `http.RoundTripper.RoundTrip`, and capability methods of a value the function itself converts to the interface. A generic function on its own records nothing for the methods it calls on a type parameter; its callers do, through the type argument.
@@ -515,7 +541,7 @@ For each compared module:
   | `kind` | Files | Added or modified |
   |--------|-------|-------------------|
   | `syso`, `object` | `.syso`; `.a`, `.o`, `.so`, `.dylib`, `.dll`, `.lib` | 20 |
-  | `linkname` | each `//go:linkname` directive in a package's Go files, compiled or excluded, keyed by package (renaming its file is no change) | 10 |
+  | `linkname` | each `//go:linkname` or `//go:linknamestd` directive in a package's Go files, compiled or excluded, keyed by package (renaming its file is no change) | 10 |
   | `assembly`, `c` | `.s`, `.sx`; C, C++, Objective-C, Fortran and SWIG sources and headers | 5 |
   | `cgo`, `excluded-go` | Go files the build leaves out: those that import `"C"`, and those excluded by build constraints (other platforms included) | 5 |
   | `embed` | files embedded with `//go:embed` | 5 |
@@ -548,7 +574,7 @@ sfw audit old.go new.go "minor refactor of logging"
 ```
 
 1. Runs `sfw diff` on the two files.
-2. Collects every function with `risk_score >= 10`: its name, status, score, `topology_delta`, at most 10 `added_ops`, and its source on both sides (`old_source`, `new_source`: the declaration with line numbers, the first 120 lines of a longer one). The source comes from `go/parser` over the two files, outside the sandbox, which reads text and runs nothing.
+2. Collects every function with `risk_score >= 10`: its name, status, score, `topology_delta`, at most 10 `added_ops`, and its source on both sides (`old_source`, `new_source`: the declaration with line numbers, the first 120 lines of a longer one). The source comes from `go/parser` over the two files, outside the sandbox, which reads text and runs nothing. Each `unanalyzed` entry with `risk_score >= 10` is collected too, as its `file` string, change, score and `kind`, with no source.
 3. If there are none, returns `MATCH` without calling an LLM, so no key is needed.
 4. Otherwise it makes two LLM calls with the requested model:
    - a prompt-injection sentinel over the payload, where an unsafe result gives `LIE`;

@@ -75,6 +75,18 @@ func RunAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 			})
 		}
 	}
+	// A high-risk linkname directive has no function to show; the model
+	// reads the file with its tools.
+	for _, fc := range diffOutput.Unanalyzed {
+		if fc.RiskScore >= models.RiskScoreHigh {
+			evidence = append(evidence, models.AuditEvidence{
+				Function:        fc.File,
+				Status:          fc.Change,
+				RiskScore:       fc.RiskScore,
+				StructuralDelta: fc.Kind,
+			})
+		}
+	}
 
 	highRiskDetected := len(evidence) > 0
 

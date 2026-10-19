@@ -75,7 +75,7 @@ func DiffBatchWithFS(fsys FileSystem, pairs []DiffPair) []*models.DiffOutput {
 		case n.Err != nil:
 			out[i] = failedDiff(p, fmt.Errorf("failed to process new file: %w", n.Err))
 		default:
-			out[i] = diffResults(p.Old, p.New, o.Results, n.Results, riskProfile{})
+			out[i] = diffResults(p.Old, p.New, o, n, riskProfile{})
 		}
 	}
 	return out
@@ -116,6 +116,10 @@ func failedDiff(p DiffPair, err error) *models.DiffOutput {
 type FileFingerprints struct {
 	Results []diff.FingerprintResult
 	Err     error
+
+	// source holds what the file's text declares that its SSA does not show
+	// (see parseUnanalyzed).
+	source unanalyzedSource
 }
 
 // inputReader reads a file to fingerprint: its content, or nil when the
@@ -142,7 +146,7 @@ func fingerprintFiles(fsys FileSystem, paths []string, read inputReader, strict 
 	groups := make(map[string][]pendingFile)
 	workspaces := make(map[string]string)
 	_, onDisk := fsys.(RealFileSystem)
-	var loose []pendingFile
+	var loose, sources []pendingFile
 	for _, path := range paths {
 		if _, done := out[path]; done {
 			continue
@@ -154,6 +158,7 @@ func fingerprintFiles(fsys FileSystem, paths []string, read inputReader, strict 
 		}
 		out[path] = FileFingerprints{} // claimed; filled in below
 		f := pendingFile{path: path, abs: abs, content: content}
+		sources = append(sources, f)
 		root := ""
 		if onDisk {
 			root = moduleRoot(fsys, abs)
@@ -184,6 +189,13 @@ func fingerprintFiles(fsys FileSystem, paths []string, read inputReader, strict 
 	}
 	for _, f := range loose {
 		out[f.path] = fingerprintOne(f, strict)
+	}
+	// Body-less functions and linkname directives come from the source text,
+	// which the loads above do not keep.
+	for _, f := range sources {
+		r := out[f.path]
+		r.source = parseUnanalyzed(f.content)
+		out[f.path] = r
 	}
 	return out
 }
