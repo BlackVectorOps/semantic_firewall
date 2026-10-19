@@ -103,6 +103,10 @@ func topologies(t *testing.T, srcs ...string) []*topology.FunctionTopology {
 		pkgPath := fn.Pkg.Pkg.Path()
 		tp.CapabilityGuards = rekey(tp.CapabilityGuards, pkgPath)
 		tp.Checks = rekey(tp.Checks, pkgPath)
+		tp.MovedChecks = rekey(tp.MovedChecks, pkgPath)
+		for k, via := range tp.MovedChecks {
+			tp.MovedChecks[k] = strings.ReplaceAll(via, pkgPath, "testmod")
+		}
 		out[i] = tp
 	}
 	return out
@@ -431,6 +435,50 @@ func even(a, b []byte, n int) bool { if n == 0 { return hmac.Equal(a, b) }; retu
 func odd(a, b []byte, n int) bool { return even(a, b, n-1) }
 func F(a, b []byte) bool { return odd(a, b, 3) }
 func main() {}`, []string{"testmod.odd", "crypto/hmac.Equal"}},
+		{"result tested by errors.Is", `package main
+import "errors"
+var errBad = errors.New("bad")
+func validate(u string) error { if u == "" { return errBad }; return nil }
+func F(u string) int { if err := validate(u); errors.Is(err, errBad) { return 0 }; return 1 }
+func main() {}`, []string{"testmod.validate"}},
+		{"result tested by errors.As", `package main
+import "errors"
+type vErr struct{}
+func (*vErr) Error() string { return "v" }
+func validate(u string) error { if u == "" { return &vErr{} }; return nil }
+func F(u string) bool { var e *vErr; return errors.As(validate(u), &e) }
+func main() {}`, []string{"testmod.validate"}},
+		{"errors.Is result discarded", `package main
+import "errors"
+var errBad = errors.New("bad")
+func validate(u string) error { if u == "" { return errBad }; return nil }
+func F(u string) { _ = errors.Is(validate(u), errBad) }
+func main() {}`, nil},
+		{"errors.Is counts toward the operation limit", `package main
+import "errors"
+var errBad = errors.New("bad")
+func validate(u string) error { if u == "" { return errBad }; return nil }
+func F(u string) bool { return !!!!errors.Is(validate(u), errBad) }
+func main() {}`, nil},
+		{"result as the errors.Is target", `package main
+import "errors"
+var errBad = errors.New("bad")
+func validate(u string) error { if u == "" { return errBad }; return nil }
+func F(u string) bool { return errors.Is(errBad, validate(u)) }
+func main() {}`, nil},
+		{"result passed to another errors function", `package main
+import "errors"
+var errBad = errors.New("bad")
+func validate(u string) error { if u == "" { return errBad }; return nil }
+func F(u string) bool { return errors.Unwrap(validate(u)) == nil }
+func main() {}`, nil},
+		{"result passed to a local Is", `package main
+import "errors"
+var errBad = errors.New("bad")
+func validate(u string) error { if u == "" { return errBad }; return nil }
+func Is(a, b error) bool { return a == b }
+func F(u string) bool { return Is(validate(u), errBad) }
+func main() {}`, nil},
 		{"two helpers sharing a verifier", `package main
 import "crypto/hmac"
 func valid(a, b []byte) bool { return hmac.Equal(a, b) }
@@ -467,10 +515,10 @@ import "crypto/hmac"
 func same[T ~[]byte](a, b T) bool { return hmac.Equal(a, b) }
 func F(a, b []byte) int { if !same(a, b) { return 0 }; return 1 }
 func main() {}`, []string{"testmod.same", "crypto/hmac.Equal"}},
-		{"a closure is a function of its own", `package main
+		{"a closure invoked on the spot is part of its parent", `package main
 import "crypto/hmac"
 func F(a, b []byte) bool { f := func() bool { return hmac.Equal(a, b) }; return f() }
-func main() {}`, nil},
+func main() {}`, []string{"crypto/hmac.Equal"}},
 		{"verification name deciding a branch", `package main
 func authorize(u string) bool { return u == "admin" }
 func F(u string) int { if !authorize(u) { return 0 }; return 1 }
@@ -659,6 +707,108 @@ func main() {}`, nil},
 			}
 			if !reflect.DeepEqual(tp.Checks, want) {
 				t.Errorf("Checks = %v; want %v", tp.Checks, c.want)
+			}
+		})
+	}
+}
+
+func TestLiteralChecks(t *testing.T) {
+	const hdr = `package main
+import "errors"
+var errBad = errors.New("bad")
+func validate(u string) error { if u == "" { return errBad }; return nil }
+type group struct{}
+func (*group) Do(k string, f func() (any, error)) (any, error, bool) { v, e := f(); return v, e, false }
+type doer interface { Do(string, func() (any, error)) (any, error, bool) }
+type resolver func() error
+func run(r resolver) error { return r() }
+func runAny(f any) error { return nil }
+func retry(f func() error) error { return f() }
+func try(f func() error) bool { return f() == nil }
+var g group
+var d doer = &g
+var callFn = retry
+var keep func() (any, error)
+func main() {}
+`
+	const do = "(testmod.group).Do"
+	cases := []struct {
+		name, body string
+		checks     []string
+		moved      map[string]string
+	}{
+		{"passed to a call whose error decides",
+			`_, err, _ := g.Do("k", func() (any, error) { return nil, validate(u) }); return err`,
+			nil, map[string]string{"testmod.validate": do}},
+		{"capturing nothing",
+			`_, err, _ := g.Do("k", func() (any, error) { return nil, validate("") }); return err`,
+			nil, map[string]string{"testmod.validate": do}},
+		{"passed as a named func type",
+			`return run(func() error { return validate(u) })`,
+			nil, map[string]string{"testmod.validate": "testmod.run"}},
+		{"passed to an interface method",
+			`_, err, _ := d.Do("k", func() (any, error) { return nil, validate(u) }); return err`,
+			nil, map[string]string{"testmod.validate": "(testmod.doer).Do"}},
+		{"passed to a func value",
+			`return callFn(func() error { return validate(u) })`,
+			nil, map[string]string{"testmod.validate": "func value"}},
+		{"nested", `return retry(func() error {
+	_, err, _ := g.Do("k", func() (any, error) { return nil, validate(u) }); return err })`,
+			nil, map[string]string{"testmod.validate": do}},
+		{"invoked on the spot",
+			`return func() error { return validate(u) }()`,
+			[]string{"testmod.validate"}, nil},
+		{"invoked on the spot with no result",
+			`func() { if validate(u) != nil { panic(1) } }(); return nil`,
+			[]string{"testmod.validate"}, nil},
+		{"invoked on the spot, result ignored",
+			`func() error { return validate(u) }(); return nil`,
+			nil, nil},
+		{"only the shared flag decides",
+			`_, _, shared := g.Do("k", func() (any, error) { return nil, validate(u) }); if shared { return errBad }; return nil`,
+			nil, nil},
+		{"a call returning bool",
+			`if try(func() error { return validate(u) }) { return nil }; return errBad`,
+			nil, nil},
+		{"error result unused",
+			`_, err, _ := g.Do("k", func() (any, error) { return nil, validate(u) }); _ = err; return nil`,
+			nil, nil},
+		{"single error result ignored",
+			`run(func() error { return validate(u) }); return nil`,
+			nil, nil},
+		{"call result discarded",
+			`g.Do("k", func() (any, error) { return nil, validate(u) }); return nil`,
+			nil, nil},
+		{"stored as well as passed",
+			`f := func() (any, error) { return nil, validate(u) }; _, err, _ := g.Do("k", f); keep = f; return err`,
+			nil, nil},
+		{"passed as any",
+			`return runAny(func() error { return validate(u) })`,
+			nil, nil},
+		{"deferred and run as a goroutine",
+			`defer func() { if validate(u) != nil { panic(1) } }(); go func() { _ = validate(u) }(); return nil`,
+			nil, nil},
+		{"check ignored inside",
+			`_, err, _ := g.Do("k", func() (any, error) { _ = validate(u); return nil, nil }); return err`,
+			nil, nil},
+	}
+	srcs := make([]string, len(cases))
+	for i, c := range cases {
+		srcs[i] = hdr + "func F(u string) error { " + c.body + " }\n"
+	}
+	tps := topologies(t, srcs...)
+	for i, c := range cases {
+		tp := tps[i]
+		t.Run(c.name, func(t *testing.T) {
+			want := map[string]bool{}
+			for _, k := range c.checks {
+				want[k] = true
+			}
+			if !reflect.DeepEqual(tp.Checks, want) {
+				t.Errorf("Checks = %v; want %v", tp.Checks, c.checks)
+			}
+			if len(tp.MovedChecks) != len(c.moved) || len(c.moved) > 0 && !reflect.DeepEqual(tp.MovedChecks, c.moved) {
+				t.Errorf("MovedChecks = %v; want %v", tp.MovedChecks, c.moved)
 			}
 		})
 	}

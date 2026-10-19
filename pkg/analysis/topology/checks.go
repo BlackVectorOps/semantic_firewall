@@ -3,6 +3,7 @@ package topology
 import (
 	"go/token"
 	"go/types"
+	"maps"
 	"slices"
 	"strings"
 	"unicode"
@@ -74,6 +75,97 @@ func collectCheckHelpers(fn *ssa.Function, t *FunctionTopology) {
 			}
 		}
 	}
+	for _, lit := range fn.AnonFuncs {
+		collectLiteralChecks(lit, t)
+	}
+}
+
+// collectLiteralChecks records the checks of the function literal lit in
+// t, the topology of its parent, when the parent's one use of it is a call.
+// Invoked on the spot, lit runs there: its checks are the parent's when it
+// has no result or its result decides, as for a helper. Passed to a call,
+// it runs when the callee chooses, which a cache may skip: its checks go to
+// MovedChecks, when the call's error result decides. A literal stored or
+// converted to an interface can run from anywhere and counts for nothing.
+func collectLiteralChecks(lit *ssa.Function, t *FunctionTopology) {
+	var v ssa.Value = lit
+	use := soleReferrer(v)
+	if mc, ok := use.(*ssa.MakeClosure); ok {
+		v, use = mc, soleReferrer(mc)
+	}
+	// A literal passed as a named func type is converted first.
+	for {
+		ct, ok := use.(*ssa.ChangeType)
+		if !ok {
+			break
+		}
+		v, use = ct, soleReferrer(ct)
+	}
+	call, ok := use.(*ssa.Call)
+	if !ok {
+		return
+	}
+	inner := &FunctionTopology{Checks: make(map[string]bool)}
+	collectCheckHelpers(lit, inner)
+	if call.Call.Value == v {
+		if call.Call.Signature().Results().Len() > 0 && !resultDecides(call, true) {
+			return
+		}
+		maps.Copy(t.Checks, inner.Checks)
+	} else {
+		if !errorDecides(call) {
+			return
+		}
+		via := calleeKey(&call.Call)
+		for k := range inner.Checks {
+			addMovedCheck(t, k, via)
+		}
+	}
+	for k, innerVia := range inner.MovedChecks {
+		addMovedCheck(t, k, innerVia)
+	}
+}
+
+func addMovedCheck(t *FunctionTopology, k, via string) {
+	if t.MovedChecks == nil {
+		t.MovedChecks = make(map[string]string)
+	}
+	t.MovedChecks[k] = via
+}
+
+func soleReferrer(v ssa.Value) ssa.Instruction {
+	if refs := v.Referrers(); len(*refs) == 1 {
+		return (*refs)[0]
+	}
+	return nil
+}
+
+// errorDecides reports whether call's error result decides (see
+// resultDecides). Its other results do not count: a branch on
+// singleflight's shared flag says nothing about whether a check passed.
+func errorDecides(call *ssa.Call) bool {
+	if isErrorType(call.Type()) {
+		return resultDecides(call, false)
+	}
+	for _, ref := range *call.Referrers() {
+		if ex, ok := ref.(*ssa.Extract); ok && isErrorType(ex.Type()) && resultDecides(ex, false) {
+			return true
+		}
+	}
+	return false
+}
+
+// calleeKey returns the key of the function c calls, like CallTargets, or
+// "(iface).Method" for an interface call, or "func value".
+func calleeKey(c *ssa.CallCommon) string {
+	if c.IsInvoke() {
+		return "(" + types.TypeString(c.Value.Type(), nil) + ")." + c.Method.Name()
+	}
+	if f := c.StaticCallee(); f != nil {
+		pkgPath, recv, name, _ := calleeIdentity(f)
+		return callTargetKey(pkgPath, recv, name)
+	}
+	return "func value"
 }
 
 // notChecks are callees whose names contain a verification word but which
@@ -232,12 +324,13 @@ func decidedPrimitive(instr ssa.Instruction) (string, bool) {
 	return callTargetKey(pkgPath, recv, name), true
 }
 
-// resultDecides reports whether a call's result, possibly through up to
-// four unary or binary operations, conversions, tuple extracts, phis and
-// locals, is the condition of a branch or is returned (its caller then
-// decides on it). Unless anyReturn is set, only a returned boolean or error
-// counts: a getter returning another value decides nothing.
-func resultDecides(call *ssa.Call, anyReturn bool) bool {
+// resultDecides reports whether v, a call's result, possibly through up to
+// four unary or binary operations, conversions, tuple extracts, phis,
+// locals and errors.Is or errors.As calls testing it, is the condition of
+// a branch or is returned (its caller then decides on it). Unless
+// anyReturn is set, only a returned boolean or error counts: a getter
+// returning another value decides nothing.
+func resultDecides(v ssa.Value, anyReturn bool) bool {
 	var decides func(v ssa.Value, depth int) bool
 	decides = func(v ssa.Value, depth int) bool {
 		// The depth bound also ends a cycle through phis.
@@ -256,6 +349,12 @@ func resultDecides(call *ssa.Call, anyReturn bool) bool {
 				if decides(r.(ssa.Value), depth+1) {
 					return true
 				}
+			case *ssa.Call:
+				if f := r.Call.StaticCallee(); f != nil && r.Call.Args[0] == v {
+					if p, _, name, _ := calleeIdentity(f); p == "errors" && (name == "Is" || name == "As") && decides(r, depth+1) {
+						return true
+					}
+				}
 			case *ssa.Store:
 				// A local the value is stored in, such as the result a
 				// function with a defer returns: follow its loads.
@@ -270,7 +369,7 @@ func resultDecides(call *ssa.Call, anyReturn bool) bool {
 		}
 		return false
 	}
-	return decides(call, 0)
+	return decides(v, 0)
 }
 
 func isBoolOrError(t types.Type) bool {
