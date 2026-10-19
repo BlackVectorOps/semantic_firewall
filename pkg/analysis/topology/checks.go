@@ -233,10 +233,11 @@ func decidedPrimitive(instr ssa.Instruction) (string, bool) {
 }
 
 // resultDecides reports whether a call's result, possibly through up to
-// four unary or binary operations, conversions, tuple extracts, phis and
-// locals, is the condition of a branch or is returned (its caller then
-// decides on it). Unless anyReturn is set, only a returned boolean or error
-// counts: a getter returning another value decides nothing.
+// four unary or binary operations, conversions, tuple extracts, phis,
+// locals and errors.Is or errors.As calls testing it, is the condition of
+// a branch or is returned (its caller then decides on it). Unless
+// anyReturn is set, only a returned boolean or error counts: a getter
+// returning another value decides nothing.
 func resultDecides(call *ssa.Call, anyReturn bool) bool {
 	var decides func(v ssa.Value, depth int) bool
 	decides = func(v ssa.Value, depth int) bool {
@@ -255,6 +256,12 @@ func resultDecides(call *ssa.Call, anyReturn bool) bool {
 			case *ssa.UnOp, *ssa.BinOp, *ssa.ChangeType, *ssa.Convert, *ssa.Extract, *ssa.Phi:
 				if decides(r.(ssa.Value), depth+1) {
 					return true
+				}
+			case *ssa.Call:
+				if f := r.Call.StaticCallee(); f != nil && r.Call.Args[0] == v {
+					if p, _, name, _ := calleeIdentity(f); p == "errors" && (name == "Is" || name == "As") && decides(r, depth+1) {
+						return true
+					}
 				}
 			case *ssa.Store:
 				// A local the value is stored in, such as the result a

@@ -431,6 +431,50 @@ func even(a, b []byte, n int) bool { if n == 0 { return hmac.Equal(a, b) }; retu
 func odd(a, b []byte, n int) bool { return even(a, b, n-1) }
 func F(a, b []byte) bool { return odd(a, b, 3) }
 func main() {}`, []string{"testmod.odd", "crypto/hmac.Equal"}},
+		{"result tested by errors.Is", `package main
+import "errors"
+var errBad = errors.New("bad")
+func validate(u string) error { if u == "" { return errBad }; return nil }
+func F(u string) int { if err := validate(u); errors.Is(err, errBad) { return 0 }; return 1 }
+func main() {}`, []string{"testmod.validate"}},
+		{"result tested by errors.As", `package main
+import "errors"
+type vErr struct{}
+func (*vErr) Error() string { return "v" }
+func validate(u string) error { if u == "" { return &vErr{} }; return nil }
+func F(u string) bool { var e *vErr; return errors.As(validate(u), &e) }
+func main() {}`, []string{"testmod.validate"}},
+		{"errors.Is result discarded", `package main
+import "errors"
+var errBad = errors.New("bad")
+func validate(u string) error { if u == "" { return errBad }; return nil }
+func F(u string) { _ = errors.Is(validate(u), errBad) }
+func main() {}`, nil},
+		{"errors.Is counts toward the operation limit", `package main
+import "errors"
+var errBad = errors.New("bad")
+func validate(u string) error { if u == "" { return errBad }; return nil }
+func F(u string) bool { return !!!!errors.Is(validate(u), errBad) }
+func main() {}`, nil},
+		{"result as the errors.Is target", `package main
+import "errors"
+var errBad = errors.New("bad")
+func validate(u string) error { if u == "" { return errBad }; return nil }
+func F(u string) bool { return errors.Is(errBad, validate(u)) }
+func main() {}`, nil},
+		{"result passed to another errors function", `package main
+import "errors"
+var errBad = errors.New("bad")
+func validate(u string) error { if u == "" { return errBad }; return nil }
+func F(u string) bool { return errors.Unwrap(validate(u)) == nil }
+func main() {}`, nil},
+		{"result passed to a local Is", `package main
+import "errors"
+var errBad = errors.New("bad")
+func validate(u string) error { if u == "" { return errBad }; return nil }
+func Is(a, b error) bool { return a == b }
+func F(u string) bool { return Is(validate(u), errBad) }
+func main() {}`, nil},
 		{"two helpers sharing a verifier", `package main
 import "crypto/hmac"
 func valid(a, b []byte) bool { return hmac.Equal(a, b) }
