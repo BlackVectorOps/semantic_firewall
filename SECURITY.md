@@ -4,34 +4,34 @@
 ## Supported Versions
 
 
-I adhere to Semantic Versioning. Security patches will be backported to the current major version.
+I adhere to Semantic Versioning. Fixes, security fixes included, ship only in the newest release of the current major version. Nothing is backported to an older release or an older major: upgrade to the newest 7.x release to get a fix.
 
 
 | Version | Supported | Status | End of support |
 | :--- | :---: | :--- | :--- |
-| 7.x | :white_check_mark: | **Active Support.** Diff and deletion signals, `sfw deps diff`, batch diff, source loader and type cache, LLM audit, Malware Scanner, PebbleDB, Sandbox, Entropy Engine, GitHub Action. | At least 12 months after 8.0.0 is released |
-| 6.x | :warning: | **Critical fixes only.** Upgrade to 7.x; the module path is now `/v7`. | 2027-10-18 |
-| 5.x | :warning: | **Critical fixes only.** Upgrade to 7.x; the module path is now `/v7`. | 2027-10-18 |
+| 7.x | :white_check_mark: | **Active Support** in the newest 7.x release. Diff and deletion signals, `sfw deps diff`, batch diff, source loader and type cache, LLM audit, Malware Scanner, PebbleDB, Sandbox, Entropy Engine, GitHub Action. | At least 12 months after 8.0.0 is released |
+| 6.x | :warning: | **Advisories only, no fixes.** Upgrade to 7.x; the module path is now `/v7`. | 2027-10-18 |
+| 5.x | :warning: | **Advisories only, no fixes.** Upgrade to 7.x; the module path is now `/v7`. | 2027-10-18 |
 | 1.x to 4.x | :x: | **End of Life.** Not supported. | Ended |
 | < 1.0 | :x: | **End of Life.** Pre-release versions are not supported. | Ended |
 
 
 ### End-of-support policy
 
-- When a new major version is released, the previous one moves to critical fixes only, for at least 12 months from that release.
+- When a new major version is released, the previous one moves to advisories only for at least 12 months from that release. A critical bug that affects it is announced in an advisory that names it, and the fix ships in the new major.
 - Every end-of-support date is announced in the table above at least 12 months before it, and is never moved earlier. A date can move later.
-- A version past its end-of-support date gets no fixes, security fixes included. Bypasses found after that date stay open in it, so a CI gate still running it can pass changes that a supported version flags. Upgrade before the date.
+- A version in advisories-only support gets no fixes, so a critical bug stays open in it and a CI gate still running it can pass changes the newest release flags. Past its end-of-support date it gets no advisories either. Upgrade.
 
 
 ### What counts as critical
 
-A fix is backported to a version in critical-fixes-only support when the bug lets a change through a check that version already ships, with no error:
+A bug is critical when it lets a change through a check the version already ships, with no error:
 - **Fail-open diffs:** `sfw diff` or `sfw check` drops, hides or misattributes a changed function, or reports it as unchanged or removed when it is not.
 - **Bypass of a shipped signal:** a change that a signal of that version is documented to score (a new capability call, a removed check, obfuscation) scores lower than its rule says.
 - **Sandbox escape:** analyzed code runs or writes outside the gVisor sandbox's mounts.
 - **Action passes on a failure:** the GitHub Action reports success when `sfw` failed or analyzed nothing.
 
-Signals, capability classes and commands added in a later major version are not backported. Neither are false positives, crashes that fail the run, or speed fixes.
+A critical bug gets a fix in an out-of-band release of the newest 7.x, and an advisory naming every affected version, including those in advisories-only support. False positives, crashes that fail the run, and speed fixes are not critical.
 
 
 ## Reporting a Vulnerability
