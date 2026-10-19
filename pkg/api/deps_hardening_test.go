@@ -216,6 +216,15 @@ func TestDepsDiff_Linknames(t *testing.T) {
 			t.Errorf("module = %+v; want added with the directive at risk %d", m, models.RiskScoreHigh)
 		}
 	})
+
+	t.Run("spelled linknamestd", func(t *testing.T) {
+		std := strings.Replace(link, "//go:linkname ", "//go:linknamestd ", 1)
+		m := findModule(t, depsDiff(t, tree(nil), tree(map[string]string{"lib/lib/codec/link.go": std})), "example.com/lib")
+		const key = "linkname added example.com/lib/codec: //go:linknamestd nanotime runtime.nanotime"
+		if got := unanalyzedKeys(m); got[key] != models.RiskScoreHigh {
+			t.Errorf("unanalyzed = %v; want %s at risk %d", got, key, models.RiskScoreHigh)
+		}
+	})
 }
 
 // Entry points are the method sets of exported types: promoted methods and

@@ -24,43 +24,44 @@ func Diff(oldPath, newPath string) (*models.DiffOutput, error) {
 // so tests can drive the pipeline without touching disk. Behaviour is
 // identical to Diff otherwise.
 func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, error) {
-	processFile := func(path string) ([]diff.FingerprintResult, error) {
+	processFile := func(path string) FileFingerprints {
 		content, absPath, err := readDiffInput(fsys, path)
 		if err != nil || content == nil {
-			return []diff.FingerprintResult{}, err
+			return FileFingerprints{Results: []diff.FingerprintResult{}, Err: err}
 		}
 		paths := pathResolver{}
 		results, err := diff.FingerprintSourceWhere(absPath, string(content), ir.DefaultLiteralPolicy, false, paths.keepFiles(absPath))
 		if err != nil {
-			return nil, err
+			return FileFingerprints{Err: err}
 		}
-		return inFile(results, absPath, paths), nil
+		return FileFingerprints{Results: inFile(results, absPath, paths), source: parseUnanalyzed(content)}
 	}
 
 	// Load the two versions at the same time; report the old side's error
 	// first when both fail.
-	var oldResults, newResults []diff.FingerprintResult
-	var oldErr, newErr error
+	var oldSide, newSide FileFingerprints
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); oldResults, oldErr = processFile(oldPath) }()
-	go func() { defer wg.Done(); newResults, newErr = processFile(newPath) }()
+	go func() { defer wg.Done(); oldSide = processFile(oldPath) }()
+	go func() { defer wg.Done(); newSide = processFile(newPath) }()
 	wg.Wait()
-	if oldErr != nil {
-		return nil, fmt.Errorf("failed to process old file: %w", oldErr)
+	if oldSide.Err != nil {
+		return nil, fmt.Errorf("failed to process old file: %w", oldSide.Err)
 	}
-	if newErr != nil {
-		return nil, fmt.Errorf("failed to process new file: %w", newErr)
+	if newSide.Err != nil {
+		return nil, fmt.Errorf("failed to process new file: %w", newSide.Err)
 	}
-	return diffResults(oldPath, newPath, oldResults, newResults, riskProfile{}), nil
+	return diffResults(oldPath, newPath, oldSide, newSide, riskProfile{}), nil
 }
 
-// diffResults pairs two sets of fingerprinted functions, compares each pair,
-// scores the changes and summarizes them. It is the part of a diff that does
-// not depend on where the functions came from.
-func diffResults(oldPath, newPath string, oldResults, newResults []diff.FingerprintResult, profile riskProfile) *models.DiffOutput {
+// diffResults pairs the fingerprinted functions of two versions of a file,
+// compares each pair, scores the changes and summarizes them, with the
+// file's body-less functions and linkname directives (see diffBodyless and
+// diffLinknames). It is the part of a diff that does not depend on where
+// the functions came from.
+func diffResults(oldPath, newPath string, oldSide, newSide FileFingerprints, profile riskProfile) *models.DiffOutput {
 	matched, addedFuncs, removedFuncs := diff.MatchFunctionsByTopology(
-		oldResults, newResults, models.DefaultTopologyMatchThreshold,
+		oldSide.Results, newSide.Results, models.DefaultTopologyMatchThreshold,
 	)
 
 	// An empty diff lists no functions as [], not null.
@@ -184,16 +185,41 @@ func diffResults(oldPath, newPath string, oldResults, newResults []diff.Fingerpr
 		functionDiffs = append(functionDiffs, d)
 	}
 
-	added := len(addedFuncs)
-	removed := len(removedFuncs)
-	total := len(matched) + added + removed
+	pairs, added, removed := len(matched), len(addedFuncs), len(removedFuncs)
+	for _, d := range diffBodyless(oldSide.source.bodyless, newSide.source.bodyless) {
+		switch d.Status {
+		case models.StatusPreserved:
+			preserved++
+			pairs++
+		case models.StatusModified:
+			modified++
+			pairs++
+		case models.StatusAdded:
+			added++
+		case models.StatusRemoved:
+			removed++
+		}
+		if d.RiskScore >= models.RiskScoreHigh {
+			highRisk++
+		}
+		functionDiffs = append(functionDiffs, d)
+	}
+	// Directives are not functions: they count as high-risk changes only.
+	unanalyzed := diffLinknames(oldPath, newPath, oldSide.source.linknames, newSide.source.linknames)
+	for _, fc := range unanalyzed {
+		if fc.RiskScore >= models.RiskScoreHigh {
+			highRisk++
+		}
+	}
+
+	total := pairs + added + removed
 	matchPct := 0.0
 	topoMatchPct := 0.0
 	if total > 0 {
 		matchPct = float64(preserved) / float64(total) * 100.0
 	}
-	if len(matched) > 0 {
-		topoMatchPct = float64(len(matched)) / float64(total) * 100.0
+	if pairs > 0 {
+		topoMatchPct = float64(pairs) / float64(total) * 100.0
 	}
 
 	return &models.DiffOutput{
@@ -212,6 +238,7 @@ func diffResults(oldPath, newPath string, oldResults, newResults []diff.Fingerpr
 		},
 		Functions:       functionDiffs,
 		TopologyMatches: topologyMatches,
+		Unanalyzed:      unanalyzed,
 	}
 }
 
