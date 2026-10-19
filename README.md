@@ -207,7 +207,7 @@ func Sum(a, b int) int { return a + b }
 | `preserved` | Matched by name. The default fingerprints are equal, the keep-all-literals fingerprints are equal, and no capability was newly reached. |
 | `modified` | Matched by name, otherwise |
 | `renamed` | Matched by topology, not by name. It is counted in `modified`. |
-| `added` | Only in the new file. Scored as a new function with a base of 5. |
+| `added` | Only in the new file. Scored as a new function with a base of 5; a capability call moved into it from its callers is not charged (see [Risk scoring](#risk-scoring)). |
 | `removed` | Only in the old file. Scored 0, except that a function containing a verification call scores 10 (`RemovedCheck(...)`). |
 
 The `preserved` test compares fingerprints under two literal policies. The default policy masks strings and integers outside [-16, 16], so its fingerprint survives a changed literal; the keep-all policy does not. A changed URL, command, limit or file mode therefore produces `modified`, with the literal in `added_ops`/`removed_ops`.
@@ -313,6 +313,14 @@ score = min(base + structural, 9) + escalation        base = 5 for an added func
 | A security setting that weakens on its own appears, or one whose removal weakens disappears (`WeakenedSecurity`) | 10 |
 
 The +5 row does not reach the threshold on its own: adding `net.Listen` to a function that already called `net.Dial` scores 5.
+
+**Moved capabilities:** extracting a capability call from an existing function into a new helper adds no capability. An added function's target is labelled `MovedCapability(target<-Caller)` and charged nothing when all of these hold, and is scored as new otherwise:
+- the helper is a package-level, unexported, non-generic function: not a method (callable through an interface), a closure (callable through a func value) or an `init`;
+- every reference to it in its package is a direct call, so no value of it escapes;
+- each caller is a matched function whose old version called the target directly and whose new version does not;
+- when the old call ran under a condition, the new caller's calls to the helper, or the helper's own call, still do (`topology.CallGuards` counts the first as `CapabilityGuards` counts the second).
+
+A moved target's class counts as one the helper already reached, so another new target in that class adds 5, as it would in the caller. Moving a guarded `exec.Command` into a helper that runs it unconditionally still scores 30, and so does a helper with a new caller that never made the call. The helper and its callers must be in the same file pair: a helper moved to another file is scored as new, because each file pair is diffed on its own. Diffs of dependencies (`sfw deps diff`) do not apply this rule.
 
 **Structural churn** is capped, together with the base, at 9, so churn alone never reaches the threshold:
 

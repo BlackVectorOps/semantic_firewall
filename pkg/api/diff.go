@@ -129,12 +129,28 @@ func diffResults(oldPath, newPath string, oldResults, newResults []diff.Fingerpr
 		})
 	}
 
+	addedTopos := make(map[*ssa.Function]*topology.FunctionTopology, len(addedFuncs))
+	for _, r := range addedFuncs {
+		if fn := r.GetSSAFunction(); fn != nil {
+			addedTopos[fn] = topology.ExtractTopology(fn)
+		}
+	}
+	// A dependency's moves are left to the reach analysis of deps diff.
+	var moved map[*ssa.Function]map[string][]string
+	if profile.ownModule == "" {
+		moved = movedCapabilities(matched, addedTopos)
+	}
+
 	for _, r := range addedFuncs {
 		risk := models.BaseRiskAddedFunc
 		delta := models.TopoDeltaNew
 		if fn := r.GetSSAFunction(); fn != nil {
-			if topo := topology.ExtractTopology(fn); topo != nil {
-				delta, risk = addedDelta(topo, profile)
+			if topo := addedTopos[fn]; topo != nil {
+				if m := moved[fn]; len(m) > 0 {
+					delta, risk = movedDelta(topo, m, profile)
+				} else {
+					delta, risk = addedDelta(topo, profile)
+				}
 			}
 		}
 

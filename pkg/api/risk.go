@@ -100,6 +100,29 @@ func addedDelta(t *topology.FunctionTopology, profile riskProfile) (string, int)
 	return r.delta(), r.score(models.BaseRiskAddedFunc)
 }
 
+// movedDelta scores an added function with topology t some of whose
+// capability targets moved there from its callers (see movedCapabilities):
+// moved maps each such target to the callers it left. A moved target is
+// labelled MovedCapability and charged nothing, and its class counts as one
+// the function already reached, as it was in the callers. Everything else is
+// scored as addedDelta scores it.
+func movedDelta(t *topology.FunctionTopology, moved map[string][]string, profile riskProfile) (string, int) {
+	prior := &topology.FunctionTopology{
+		CallTargets:  make(map[string]int, len(moved)),
+		Capabilities: make(map[string]string, len(moved)),
+	}
+	items := make([]string, 0, len(moved))
+	for target, from := range moved {
+		prior.CallTargets[target] = 1
+		prior.Capabilities[target] = t.Capabilities[target]
+		items = append(items, target+"<-"+strings.Join(from, "|"))
+	}
+	sort.Strings(items)
+	r := assessTopologyDeltaFor(prior, t, profile)
+	r.labels = append([]string{fmt.Sprintf("MovedCapability(%s)", strings.Join(items, ","))}, r.labels...)
+	return r.delta(), r.score(models.BaseRiskAddedFunc)
+}
+
 // removedDelta scores a removed function with topology t. Deleting a
 // function is usually neutral, but deleting one that performed a
 // verification (a validator, a signature check) removes that check from

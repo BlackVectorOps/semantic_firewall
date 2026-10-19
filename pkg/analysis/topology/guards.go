@@ -33,12 +33,12 @@ func collectCapabilityGuards(fn *ssa.Function, t *FunctionTopology, loops *loop.
 	if len(t.Capabilities) == 0 || len(fn.Blocks) > maxGuardBlocks {
 		return
 	}
-	g := newFlowGraph(fn, loops, nr)
+	c := newGuardCounter(fn, loops, nr)
 
 	// The live blocks that reference each capability, in block order.
 	sites := make(map[string][]*ssa.BasicBlock)
 	for _, b := range fn.Blocks {
-		if !g.live[b.Index] {
+		if !c.g.live[b.Index] {
 			continue
 		}
 		for _, instr := range b.Instrs {
@@ -61,51 +61,109 @@ func collectCapabilityGuards(fn *ssa.Function, t *FunctionTopology, loops *loop.
 		}
 	}
 
-	counts := make([]int, len(fn.Blocks))
-	for i := range counts {
-		counts[i] = -1
-	}
-	avoid := make([]bool, len(fn.Blocks))
-	guardCount := func(b *ssa.BasicBlock) int {
-		if n := counts[b.Index]; n >= 0 {
-			return n
-		}
-		avoid[b.Index] = true
-		escapes := g.escapesAvoiding(avoid)
-		avoid[b.Index] = false
-		n := 0
-		for _, a := range fn.Blocks {
-			succs := g.succs[a.Index]
-			if len(succs) != 2 || !escapes[a.Index] || leavesLoop(loops, a, succs) {
-				continue
-			}
-			if !escapes[succs[0].Index] || !escapes[succs[1].Index] {
-				n++
-			}
-		}
-		counts[b.Index] = n
-		return n
-	}
-
 	t.CapabilityGuards = make(map[string]int, len(sites))
 	for key, blocks := range sites {
-		for _, b := range blocks {
-			avoid[b.Index] = true
+		t.CapabilityGuards[key] = c.least(blocks)
+	}
+}
+
+// CallGuards returns the fewest conditional branches, loop conditions
+// excluded, that any reference to callee in fn is control-dependent on,
+// counted as CapabilityGuards counts a capability's references. ok is false
+// when fn does not reference callee, or has more than 2000 blocks.
+func CallGuards(fn, callee *ssa.Function) (n int, ok bool) {
+	if fn == nil || callee == nil || len(fn.Blocks) == 0 || len(fn.Blocks) > maxGuardBlocks {
+		return 0, false
+	}
+	c := newGuardCounter(fn, loop.DetectLoops(fn), noReturns{})
+	var blocks []*ssa.BasicBlock
+	for _, b := range fn.Blocks {
+		if c.g.live[b.Index] && referencesFunc(b, callee) {
+			blocks = append(blocks, b)
 		}
-		unavoidable := !g.escapesAvoiding(avoid)[0]
-		for _, b := range blocks {
-			avoid[b.Index] = false
+	}
+	if len(blocks) == 0 {
+		return 0, false
+	}
+	return c.least(blocks), true
+}
+
+func referencesFunc(b *ssa.BasicBlock, callee *ssa.Function) bool {
+	for _, instr := range b.Instrs {
+		for _, op := range instr.Operands(nil) {
+			if f, ok := (*op).(*ssa.Function); ok && f == callee {
+				return true
+			}
 		}
-		if unavoidable {
-			t.CapabilityGuards[key] = 0
+	}
+	return false
+}
+
+// guardCounter counts the guards of a function's blocks, caching each
+// block's count.
+type guardCounter struct {
+	fn     *ssa.Function
+	g      *flowGraph
+	loops  *loop.LoopInfo
+	counts []int  // by block index; -1 until counted
+	avoid  []bool // scratch space of least and count
+}
+
+func newGuardCounter(fn *ssa.Function, loops *loop.LoopInfo, nr noReturns) *guardCounter {
+	c := &guardCounter{
+		fn:     fn,
+		g:      newFlowGraph(fn, loops, nr),
+		loops:  loops,
+		counts: make([]int, len(fn.Blocks)),
+		avoid:  make([]bool, len(fn.Blocks)),
+	}
+	for i := range c.counts {
+		c.counts[i] = -1
+	}
+	return c
+}
+
+// least returns the fewest guards of any of blocks, or 0 when every path
+// through the function runs one of them.
+func (c *guardCounter) least(blocks []*ssa.BasicBlock) int {
+	for _, b := range blocks {
+		c.avoid[b.Index] = true
+	}
+	unavoidable := !c.g.escapesAvoiding(c.avoid)[0]
+	for _, b := range blocks {
+		c.avoid[b.Index] = false
+	}
+	if unavoidable {
+		return 0
+	}
+	least := c.count(blocks[0])
+	for _, b := range blocks[1:] {
+		least = min(least, c.count(b))
+	}
+	return least
+}
+
+// count returns the number of two-way branches block b is control-dependent
+// on, loop conditions excluded.
+func (c *guardCounter) count(b *ssa.BasicBlock) int {
+	if n := c.counts[b.Index]; n >= 0 {
+		return n
+	}
+	c.avoid[b.Index] = true
+	escapes := c.g.escapesAvoiding(c.avoid)
+	c.avoid[b.Index] = false
+	n := 0
+	for _, a := range c.fn.Blocks {
+		succs := c.g.succs[a.Index]
+		if len(succs) != 2 || !escapes[a.Index] || leavesLoop(c.loops, a, succs) {
 			continue
 		}
-		least := guardCount(blocks[0])
-		for _, b := range blocks[1:] {
-			least = min(least, guardCount(b))
+		if !escapes[succs[0].Index] || !escapes[succs[1].Index] {
+			n++
 		}
-		t.CapabilityGuards[key] = least
 	}
+	c.counts[b.Index] = n
+	return n
 }
 
 // leavesLoop reports whether a, a block with the two successors succs, is
