@@ -1295,6 +1295,12 @@ CGO_ENABLED=1 go test -race ./pkg/diff/... ./pkg/api/... ./internal/actiontest/.
 
 `.github/workflows/test.yml` runs these on every pull request. `internal/actiontest` runs the Action's shell steps from `action.yml` against fixture repositories, with an `sfw` built from the tree; it needs `jq` and `bc`.
 
+`.github/workflows/govulncheck.yml` fails a pull request whose code reaches a known vulnerability, and runs weekly to catch advisories published after a merge:
+
+```bash
+CGO_ENABLED=0 go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+```
+
 `tools/mutate` is a mutation tester for the lines a branch changed. It applies one fault at a time (an operator flipped, a condition forced, a statement removed) to the Go files changed since a base commit, runs the tests, and lists every mutant no test caught:
 
 ```bash
