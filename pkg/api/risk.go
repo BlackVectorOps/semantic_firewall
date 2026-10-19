@@ -258,7 +258,10 @@ func assessTopologyDeltaFor(oldT, newT *topology.FunctionTopology, profile riskP
 	// that reappears under the same name in a package of the same name at
 	// another path (a module's new major version, a fork, a library that
 	// moved) is labelled ReplacedCheck without points: the code still
-	// checks, through an implementation a reviewer should see.
+	// checks, through an implementation a reviewer should see. One that moved
+	// into a function literal passed to a call whose error result decides
+	// (see MovedChecks) is labelled MovedCheck without points: the callee,
+	// a cache say, may skip it, which a reviewer should see too.
 	var addedChecks []string
 	for target := range newT.Checks {
 		if !oldT.Checks[target] {
@@ -266,9 +269,13 @@ func assessTopologyDeltaFor(oldT, newT *topology.FunctionTopology, profile riskP
 		}
 	}
 	sort.Strings(addedChecks)
-	var removedChecks, replacedChecks []string
+	var removedChecks, replacedChecks, movedChecks []string
 	for target := range oldT.Checks {
 		if newT.Checks[target] {
+			continue
+		}
+		if via, ok := newT.MovedChecks[target]; ok {
+			movedChecks = append(movedChecks, target+" via "+via)
 			continue
 		}
 		switch match, same := matchingCheck(target, addedChecks); {
@@ -286,6 +293,10 @@ func assessTopologyDeltaFor(oldT, newT *topology.FunctionTopology, profile riskP
 	if len(replacedChecks) > 0 {
 		sort.Strings(replacedChecks)
 		r.labels = append(r.labels, fmt.Sprintf("ReplacedCheck(%s)", strings.Join(replacedChecks, ",")))
+	}
+	if len(movedChecks) > 0 {
+		sort.Strings(movedChecks)
+		r.labels = append(r.labels, fmt.Sprintf("MovedCheck(%s)", strings.Join(movedChecks, ",")))
 	}
 
 	if newPlain > 0 {

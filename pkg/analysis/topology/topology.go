@@ -49,8 +49,15 @@ type FunctionTopology struct {
 	// verification, password hash comparison; see IsVerificationCall), to a
 	// helper that reaches one, and to a function or interface method named
 	// like a verification whose result decides a branch (see
-	// collectCheckHelpers). Losing one is how a guard gets deleted.
+	// collectCheckHelpers), its own or those of a function literal it
+	// invokes on the spot. Losing one is how a guard gets deleted.
 	Checks map[string]bool
+
+	// MovedChecks maps the checks of a function literal this function
+	// passes to a call whose error result decides, such as singleflight's
+	// Do, to that callee's key. The callee decides whether the literal runs,
+	// so these are not in Checks.
+	MovedChecks map[string]string
 
 	// CapabilityGuards maps each Capabilities key to the fewest conditional
 	// branches, loop conditions excluded, that any of its references in this
