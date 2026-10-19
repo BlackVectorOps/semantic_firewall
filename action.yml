@@ -97,7 +97,7 @@ runs:
     - name: Install sfw
       shell: bash
       env:
-        SFW_VERSION: "v7.1.1"
+        SFW_VERSION: "v7.2.0"
       run: |
         set -euo pipefail
         

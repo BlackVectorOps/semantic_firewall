@@ -41,14 +41,14 @@ The analysis never executes the code under test.
 ## Install
 
 ```bash
-go install github.com/BlackVectorOps/semantic_firewall/v7/cmd/sfw@v7.1.1
+go install github.com/BlackVectorOps/semantic_firewall/v7/cmd/sfw@v7.2.0
 ```
 
 `go.mod` declares `go 1.27.2`. `sfw version` prints the build:
 
 ```
 Semantic Firewall CLI
-Build: v7.1.1 (Pebble/Gob+PackedIdx)
+Build: v7.2.0 (Pebble/Gob+PackedIdx)
 ```
 
 ## Commands
@@ -1169,22 +1169,22 @@ jobs:
         with:
           fetch-depth: 0        # diff and audit read HEAD~1
       - id: sfw
-        uses: BlackVectorOps/semantic_firewall@v7.1.1
+        uses: BlackVectorOps/semantic_firewall@v7.2.0
         with:
           mode: audit
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
-A tag can be moved to another commit; a commit cannot. To run exactly the release you reviewed, pin the Action by the commit its tag names, and keep the version in a comment (`uses: BlackVectorOps/semantic_firewall@<commit> # v7.1.1`). This prints the commit; for an annotated tag it is the line ending in `^{}`:
+A tag can be moved to another commit; a commit cannot. To run exactly the release you reviewed, pin the Action by the commit its tag names, and keep the version in a comment (`uses: BlackVectorOps/semantic_firewall@<commit> # v7.2.0`). This prints the commit; for an annotated tag it is the line ending in `^{}`:
 
 ```bash
-git ls-remote https://github.com/BlackVectorOps/semantic_firewall 'refs/tags/v7.1.1*'
+git ls-remote https://github.com/BlackVectorOps/semantic_firewall 'refs/tags/v7.2.0*'
 ```
 
 The Action pins `actions/setup-go` by commit itself.
 
 The Action does the following before running `sfw`:
-- installs `sfw` v7.1.1 with `go install`, or uses an `sfw` already on `PATH`;
+- installs `sfw` v7.2.0 with `go install`, or uses an `sfw` already on `PATH`;
 - installs `runsc` release `20260126.0` and checks its SHA-512;
 - relaxes the AppArmor user-namespace restriction for it.
 
