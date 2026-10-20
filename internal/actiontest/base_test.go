@@ -147,16 +147,47 @@ func TestActionBaseResolves(t *testing.T) {
 			git("checkout", "-q", "--detach", base)
 			git("merge", "-q", "--no-ff", "--no-edit", pr)
 			git("remote", "set-url", "origin", "/nonexistent")
-			return clone, map[string]string{"GITHUB_EVENT_NAME": "pull_request", "GITHUB_BASE_REF": "main", "PR_HEAD_SHA": pr}
+			return clone, map[string]string{"GITHUB_EVENT_NAME": "pull_request", "PR_BASE_SHA": base, "PR_HEAD_SHA": pr}
 		},
-		// Tags named like the base branch must not stand in for it.
-		"pull request head, tags shadow main": func(t *testing.T) (string, map[string]string) {
-			up, _, pr := upstream(t)
-			gitIn(t, up)("tag", "main", pr)
-			gitIn(t, up)("tag", "origin/main", pr)
+		"pull request head": func(t *testing.T) (string, map[string]string) {
+			up, base, pr := upstream(t)
 			clone, git := cloneOf(t, up)
 			git("checkout", "-q", "--detach", pr)
-			return clone, map[string]string{"GITHUB_EVENT_NAME": "pull_request", "GITHUB_BASE_REF": "main", "PR_HEAD_SHA": pr}
+			return clone, map[string]string{"GITHUB_EVENT_NAME": "pull_request", "PR_BASE_SHA": base, "PR_HEAD_SHA": pr}
+		},
+		// A fork checked out as origin, whose main already holds the
+		// change: the base still comes from the event.
+		"pull request head, fork as origin": func(t *testing.T) (string, map[string]string) {
+			repo, shas := commitsRepo(t, baseFiles(), map[string]*string{"p/p.go": str(changedSrc)}, q2)
+			fork := filepath.Join(t.TempDir(), "fork.git")
+			gitIn(t, repo)("clone", "-q", "--bare", repo, fork)
+			gitIn(t, fork)("update-ref", "refs/heads/main", shas[1])
+			gitIn(t, repo)("remote", "add", "origin", fork)
+			gitIn(t, repo)("fetch", "-q", "origin")
+			gitIn(t, repo)("checkout", "-q", "--detach", shas[2])
+			return repo, map[string]string{"GITHUB_EVENT_NAME": "pull_request_target", "PR_BASE_SHA": shas[0], "PR_HEAD_SHA": shas[2]}
+		},
+		// A merge whose second parent is the head, but whose first is not
+		// the event's base, is not GitHub's merge commit.
+		"pull request, merge onto another commit": func(t *testing.T) (string, map[string]string) {
+			repo, shas := commitsRepo(t, baseFiles(), map[string]*string{"p/p.go": str(changedSrc)})
+			git := gitIn(t, repo)
+			git("checkout", "-q", "-b", "pr", shas[1])
+			os.WriteFile(filepath.Join(repo, "q/q.go"), []byte(*q2["q/q.go"]), 0o644)
+			git("commit", "-qam", "q")
+			pr := git("rev-parse", "HEAD")
+			git("checkout", "-q", "--detach", shas[1])
+			git("merge", "-q", "--no-ff", "--no-edit", pr)
+			return repo, map[string]string{"GITHUB_EVENT_NAME": "pull_request", "PR_BASE_SHA": shas[0], "PR_HEAD_SHA": pr}
+		},
+		// Without credentials the fetch fails; the checkout's copy of the
+		// default branch serves.
+		"push of a new branch, default branch not fetchable": func(t *testing.T) (string, map[string]string) {
+			up, _, pr := upstream(t)
+			clone, git := cloneOf(t, up)
+			git("checkout", "-q", "--detach", pr)
+			git("remote", "set-url", "origin", "/nonexistent")
+			return clone, map[string]string{"GITHUB_EVENT_BEFORE": zeroSHA, "DEFAULT_BRANCH": "main"}
 		},
 		"merge group": func(t *testing.T) (string, map[string]string) {
 			repo, shas := commitsRepo(t, baseFiles(), map[string]*string{"p/p.go": str(changedSrc)}, q2)
@@ -202,23 +233,27 @@ func TestActionBaseFailsClosed(t *testing.T) {
 			repo, _ := commitsRepo(t, baseFiles(), map[string]*string{"p/p.go": str(changedSrc)})
 			return repo, map[string]string{"GITHUB_EVENT_BEFORE": goneSHA, "DEFAULT_BRANCH": "main"}
 		}, "default branch cannot be fetched"},
-		"pull request head, base unfetchable": {func(t *testing.T) (string, map[string]string) {
+		"pull request base unfetchable": {func(t *testing.T) (string, map[string]string) {
 			up, _, pr := upstream(t)
 			clone, git := cloneOf(t, up)
 			git("checkout", "-q", "--detach", pr)
 			git("remote", "set-url", "origin", "/nonexistent")
-			return clone, map[string]string{"GITHUB_EVENT_NAME": "pull_request", "GITHUB_BASE_REF": "main", "PR_HEAD_SHA": pr}
-		}, "Cannot fetch the base branch main"},
+			return clone, map[string]string{"GITHUB_EVENT_NAME": "pull_request", "PR_BASE_SHA": goneSHA, "PR_HEAD_SHA": pr}
+		}, "Cannot fetch the pull request's base commit"},
 		// pull_request_target checks out the base by default, not the PR.
 		"pull request target, base checked out": {func(t *testing.T) (string, map[string]string) {
-			up, _, pr := upstream(t)
+			up, base, pr := upstream(t)
 			clone, _ := cloneOf(t, up)
-			return clone, map[string]string{"GITHUB_EVENT_NAME": "pull_request_target", "GITHUB_BASE_REF": "main", "PR_HEAD_SHA": pr}
+			return clone, map[string]string{"GITHUB_EVENT_NAME": "pull_request_target", "PR_BASE_SHA": base, "PR_HEAD_SHA": pr}
 		}, "HEAD does not contain the pull request head"},
 		"pull request without head": {func(t *testing.T) (string, map[string]string) {
-			repo, _ := commitsRepo(t, baseFiles(), map[string]*string{"p/p.go": str(changedSrc)})
-			return repo, map[string]string{"GITHUB_EVENT_NAME": "pull_request", "GITHUB_BASE_REF": "main"}
+			repo, shas := commitsRepo(t, baseFiles(), map[string]*string{"p/p.go": str(changedSrc)})
+			return repo, map[string]string{"GITHUB_EVENT_NAME": "pull_request", "PR_BASE_SHA": shas[0]}
 		}, "no pull request head commit"},
+		"pull request without base": {func(t *testing.T) (string, map[string]string) {
+			repo, shas := commitsRepo(t, baseFiles(), map[string]*string{"p/p.go": str(changedSrc)})
+			return repo, map[string]string{"GITHUB_EVENT_NAME": "pull_request", "PR_HEAD_SHA": shas[1]}
+		}, "no pull request base commit"},
 		"merge group head mismatch": {func(t *testing.T) (string, map[string]string) {
 			repo, shas := commitsRepo(t, baseFiles(), map[string]*string{"p/p.go": str(changedSrc)}, map[string]*string{"q/q.go": str("package q\n")})
 			return repo, map[string]string{"GITHUB_EVENT_NAME": "merge_group", "MG_BASE_SHA": shas[0], "MG_HEAD_SHA": shas[1]}
@@ -247,10 +282,26 @@ func TestActionRunNeedsPrep(t *testing.T) {
 		cmd := exec.Command("bash", "-c", stepScript(t, "run-sfw"))
 		cmd.Dir = repo
 		cmd.Env = append(os.Environ(), "INPUT_MODE="+mode, "INPUT_PATH=.", "GITHUB_OUTPUT="+filepath.Join(t.TempDir(), "out"),
-			"RUNNER_TEMP="+t.TempDir(), "PREP_BASE_SHA=", "PREP_WORKTREE_DIR=", "PREP_PAIRS_FILE=", "PREP_PAIR_COUNT=")
+			"RUNNER_TEMP="+t.TempDir(), "PREP_BASE_SHA=", "PREP_WORKTREE_DIR=", "PREP_PAIRS_FILE=", "PREP_PAIR_COUNT=", "PREP_GITLINKS_FILE=", "PREP_GITLINK_COUNT=")
 		out, err := cmd.CombinedOutput()
 		if err == nil || !strings.Contains(string(out), "did not resolve a base") {
 			t.Errorf("%s: err %v; want a failure naming the missing base:\n%s", mode, err, out)
+		}
+	}
+}
+
+// A push that adds no commits to the default branch (a tag, a new branch
+// at main's tip) has nothing to compare, and passes.
+func TestActionPushOfNothingNew(t *testing.T) {
+	requireTools(t)
+	up, _, pr := upstream(t)
+	gitIn(t, up)("update-ref", "refs/heads/main", pr)
+	clone, git := cloneOf(t, up)
+	git("checkout", "-q", "--detach", pr)
+	for _, mode := range []string{"diff", "audit"} {
+		res := runAction(t, clone, map[string]string{"INPUT_MODE": mode, "INPUT_PATH": ".", "GITHUB_EVENT_BEFORE": zeroSHA, "DEFAULT_BRANCH": "main"})
+		if res.exitCode != 0 || res.outputs["pair_count"] != "0" {
+			t.Errorf("%s: exit %d, pair_count %q; want 0, 0:\n%s", mode, res.exitCode, res.outputs["pair_count"], res.log)
 		}
 	}
 }

@@ -142,7 +142,7 @@ func runSteps(t *testing.T, repo string, inputs map[string]string) (res actionRu
 	env = append(env,
 		"PATH="+bin+string(os.PathListSeparator)+filepath.Join(runtime.GOROOT(), "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"GITHUB_OUTPUT="+outFile, "GITHUB_EVENT_NAME=push", "GITHUB_EVENT_BEFORE="+before, "GITHUB_BASE_REF=",
-		"RUNNER_TEMP="+t.TempDir(), "PR_HEAD_SHA=", "MG_BASE_SHA=", "MG_HEAD_SHA=", "DEFAULT_BRANCH=")
+		"RUNNER_TEMP="+t.TempDir(), "PR_BASE_SHA=", "PR_HEAD_SHA=", "MG_BASE_SHA=", "MG_HEAD_SHA=", "DEFAULT_BRANCH=", "GITHUB_SERVER_URL=", "GITHUB_REPOSITORY=")
 	for k, v := range inputs {
 		env = append(env, k+"="+v)
 	}
@@ -182,6 +182,8 @@ func runSteps(t *testing.T, repo string, inputs map[string]string) (res actionRu
 		"PREP_WORKTREE_DIR="+prep["worktree_dir"],
 		"PREP_PAIRS_FILE="+prep["pairs_file"],
 		"PREP_PAIR_COUNT="+prep["pair_count"],
+		"PREP_GITLINKS_FILE="+prep["gitlinks_file"],
+		"PREP_GITLINK_COUNT="+prep["gitlink_count"],
 		"PREP_HAS_MOD_CHANGES="+prep["has_mod_changes"])
 	code, runLog := run(stepScript(t, "run-sfw"), env)
 	all := log + runLog

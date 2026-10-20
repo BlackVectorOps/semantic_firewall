@@ -91,3 +91,48 @@ func TestActionDiffModeUnusualName(t *testing.T) {
 		t.Errorf("entries %+v; want the high-risk p/é_generated.go:\n%s", entries, res.log)
 	}
 }
+
+// A .go link compiles its target: a change to the target alone, whatever
+// its name, is a change to the link.
+func TestActionDiffModeLinkTargetChanged(t *testing.T) {
+	requireTools(t)
+	repo, shas := commitsRepo(t, map[string]*string{
+		"go.mod":     str(gomod),
+		"p/impl.txt": str(authSrc),
+		"p/auth.go":  str("symlink:impl.txt"),
+		"p/p.go":     str("package p\n"),
+	}, map[string]*string{"p/impl.txt": str("package p\n\nfunc Valid(a, b []byte) bool { return true }\n")})
+	res := runAction(t, repo, map[string]string{"INPUT_MODE": "diff", "INPUT_PATH": ".", "GITHUB_EVENT_BEFORE": shas[0]})
+	files := diffedFiles(t, res)
+	if res.exitCode == 0 || len(files) != 1 || files[0] != "p/auth.go" || res.outputs["high-risk-changes"] != "1" {
+		t.Errorf("exit %d, diffed %v, high risk %q; want a failing high-risk p/auth.go:\n%s", res.exitCode, files, res.outputs["high-risk-changes"], res.log)
+	}
+}
+
+// A submodule's change can't be read file by file: diff mode counts it as
+// a high-risk change, and audit mode fails.
+func TestActionSubmoduleChanged(t *testing.T) {
+	requireTools(t)
+	repo, _ := commitsRepo(t, map[string]*string{"go.mod": str(gomod), "p/p.go": str("package p\n")})
+	git := gitIn(t, repo)
+	setLink := func(sha string) {
+		git("update-index", "--add", "--cacheinfo", "160000,"+sha+",third_party/lib")
+		git("commit", "-q", "-m", "lib "+sha[:7])
+	}
+	setLink("1111111111111111111111111111111111111111")
+	before := git("rev-parse", "HEAD")
+	setLink("2222222222222222222222222222222222222222")
+
+	res := runAction(t, repo, map[string]string{"INPUT_MODE": "diff", "INPUT_PATH": ".", "GITHUB_EVENT_BEFORE": before})
+	if res.exitCode == 0 || res.outputs["high-risk-changes"] != "1" || !strings.Contains(res.log, "::error file=third_party/lib::Submodule changed") {
+		t.Errorf("diff: exit %d, high risk %q; want a failure and an annotation:\n%s", res.exitCode, res.outputs["high-risk-changes"], res.log)
+	}
+	res = runAction(t, repo, map[string]string{"INPUT_MODE": "diff", "INPUT_PATH": ".", "GITHUB_EVENT_BEFORE": before, "INPUT_FAIL_ON_ALERT": "false"})
+	if res.exitCode != 0 || !strings.Contains(res.log, "::warning file=third_party/lib::") {
+		t.Errorf("diff, fail-on-alert false: exit %d; want 0 and a warning:\n%s", res.exitCode, res.log)
+	}
+	res = runAction(t, repo, map[string]string{"INPUT_MODE": "audit", "INPUT_PATH": ".", "GITHUB_EVENT_BEFORE": before})
+	if res.exitCode == 0 || res.outputs["audit-verdict"] != "FAIL" {
+		t.Errorf("audit: exit %d, verdict %q; want FAIL:\n%s", res.exitCode, res.outputs["audit-verdict"], res.log)
+	}
+}

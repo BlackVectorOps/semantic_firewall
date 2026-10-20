@@ -133,9 +133,9 @@ runs:
       shell: bash
       env:
         INPUT_MODE: ${{ inputs.mode }}
-        GITHUB_BASE_REF: ${{ github.base_ref }}
         GITHUB_EVENT_NAME: ${{ github.event_name }}
         GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
@@ -152,7 +152,18 @@ runs:
         fail() { local m="$*"; m=${m//%/%25}; m=${m//$'\r'/%0D}; m=${m//$'\n'/%0A}; echo "::error::${m}"; exit 1; }
         is_sha() { [[ "$1" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] && [[ ! "$1" =~ ^0+$ ]]; }
         have() { git cat-file -e "$1^{commit}" 2>/dev/null; }
-        fetch_sha() { have "$1" || git fetch -q --no-tags origin "$1" >/dev/null 2>&1 || true; have "$1"; }
+        # A commit by hash, from origin or else the repository the workflow
+        # runs in: a checkout of a fork's head has the fork as origin. The
+        # hash names the commit, wherever it comes from.
+        fetch_sha() {
+          have "$1" && return 0
+          git fetch -q --no-tags origin "$1" >/dev/null 2>&1 || true
+          have "$1" && return 0
+          if [[ -n "${GITHUB_SERVER_URL:-}" && -n "${GITHUB_REPOSITORY:-}" ]]; then
+            git fetch -q --no-tags "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" "$1" >/dev/null 2>&1 || true
+          fi
+          have "$1"
+        }
         # Fully qualified, so a tag of the same name is never taken for the
         # branch.
         fetch_branch() { [[ -n "$1" ]] && git fetch -q --no-tags origin "+refs/heads/$1:refs/remotes/origin/$1"; }
@@ -168,18 +179,24 @@ runs:
         }
 
         HEAD_SHA=$(git rev-parse --verify 'HEAD^{commit}')
+        # Set when HEAD may be its own base: a push that adds nothing.
+        SAME_OK=false
         case "${GITHUB_EVENT_NAME:-}" in
           pull_request|pull_request_target)
+            # The base comes from the event, never from a branch of the
+            # repository the checkout calls origin, which can be a fork.
             is_sha "${PR_HEAD_SHA:-}" || fail "The event has no pull request head commit."
+            is_sha "${PR_BASE_SHA:-}" || fail "The event has no pull request base commit."
             git merge-base --is-ancestor "$PR_HEAD_SHA" HEAD 2>/dev/null ||
               fail "HEAD does not contain the pull request head ${PR_HEAD_SHA}. Check out the pull request's merge or head commit."
-            if [[ "$(git rev-parse -q --verify 'HEAD^2^{commit}' || true)" == "$PR_HEAD_SHA" ]]; then
-              # GitHub's merge commit: its first parent is the base it merged onto.
-              BASE=$(git rev-parse --verify 'HEAD^1^{commit}')
+            fetch_sha "$PR_BASE_SHA" || fail "Cannot fetch the pull request's base commit ${PR_BASE_SHA}."
+            if [[ "$(git rev-parse -q --verify 'HEAD^2^{commit}' || true)" == "$PR_HEAD_SHA" ]] &&
+               [[ "$(git rev-parse -q --verify 'HEAD^1^{commit}' || true)" == "$PR_BASE_SHA" ]]; then
+              # GitHub's merge commit of the head onto the base.
+              BASE=$PR_BASE_SHA
             else
-              fetch_branch "${GITHUB_BASE_REF:-}" || fail "Cannot fetch the base branch ${GITHUB_BASE_REF:-}."
-              BASE=$(single_merge_base "refs/remotes/origin/$GITHUB_BASE_REF") ||
-                fail "HEAD and ${GITHUB_BASE_REF} have no single merge base. Use fetch-depth: 0, or check out the merge commit."
+              BASE=$(single_merge_base "$PR_BASE_SHA") ||
+                fail "HEAD and the pull request's base ${PR_BASE_SHA} have no single merge base. Use fetch-depth: 0, or check out the merge commit."
             fi
             ;;
           merge_group)
@@ -191,19 +208,26 @@ runs:
             if is_sha "${GITHUB_EVENT_BEFORE:-}" && fetch_sha "$GITHUB_EVENT_BEFORE"; then
               BASE=$GITHUB_EVENT_BEFORE
             else
-              # A new branch, or a force push whose old tip is gone: compare
-              # with the default branch, not just the last commit.
-              fetch_branch "${DEFAULT_BRANCH:-}" || fail "The push has no before commit and the default branch cannot be fetched."
+              # A new branch, a tag, or a force push whose old tip is gone:
+              # compare with the default branch, not just the last commit. A
+              # stale local copy of it only widens the comparison.
+              if ! fetch_branch "${DEFAULT_BRANCH:-}" 2>/dev/null; then
+                have "refs/remotes/origin/${DEFAULT_BRANCH:-}" ||
+                  fail "The push has no before commit and the default branch cannot be fetched."
+                echo "::warning::Cannot fetch ${DEFAULT_BRANCH}; comparing with the checkout's copy of it."
+              fi
               BASE=$(single_merge_base "refs/remotes/origin/$DEFAULT_BRANCH") ||
                 fail "HEAD and ${DEFAULT_BRANCH} have no single merge base. Use fetch-depth: 0."
               echo "::notice::The push has no usable before commit; comparing with ${DEFAULT_BRANCH}."
+              # HEAD already on the default branch adds nothing to compare.
+              SAME_OK=true
             fi
             ;;
           *)
             BASE=$(git rev-parse -q --verify 'HEAD~1^{commit}') || fail "HEAD has no parent to compare with."
             ;;
         esac
-        [[ "$BASE" != "$HEAD_SHA" ]] || fail "The base is HEAD itself (${BASE}); there is nothing to compare."
+        [[ "$BASE" != "$HEAD_SHA" || "$SAME_OK" == true ]] || fail "The base is HEAD itself (${BASE}); there is nothing to compare."
         echo "base_sha=${BASE}" >> "$GITHUB_OUTPUT"
 
         # Scratch files live outside the checkout: the change being analyzed
@@ -218,7 +242,9 @@ runs:
         # -z everywhere: without it git quotes unusual names ("p/\303\251.go"),
         # and the suffix tests miss them.
         DIFF_STREAM_FILE="$WORK/diff.bin"
-        git diff -z --no-ext-diff --name-status "$BASE" "$HEAD_SHA" > "$DIFF_STREAM_FILE" || fail "git diff ${BASE} ${HEAD_SHA} failed."
+        git diff -z --raw --no-abbrev --no-ext-diff "$BASE" "$HEAD_SHA" > "$DIFF_STREAM_FILE" || fail "git diff ${BASE} ${HEAD_SHA} failed."
+        TREE_FILE="$WORK/tree.bin"
+        git ls-tree -r -z --full-tree "$HEAD_SHA" > "$TREE_FILE" || fail "git ls-tree ${HEAD_SHA} failed."
         NAMES_FILE="$WORK/names.bin"
         git diff -z --no-ext-diff --name-only "$BASE" "$HEAD_SHA" > "$NAMES_FILE" || fail "git diff ${BASE} ${HEAD_SHA} failed."
         # grep -c prints 0 and exits 1 when nothing matches; `|| true` keeps
@@ -244,16 +270,37 @@ runs:
         PAIRS_FILE="$WORK/pairs.bin"
         : > "$PAIRS_FILE"
         PAIR_COUNT=0
-        pair() { printf '%s\0%s\0' "$1" "$2" >> "$PAIRS_FILE"; PAIR_COUNT=$((PAIR_COUNT + 1)); }
+        declare -A PAIRED=()
+        pair() {
+          printf '%s\0%s\0' "$1" "$2" >> "$PAIRS_FILE"
+          PAIR_COUNT=$((PAIR_COUNT + 1))
+          if [[ "$2" != /dev/null ]]; then PAIRED["$2"]=1; fi
+        }
         old_side() { if in_scope "$1"; then pair "$WORKTREE_DIR/$1" /dev/null; fi; }
         new_side() { if in_scope "$1"; then pair /dev/null "$1"; fi; }
-        while IFS= read -r -d '' status; do
+        # A submodule's code can't be paired file by file; the run step
+        # reports each changed one as a change sfw could not analyze.
+        GITLINKS_FILE="$WORK/gitlinks.bin"
+        : > "$GITLINKS_FILE"
+        GITLINK_COUNT=0
+        # --raw entries: ":<old mode> <new mode> <old hash> <new hash> <status>",
+        # then one path, or two for a rename or copy.
+        while IFS= read -r -d '' header; do
+          read -r omode nmode _ _ status <<< "${header#:}"
           case "$status" in
-            A) IFS= read -r -d '' p; new_side "$p" ;;
-            D) IFS= read -r -d '' p; old_side "$p" ;;
-            M|T) IFS= read -r -d '' p; if in_scope "$p"; then pair "$WORKTREE_DIR/$p" "$p"; fi ;;
+            R*|C*) IFS= read -r -d '' o; IFS= read -r -d '' n ;;
+            *) IFS= read -r -d '' o; n=$o ;;
+          esac
+          if [[ "$omode" == 160000 || "$nmode" == 160000 ]]; then
+            printf '%s\0' "$n" >> "$GITLINKS_FILE"
+            GITLINK_COUNT=$((GITLINK_COUNT + 1))
+            continue
+          fi
+          case "$status" in
+            A) new_side "$n" ;;
+            D) old_side "$o" ;;
+            M|T) if in_scope "$n"; then pair "$WORKTREE_DIR/$o" "$n"; fi ;;
             R*)
-              IFS= read -r -d '' o; IFS= read -r -d '' n
               if in_scope "$o" && in_scope "$n" && [[ "$(dir_of "$o")" == "$(dir_of "$n")" ]]; then
                 pair "$WORKTREE_DIR/$o" "$n"
               else
@@ -261,12 +308,24 @@ runs:
               fi
               ;;
             # A copy leaves its source in place.
-            C*) IFS= read -r -d '' _; IFS= read -r -d '' n; new_side "$n" ;;
+            C*) new_side "$n" ;;
             *) fail "Unexpected git diff status '${status}'." ;;
           esac
         done < "$DIFF_STREAM_FILE"
+        # A .go symbolic link compiles whatever it points to, which can
+        # change while the link does not: pair every such link the two trees
+        # share that is not paired already.
+        while IFS= read -r -d '' entry; do
+          p=${entry#*$'\t'}
+          if [[ "${entry%% *}" == 120000 ]] && in_scope "$p" && [[ -z "${PAIRED[$p]:-}" ]] &&
+             git cat-file -e "${BASE}:${p}" 2>/dev/null; then
+            pair "$WORKTREE_DIR/$p" "$p"
+          fi
+        done < "$TREE_FILE"
         echo "pairs_file=${PAIRS_FILE}" >> "$GITHUB_OUTPUT"
         echo "pair_count=${PAIR_COUNT}" >> "$GITHUB_OUTPUT"
+        echo "gitlinks_file=${GITLINKS_FILE}" >> "$GITHUB_OUTPUT"
+        echo "gitlink_count=${GITLINK_COUNT}" >> "$GITHUB_OUTPUT"
 
     - name: Install gVisor (runsc)
       shell: bash
@@ -325,6 +384,8 @@ runs:
         PREP_WORKTREE_DIR: ${{ steps.prep.outputs.worktree_dir }}
         PREP_PAIRS_FILE: ${{ steps.prep.outputs.pairs_file }}
         PREP_PAIR_COUNT: ${{ steps.prep.outputs.pair_count }}
+        PREP_GITLINKS_FILE: ${{ steps.prep.outputs.gitlinks_file }}
+        PREP_GITLINK_COUNT: ${{ steps.prep.outputs.gitlink_count }}
         PREP_HAS_MOD_CHANGES: ${{ steps.prep.outputs.has_mod_changes }}
       run: |
         set -euo pipefail
@@ -336,6 +397,7 @@ runs:
         # newline can't end it and start another; raw_log prints its input
         # with commands stopped, behind a token nobody can predict.
         gh_msg() { local s="$1"; s=${s//%/%25}; s=${s//$'\r'/%0D}; s=${s//$'\n'/%0A}; printf '%s' "$s"; }
+        gh_prop() { local s; s=$(gh_msg "$1"); s=${s//:/%3A}; s=${s//,/%2C}; printf '%s' "$s"; }
         TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
         [[ ${#TOKEN} -eq 32 ]] || { echo "::error::Cannot read /dev/urandom."; exit 1; }
         raw_log() { echo "::stop-commands::${TOKEN}"; cat; echo "::${TOKEN}::"; }
@@ -374,13 +436,16 @@ runs:
         # without it there is nothing to compare, which is not a pass.
         case "$INPUT_MODE" in
           diff|audit|deps)
-            if [[ -z "${PREP_BASE_SHA:-}" ]] || [[ ! -d "${PREP_WORKTREE_DIR:-}" ]] || [[ ! -f "${PREP_PAIRS_FILE:-}" ]] || [[ ! "${PREP_PAIR_COUNT:-}" =~ ^[0-9]+$ ]]; then
+            if [[ -z "${PREP_BASE_SHA:-}" ]] || [[ ! -d "${PREP_WORKTREE_DIR:-}" ]] || [[ ! -f "${PREP_PAIRS_FILE:-}" ]] || [[ ! "${PREP_PAIR_COUNT:-}" =~ ^[0-9]+$ ]] ||
+               [[ ! -f "${PREP_GITLINKS_FILE:-}" ]] || [[ ! "${PREP_GITLINK_COUNT:-}" =~ ^[0-9]+$ ]]; then
               echo "::error::The prepare step did not resolve a base to compare with; nothing was analyzed."
               exit 1
             fi
             WORKTREE_DIR="$PREP_WORKTREE_DIR"
             PAIRS_FILE="$PREP_PAIRS_FILE"
             PAIR_COUNT="$PREP_PAIR_COUNT"
+            GITLINKS_FILE="$PREP_GITLINKS_FILE"
+            GITLINK_COUNT="$PREP_GITLINK_COUNT"
             ;;
         esac
 
@@ -395,6 +460,8 @@ runs:
           diff)
             # One sfw run diffs every pair, loading each tree's packages once.
             HIGH_RISK=0
+            LEVEL=warning
+            if [[ "$FAIL_ON_ALERT" == "true" ]]; then LEVEL=error; fi
             if [[ $PAIR_COUNT -eq 0 ]]; then
               OUTPUT="[]"
               echo "semantic-match-pct=100.0" >> "$GITHUB_OUTPUT"
@@ -441,8 +508,6 @@ runs:
 
                 HIGH_RISK=$(echo "$OUTPUT" | jq '[.[] | .summary.high_risk_changes // 0] | add // 0')
                 # One annotation per high-risk change, on its file.
-                LEVEL=warning
-                if [[ "$FAIL_ON_ALERT" == "true" ]]; then LEVEL=error; fi
                 echo "$OUTPUT" | jq -r --arg level "$LEVEL" 'def esc: gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A");
                   def prop: esc | gsub(":"; "%3A") | gsub(","; "%2C");
                   .[] | (if .new_file == "/dev/null" then .old_file else .new_file end) as $f
@@ -456,6 +521,10 @@ runs:
               echo "::error::sfw diff gave no high-risk count."
               exit 1
             fi
+            while IFS= read -r -d '' -u 3 g; do
+              echo "::${LEVEL} file=$(gh_prop "$g")::Submodule changed; sfw cannot analyze the code it brings in."
+            done 3< "$GITLINKS_FILE"
+            HIGH_RISK=$((HIGH_RISK + GITLINK_COUNT))
             echo "high-risk-changes=${HIGH_RISK}" >> "$GITHUB_OUTPUT"
             if [[ $HIGH_RISK -gt 0 ]]; then
               if [[ "$FAIL_ON_ALERT" == "true" ]]; then
@@ -575,13 +644,9 @@ runs:
                 *)          export OPENAI_API_KEY="$SFW_API_KEY" ;;
               esac
             fi
-            if [[ $PAIR_COUNT -eq 0 ]]; then
-              echo "audit-verdict=PASS" >> "$GITHUB_OUTPUT"
-              OUTPUT="Audit Passed. (No Go files changed)"
-            else
-              AUDIT_FAILS=0
-              AUDIT_PASS=0
-
+            AUDIT_FAILS=0
+            AUDIT_PASS=0
+            if [[ $PAIR_COUNT -gt 0 ]]; then
               if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" || "${GITHUB_EVENT_NAME:-}" == "pull_request_target" ]]; then
                  COMMIT_MSG="${PR_TITLE:-Untitled PR}
             ${PR_BODY:-No description provided}"
@@ -623,14 +688,23 @@ runs:
                    ((AUDIT_PASS++)) || true
                 fi
               done 3< "$PAIRS_FILE"
+            fi
 
-              if [[ $AUDIT_FAILS -eq 0 ]]; then
-                 echo "audit-verdict=PASS" >> "$GITHUB_OUTPUT"
-                 OUTPUT="Audit Passed. (${AUDIT_PASS} file(s) verified)"
-              else
-                 echo "audit-verdict=FAIL" >> "$GITHUB_OUTPUT"
-                 OUTPUT="Audit Failed. (${AUDIT_FAILS} deception(s) detected)"
-              fi
+            # The audit can't read a submodule's change, so it doesn't pass.
+            while IFS= read -r -d '' -u 3 g; do
+              echo "::error file=$(gh_prop "$g")::Submodule changed; the audit cannot read the code it brings in."
+            done 3< "$GITLINKS_FILE"
+            if [[ $GITLINK_COUNT -gt 0 ]]; then EXIT_CODE=1; fi
+
+            if [[ $PAIR_COUNT -eq 0 && $GITLINK_COUNT -eq 0 ]]; then
+              echo "audit-verdict=PASS" >> "$GITHUB_OUTPUT"
+              OUTPUT="Audit Passed. (No Go files changed)"
+            elif [[ $AUDIT_FAILS -eq 0 && $GITLINK_COUNT -eq 0 ]]; then
+              echo "audit-verdict=PASS" >> "$GITHUB_OUTPUT"
+              OUTPUT="Audit Passed. (${AUDIT_PASS} file(s) verified)"
+            else
+              echo "audit-verdict=FAIL" >> "$GITHUB_OUTPUT"
+              OUTPUT="Audit Failed. (${AUDIT_FAILS} deception(s) detected, ${GITLINK_COUNT} submodule change(s) not audited)"
             fi
             ;;
           *)
