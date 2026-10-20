@@ -326,7 +326,7 @@ func TestActionDiffMode(t *testing.T) {
 	for _, e := range entries {
 		name := e.NewFile
 		if name == "/dev/null" {
-			name = "-" + strings.TrimPrefix(e.OldFile, filepath.Dir(filepath.Dir(e.OldFile))+"/")
+			name = "-" + e.OldFile
 		}
 		got[name] = e
 	}
@@ -346,7 +346,7 @@ func TestActionDiffMode(t *testing.T) {
 	if e := got["p/new.go"]; e.OldFile != "/dev/null" {
 		t.Errorf("added file's old side = %q; want /dev/null", e.OldFile)
 	}
-	if e := got["p/new_name.go"]; !strings.HasSuffix(e.OldFile, "p/old_name.go") {
+	if e := got["p/new_name.go"]; e.OldFile != "p/old_name.go" {
 		t.Errorf("renamed file's old side = %q; want p/old_name.go", e.OldFile)
 	}
 	if pct := res.outputs["semantic-match-pct"]; pct == "" || pct == "100.0" {

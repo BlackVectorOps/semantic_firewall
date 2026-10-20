@@ -42,7 +42,7 @@ func TestActionDiffModeFileLeavesBuild(t *testing.T) {
 				t.Fatalf("result is not a JSON array: %v\n%s", err, res.log)
 			}
 			for _, e := range entries {
-				if strings.HasSuffix(e.OldFile, "/p/auth.go") && e.NewFile == "/dev/null" && e.Summary.HighRisk > 0 {
+				if e.OldFile == "p/auth.go" && e.NewFile == "/dev/null" && e.Summary.HighRisk > 0 {
 					return
 				}
 			}
@@ -57,7 +57,7 @@ func TestActionDiffModeFileLeavesBuild(t *testing.T) {
 		if err := json.Unmarshal([]byte(res.outputs["result"]), &entries); err != nil {
 			t.Fatalf("result is not a JSON array: %v\n%s", err, res.log)
 		}
-		if res.exitCode != 0 || len(entries) != 1 || !strings.HasSuffix(entries[0].OldFile, "/p/auth.go") ||
+		if res.exitCode != 0 || len(entries) != 1 || entries[0].OldFile != "p/auth.go" ||
 			entries[0].NewFile != "p/check.go" || entries[0].Summary.HighRisk != 0 {
 			t.Errorf("exit %d, entries %+v; want one clean auth.go -> check.go pair:\n%s", res.exitCode, entries, res.log)
 		}

@@ -149,7 +149,7 @@ runs:
 
         # Every failure to find the base fails the job: a base that is
         # missing or wrong would analyze nothing, or the wrong changes.
-        fail() { echo "::error::$*"; exit 1; }
+        fail() { local m="$*"; m=${m//%/%25}; m=${m//$'\r'/%0D}; m=${m//$'\n'/%0A}; echo "::error::${m}"; exit 1; }
         is_sha() { [[ "$1" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] && [[ ! "$1" =~ ^0+$ ]]; }
         have() { git cat-file -e "$1^{commit}" 2>/dev/null; }
         fetch_sha() { have "$1" || git fetch -q --no-tags origin "$1" >/dev/null 2>&1 || true; have "$1"; }
@@ -328,7 +328,18 @@ runs:
         PREP_HAS_MOD_CHANGES: ${{ steps.prep.outputs.has_mod_changes }}
       run: |
         set -euo pipefail
-        
+
+        # The log runs workflow commands (::error::, ::add-mask::,
+        # ::stop-commands:: and the rest), and much of what this step
+        # prints comes from the change being analyzed: file names, sfw's
+        # output, the LLM's. gh_msg escapes a command's message, so a
+        # newline can't end it and start another; raw_log prints its input
+        # with commands stopped, behind a token nobody can predict.
+        gh_msg() { local s="$1"; s=${s//%/%25}; s=${s//$'\r'/%0D}; s=${s//$'\n'/%0A}; printf '%s' "$s"; }
+        TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+        [[ ${#TOKEN} -eq 32 ]] || { echo "::error::Cannot read /dev/urandom."; exit 1; }
+        raw_log() { echo "::stop-commands::${TOKEN}"; cat; echo "::${TOKEN}::"; }
+
         # Plain assignments: readonly X=$(...) hides a failure from set -e.
         TARGET_ABS=$(realpath -m "${INPUT_PATH:-.}")
         BASE_ABS=$(realpath -m ".")
@@ -341,7 +352,7 @@ runs:
         readonly TARGET_PATH="./${REL_PATH}"
 
         if [[ ! -e "$TARGET_PATH" ]]; then
-          echo "::error::Target path not found: ${TARGET_PATH}"
+          echo "::error::Target path not found: $(gh_msg "$TARGET_PATH")"
           exit 1
         fi
 
@@ -372,7 +383,7 @@ runs:
             STRICT_FLAG=""
             if [[ "$INPUT_STRICT" == "true" ]]; then STRICT_FLAG="--strict"; fi
             OUTPUT=$(sfw check $STRICT_FLAG -- "$TARGET_PATH")
-            echo "$OUTPUT"
+            printf '%s\n' "$OUTPUT" | raw_log
             ;;
 
           diff)
@@ -391,12 +402,17 @@ runs:
               set -e
               if ! echo "$OUTPUT" | jq -e 'type == "array" and length == '"$PAIR_COUNT" >/dev/null 2>&1; then
                 echo "::error::sfw diff produced no result for the ${PAIR_COUNT} changed file(s)"
-                sed 's/^/  [sfw] /' "$DIFF_ERR" || true
+                raw_log < "$DIFF_ERR"
                 OUTPUT="[]"
                 echo "semantic-match-pct=0.0" >> "$GITHUB_OUTPUT"
                 EXIT_CODE=1
               else
-                echo "$OUTPUT" | jq -r '.[] | select((.error // "") != "") | "::warning::sfw diff failed for \(.new_file): \(.error)"'
+                # Results name the base side by its path in the repository,
+                # not in the scratch worktree.
+                OUTPUT=$(echo "$OUTPUT" | jq --arg wt "$WORKTREE_DIR/" 'map(.old_file |= ltrimstr($wt) | if (.error | type) == "string" then .error |= (split($wt) | join("")) else . end)')
+                echo "$OUTPUT" | jq -r 'def esc: gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A");
+                  .[] | select((.error // "") != "")
+                  | "::warning::sfw diff failed for \(if .new_file == "/dev/null" then .old_file else .new_file end | esc): \(.error | esc)"'
                 ERROR_COUNT=$(echo "$OUTPUT" | jq '[.[] | select((.error // "") != "")] | length')
                 TOTAL_MATCH_PCT=$(echo "$OUTPUT" | jq '[.[] | .summary.semantic_match_pct // 0] | add')
                 AVG_PCT=$(echo "scale=1; $TOTAL_MATCH_PCT / $PAIR_COUNT" | bc)
@@ -438,18 +454,18 @@ runs:
               }
               for root in "$OLD_ROOT" "$TARGET_PATH"; do
                 work=$(governing_work "$root")
-                if ! (cd "$root" && GOWORK="$work" go mod download); then
-                  echo "::error::go mod download failed in ${root}"
+                if ! (cd "$root" && GOWORK="$work" go mod download) 2>&1 | raw_log; then
+                  echo "::error::go mod download failed in $(gh_msg "$root")"
                   exit 1
                 fi
               done
               DEPS_ERR="$LOCAL_TEMP/sfw_deps_stderr.log"
               if ! OUTPUT=$(sfw deps diff -- "$OLD_ROOT" "$TARGET_PATH" 2>"$DEPS_ERR"); then
-                sed 's/^/  [sfw] /' "$DEPS_ERR" || true
+                raw_log < "$DEPS_ERR"
                 echo "::error::sfw deps diff failed"
                 exit 1
               fi
-              echo "$OUTPUT"
+              printf '%s\n' "$OUTPUT" | raw_log
               HIGH_RISK=$(echo "$OUTPUT" | jq -r '.summary.high_risk_changes // 0')
               echo "high-risk-changes=${HIGH_RISK}" >> "$GITHUB_OUTPUT"
               if [[ "$HIGH_RISK" -gt 0 ]]; then
@@ -484,11 +500,11 @@ runs:
             
             SCAN_STDERR_FILE="$LOCAL_TEMP/sfw_scan_stderr.log"
             if ! OUTPUT=$(sfw scan --db "$TEMP_DB" --threshold "${INPUT_THRESHOLD:-0.75}" "${DEPS_ARGS[@]}" -- "$TARGET_PATH" 2>"$SCAN_STDERR_FILE"); then
-              cat "$SCAN_STDERR_FILE" || true
+              raw_log < "$SCAN_STDERR_FILE"
               exit 1
             fi
-            if [[ -s "$SCAN_STDERR_FILE" ]]; then cat "$SCAN_STDERR_FILE"; fi
-            echo "$OUTPUT"
+            if [[ -s "$SCAN_STDERR_FILE" ]]; then raw_log < "$SCAN_STDERR_FILE"; fi
+            printf '%s\n' "$OUTPUT" | raw_log
 
             ALERT_COUNT=$(echo "$OUTPUT" | jq -r '.summary.total_alerts // 0')
             echo "alert-count=${ALERT_COUNT}" >> "$GITHUB_OUTPUT"
@@ -551,7 +567,7 @@ runs:
                 CMD_EXIT=$?
                 set -e
                 
-                echo "$AUDIT_OUT"
+                printf '%s\n' "$AUDIT_OUT" | raw_log
 
                 if [[ $CMD_EXIT -ne 0 ]]; then
                    ((AUDIT_FAILS++)) || true
@@ -576,10 +592,17 @@ runs:
             ;;
         esac
 
+        # A line equal to the delimiter would end result early and could set
+        # other outputs after it.
+        DELIM="EOF_SFW_${TOKEN}"
+        if printf '%s\n' "$OUTPUT" | grep -qxF "$DELIM"; then
+          echo "::error::The result contains its own delimiter."
+          exit 1
+        fi
         {
-          echo "result<<EOF_SFW_RESULT"
-          echo "$OUTPUT"
-          echo "EOF_SFW_RESULT"
+          echo "result<<${DELIM}"
+          printf '%s\n' "$OUTPUT"
+          echo "${DELIM}"
         } >> "$GITHUB_OUTPUT"
 
         exit $EXIT_CODE
