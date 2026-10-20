@@ -136,68 +136,97 @@ runs:
         GITHUB_BASE_REF: ${{ github.base_ref }}
         GITHUB_EVENT_NAME: ${{ github.event_name }}
         GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+        MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       run: |
         set -euo pipefail
-        
+
         if [[ "$INPUT_MODE" != "diff" ]] && [[ "$INPUT_MODE" != "audit" ]] && [[ "$INPUT_MODE" != "deps" ]]; then
-          echo "mode_needs_prep=false" >> "$GITHUB_OUTPUT"
           exit 0
         fi
-        
-        echo "mode_needs_prep=true" >> "$GITHUB_OUTPUT"
-        
-        determine_base_ref() {
-          if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
-            for attempt in 1 2 3; do
-              if git fetch origin "$GITHUB_BASE_REF" --depth=100 2>/dev/null; then
-                break
-              fi
-              [[ $attempt -lt 3 ]] && sleep 2
-            done
-            printf '%s' "origin/$GITHUB_BASE_REF"
-          elif [[ "${GITHUB_EVENT_NAME:-}" == "push" ]]; then
-            local before_sha="${GITHUB_EVENT_BEFORE:-}"
-            if [[ "$before_sha" == "0000000000000000000000000000000000000000" ]] || [[ -z "$before_sha" ]]; then
-              printf '%s' "HEAD^"
-            else
-              printf '%s' "$before_sha"
-            fi
-          else
-            printf '%s' "HEAD~1"
-          fi
+
+        # Every failure to find the base fails the job: a base that is
+        # missing or wrong would analyze nothing, or the wrong changes.
+        fail() { echo "::error::$*"; exit 1; }
+        is_sha() { [[ "$1" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] && [[ ! "$1" =~ ^0+$ ]]; }
+        have() { git cat-file -e "$1^{commit}" 2>/dev/null; }
+        fetch_sha() { have "$1" || git fetch -q --no-tags origin "$1" >/dev/null 2>&1 || true; have "$1"; }
+        # Fully qualified, so a tag of the same name is never taken for the
+        # branch.
+        fetch_branch() { [[ -n "$1" ]] && git fetch -q --no-tags origin "+refs/heads/$1:refs/remotes/origin/$1"; }
+        # The one best common ancestor of $1 and HEAD. A criss-cross history
+        # has several, and a diff from any one of them can miss what the
+        # merge changes.
+        single_merge_base() {
+          local bases
+          [[ "$(git rev-parse --is-shallow-repository)" == false ]] || return 1
+          bases=$(git merge-base --all "$1" HEAD) || return 1
+          [[ -n "$bases" && "$bases" != *$'\n'* ]] || return 1
+          printf '%s' "$bases"
         }
-        
-        readonly BASE_REF=$(determine_base_ref)
-        readonly HEAD_REF="HEAD"
-        echo "base_ref=${BASE_REF}" >> "$GITHUB_OUTPUT"
-        
-        readonly WORKTREE_DIR=".sfw_base_worktree"
-        if [[ -d "$WORKTREE_DIR" ]]; then
-          git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"
-        fi
-        
-        if ! git rev-parse --verify "$BASE_REF" >/dev/null 2>&1; then
-          git fetch --unshallow 2>/dev/null || git fetch --depth=500 2>/dev/null || true
-        fi
-        
-        if git worktree add --detach "$WORKTREE_DIR" "$BASE_REF" >/dev/null 2>&1; then
-          echo "::debug::Worktree created successfully."
-        else
-          mkdir -p "$WORKTREE_DIR"
-        fi
+
+        HEAD_SHA=$(git rev-parse --verify 'HEAD^{commit}')
+        case "${GITHUB_EVENT_NAME:-}" in
+          pull_request|pull_request_target)
+            is_sha "${PR_HEAD_SHA:-}" || fail "The event has no pull request head commit."
+            git merge-base --is-ancestor "$PR_HEAD_SHA" HEAD 2>/dev/null ||
+              fail "HEAD does not contain the pull request head ${PR_HEAD_SHA}. Check out the pull request's merge or head commit."
+            if [[ "$(git rev-parse -q --verify 'HEAD^2^{commit}' || true)" == "$PR_HEAD_SHA" ]]; then
+              # GitHub's merge commit: its first parent is the base it merged onto.
+              BASE=$(git rev-parse --verify 'HEAD^1^{commit}')
+            else
+              fetch_branch "${GITHUB_BASE_REF:-}" || fail "Cannot fetch the base branch ${GITHUB_BASE_REF:-}."
+              BASE=$(single_merge_base "refs/remotes/origin/$GITHUB_BASE_REF") ||
+                fail "HEAD and ${GITHUB_BASE_REF} have no single merge base. Use fetch-depth: 0, or check out the merge commit."
+            fi
+            ;;
+          merge_group)
+            { is_sha "${MG_BASE_SHA:-}" && fetch_sha "$MG_BASE_SHA"; } || fail "Cannot resolve the merge group base ${MG_BASE_SHA:-}."
+            [[ "$HEAD_SHA" == "${MG_HEAD_SHA:-}" ]] || fail "HEAD is not the merge group head ${MG_HEAD_SHA:-}."
+            BASE=$MG_BASE_SHA
+            ;;
+          push)
+            if is_sha "${GITHUB_EVENT_BEFORE:-}" && fetch_sha "$GITHUB_EVENT_BEFORE"; then
+              BASE=$GITHUB_EVENT_BEFORE
+            else
+              # A new branch, or a force push whose old tip is gone: compare
+              # with the default branch, not just the last commit.
+              fetch_branch "${DEFAULT_BRANCH:-}" || fail "The push has no before commit and the default branch cannot be fetched."
+              BASE=$(single_merge_base "refs/remotes/origin/$DEFAULT_BRANCH") ||
+                fail "HEAD and ${DEFAULT_BRANCH} have no single merge base. Use fetch-depth: 0."
+              echo "::notice::The push has no usable before commit; comparing with ${DEFAULT_BRANCH}."
+            fi
+            ;;
+          *)
+            BASE=$(git rev-parse -q --verify 'HEAD~1^{commit}') || fail "HEAD has no parent to compare with."
+            ;;
+        esac
+        [[ "$BASE" != "$HEAD_SHA" ]] || fail "The base is HEAD itself (${BASE}); there is nothing to compare."
+        echo "base_sha=${BASE}" >> "$GITHUB_OUTPUT"
+
+        # Scratch files live outside the checkout: the change being analyzed
+        # controls every path in it, symlinks included.
+        WORK=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/sfw.XXXXXXXX")
+        echo "work_dir=${WORK}" >> "$GITHUB_OUTPUT"
+        WORKTREE_DIR="$WORK/base"
+        git worktree prune
+        git worktree add -q --detach "$WORKTREE_DIR" "$BASE" >/dev/null || fail "Cannot check out the base ${BASE}."
         echo "worktree_dir=${WORKTREE_DIR}" >> "$GITHUB_OUTPUT"
-        
-        readonly DIFF_STREAM_FILE=".sfw_diff_stream.bin"
-        if ! git diff -z --name-status "$BASE_REF" "$HEAD_REF" > "$DIFF_STREAM_FILE" 2>/dev/null; then
-          : > "$DIFF_STREAM_FILE"
-        fi
-        
+
+        # -z everywhere: without it git quotes unusual names ("p/\303\251.go"),
+        # and the suffix tests miss them.
+        DIFF_STREAM_FILE="$WORK/diff.bin"
+        git diff -z --no-ext-diff --name-status "$BASE" "$HEAD_SHA" > "$DIFF_STREAM_FILE" || fail "git diff ${BASE} ${HEAD_SHA} failed."
+        echo "diff_stream=${DIFF_STREAM_FILE}" >> "$GITHUB_OUTPUT"
+        NAMES_FILE="$WORK/names.bin"
+        git diff -z --no-ext-diff --name-only "$BASE" "$HEAD_SHA" > "$NAMES_FILE" || fail "git diff ${BASE} ${HEAD_SHA} failed."
         # grep -c prints 0 and exits 1 when nothing matches; `|| true` keeps
-        # that single 0 instead of appending a second one.
-        GO_FILE_COUNT=$(git diff --name-only "$BASE_REF" "$HEAD_REF" 2>/dev/null | grep -c '\.go$' || true)
-        # A go.work redirects modules like a replace does, so its changes
-        # count too.
-        MOD_FILE_COUNT=$(git diff --name-only "$BASE_REF" "$HEAD_REF" 2>/dev/null | grep -cE '(^|/)go\.(mod|sum|work|work\.sum)$' || true)
+        # that single 0. A go.work redirects modules like a replace does, so
+        # its changes count too.
+        GO_FILE_COUNT=$(tr '\0' '\n' < "$NAMES_FILE" | grep -c '\.go$' || true)
+        MOD_FILE_COUNT=$(tr '\0' '\n' < "$NAMES_FILE" | grep -cE '(^|/)go\.(mod|sum|work|work\.sum)$' || true)
         if [[ "$MOD_FILE_COUNT" -gt 0 ]]; then
           echo "has_mod_changes=true" >> "$GITHUB_OUTPUT"
         else
@@ -262,16 +291,19 @@ runs:
         INPUT_API_BASE: ${{ inputs.api-base }}
         PR_TITLE: ${{ github.event.pull_request.title }}
         PR_BODY: ${{ github.event.pull_request.body }}
+        PREP_BASE_SHA: ${{ steps.prep.outputs.base_sha }}
         PREP_WORKTREE_DIR: ${{ steps.prep.outputs.worktree_dir }}
+        PREP_DIFF_STREAM: ${{ steps.prep.outputs.diff_stream }}
         PREP_HAS_GO_FILES: ${{ steps.prep.outputs.has_go_files }}
         PREP_HAS_MOD_CHANGES: ${{ steps.prep.outputs.has_mod_changes }}
       run: |
         set -euo pipefail
         
-        readonly TARGET_ABS=$(realpath -m "${INPUT_PATH:-.}")
-        readonly BASE_ABS=$(realpath -m ".")
-        readonly REL_PATH=$(realpath -m --relative-to="$BASE_ABS" "$TARGET_ABS")
-        
+        # Plain assignments: readonly X=$(...) hides a failure from set -e.
+        TARGET_ABS=$(realpath -m "${INPUT_PATH:-.}")
+        BASE_ABS=$(realpath -m ".")
+        REL_PATH=$(realpath -m --relative-to="$BASE_ABS" "$TARGET_ABS")
+
         if [[ "$REL_PATH" == ".."* ]] || [[ "$REL_PATH" == /* ]]; then
            echo "::error::Security Violation: Path Traversal"
            exit 1
@@ -284,12 +316,25 @@ runs:
         fi
 
         EXIT_CODE=0
-        readonly LOCAL_TEMP=".sfw_temp_$$"
-        mkdir -p "$LOCAL_TEMP"
+        # Outside the checkout, whose paths the analyzed change controls.
+        LOCAL_TEMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/sfw-run.XXXXXXXX")
         cleanup() {
           rm -rf "$LOCAL_TEMP" 2>/dev/null || true
         }
         trap cleanup EXIT INT TERM
+
+        # diff, audit and deps need the base the prepare step resolved;
+        # without it there is nothing to compare, which is not a pass.
+        case "$INPUT_MODE" in
+          diff|audit|deps)
+            if [[ -z "${PREP_BASE_SHA:-}" ]] || [[ ! -d "${PREP_WORKTREE_DIR:-}" ]] || [[ ! -f "${PREP_DIFF_STREAM:-}" ]]; then
+              echo "::error::The prepare step did not resolve a base to compare with; nothing was analyzed."
+              exit 1
+            fi
+            WORKTREE_DIR="$PREP_WORKTREE_DIR"
+            DIFF_STREAM_FILE="$PREP_DIFF_STREAM"
+            ;;
+        esac
 
         case "$INPUT_MODE" in
           check)
@@ -300,9 +345,6 @@ runs:
             ;;
 
           diff)
-            readonly WORKTREE_DIR="${PREP_WORKTREE_DIR:-.sfw_base_worktree}"
-            readonly DIFF_STREAM_FILE=".sfw_diff_stream.bin"
-            
             if [[ "${PREP_HAS_GO_FILES:-false}" != "true" ]]; then
               OUTPUT="[]"
               echo "semantic-match-pct=100.0" >> "$GITHUB_OUTPUT"
@@ -371,7 +413,6 @@ runs:
             ;;
 
           deps)
-            readonly WORKTREE_DIR="${PREP_WORKTREE_DIR:-.sfw_base_worktree}"
             if [[ "${PREP_HAS_MOD_CHANGES:-false}" != "true" ]]; then
               OUTPUT='{}'
               echo "high-risk-changes=0" >> "$GITHUB_OUTPUT"
@@ -472,9 +513,6 @@ runs:
                 *)          export OPENAI_API_KEY="$SFW_API_KEY" ;;
               esac
             fi
-            readonly WORKTREE_DIR="${PREP_WORKTREE_DIR:-.sfw_base_worktree}"
-            readonly DIFF_STREAM_FILE=".sfw_diff_stream.bin"
-            
             if [[ "${PREP_HAS_GO_FILES:-false}" != "true" ]]; then
               echo "audit-verdict=PASS" >> "$GITHUB_OUTPUT"
               OUTPUT="Audit Passed. (No Go files changed)"
@@ -571,11 +609,13 @@ runs:
       shell: bash
       env:
         WORKTREE_DIR: ${{ steps.prep.outputs.worktree_dir }}
+        WORK_DIR: ${{ steps.prep.outputs.work_dir }}
       run: |
         set +e
         if [[ -n "${WORKTREE_DIR:-}" ]] && [[ -d "$WORKTREE_DIR" ]]; then
-          git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"
+          git worktree remove --force "$WORKTREE_DIR" 2>/dev/null
         fi
-        rm -f .sfw_diff_stream.bin 2>/dev/null
-        rm -rf .sfw_temp_* 2>/dev/null
+        if [[ -n "${WORK_DIR:-}" ]]; then
+          rm -rf "$WORK_DIR"
+        fi
         git worktree prune 2>/dev/null || true

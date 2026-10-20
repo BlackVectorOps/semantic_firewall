@@ -1173,7 +1173,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          fetch-depth: 0        # diff and audit read HEAD~1
+          fetch-depth: 0        # diff, audit and deps read the base commit
       - id: sfw
         uses: BlackVectorOps/semantic_firewall@v7.3.0
         with:
@@ -1194,7 +1194,15 @@ The Action does the following before running `sfw`:
 - installs `runsc` release `20260126.0` and checks its SHA-512;
 - relaxes the AppArmor user-namespace restriction for it.
 
-`diff` and `audit` analyze every `.go` file changed between a base and `HEAD`, and ignore `path`. The base is `origin/<base branch>` for a pull request, the `before` commit for a push, and `HEAD~1` otherwise. `diff` mode passes all changed files (except `_test.go`, `_generated.go` and `vendor/` files) to one [`sfw diff --batch`](#batch-mode) run, and fails the job if any file could not be diffed.
+`diff`, `audit` and `deps` compare `HEAD` with a base commit chosen by the event. When the base cannot be resolved the job fails:
+- `pull_request` and `pull_request_target`: `HEAD` must contain the pull request's head commit. With GitHub's merge commit checked out (what `actions/checkout` does for `pull_request`), the base is its first parent and nothing is fetched. Otherwise the base branch is fetched by its full ref and the base is its single merge base with `HEAD`, which needs the full history.
+- `merge_group`: the group's base commit, and `HEAD` must be the group's head commit.
+- `push`: the `before` commit. For a new branch, or a force push whose old commit is gone, it is the merge base of `HEAD` and the default branch.
+- any other event: `HEAD~1`.
+
+The base is checked out as a worktree under `RUNNER_TEMP`, outside the checkout, with the Action's other scratch files.
+
+`diff` and `audit` analyze every `.go` file changed between the base and `HEAD`, and ignore `path`. `diff` mode passes all changed files (except `_test.go`, `_generated.go` and `vendor/` files) to one [`sfw diff --batch`](#batch-mode) run, and fails the job if any file could not be diffed.
 
 `deps` mode runs [`sfw deps diff`](#sfw-deps-diff) on the base and `HEAD` versions of the module at `path`, which must contain `go.mod` in both. It runs only when a `go.mod`, `go.sum`, `go.work` or `go.work.sum` changed; otherwise `result` is `{}`. It first runs `go mod download` in both trees, each with the workspace that governs it. This fetches and verifies module zips against `go.sum` and runs no code. With `fail-on-alert`, the job fails when `high_risk_changes` is above 0.
 

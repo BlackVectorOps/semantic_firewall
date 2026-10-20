@@ -109,7 +109,20 @@ type actionRun struct {
 
 // runAction runs the prep and run-sfw steps in repo for one mode, the way
 // the composite action wires them, and returns the exit code of run-sfw.
+// The event is a push whose before commit is HEAD~1, unless inputs says
+// otherwise.
 func runAction(t *testing.T, repo string, inputs map[string]string) actionRun {
+	t.Helper()
+	res, prepOK := runSteps(t, repo, inputs)
+	if !prepOK {
+		t.Fatalf("prep step failed (%d):\n%s", res.exitCode, res.log)
+	}
+	return res
+}
+
+// runSteps is runAction, except that a failing prep step is returned (with
+// prepOK false) rather than fatal.
+func runSteps(t *testing.T, repo string, inputs map[string]string) (res actionRun, prepOK bool) {
 	t.Helper()
 	bin := sfwOnPath(t)
 	outFile := filepath.Join(t.TempDir(), "github_output")
@@ -118,13 +131,18 @@ func runAction(t *testing.T, repo string, inputs map[string]string) actionRun {
 	}
 	var env []string
 	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "GITHUB_") && !strings.HasPrefix(e, "INPUT_") && !strings.HasPrefix(e, "PATH=") {
+		if !strings.HasPrefix(e, "GITHUB_") && !strings.HasPrefix(e, "INPUT_") && !strings.HasPrefix(e, "PATH=") && !strings.HasPrefix(e, "RUNNER_") {
 			env = append(env, e)
 		}
 	}
+	before := ""
+	if out, err := exec.Command("git", "-C", repo, "rev-parse", "-q", "--verify", "HEAD~1^{commit}").Output(); err == nil {
+		before = strings.TrimSpace(string(out))
+	}
 	env = append(env,
 		"PATH="+bin+string(os.PathListSeparator)+filepath.Join(runtime.GOROOT(), "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"GITHUB_OUTPUT="+outFile, "GITHUB_EVENT_NAME=push", "GITHUB_EVENT_BEFORE=", "GITHUB_BASE_REF=")
+		"GITHUB_OUTPUT="+outFile, "GITHUB_EVENT_NAME=push", "GITHUB_EVENT_BEFORE="+before, "GITHUB_BASE_REF=",
+		"RUNNER_TEMP="+t.TempDir(), "PR_HEAD_SHA=", "MG_BASE_SHA=", "MG_HEAD_SHA=", "DEFAULT_BRANCH=")
 	for k, v := range inputs {
 		env = append(env, k+"="+v)
 	}
@@ -143,25 +161,32 @@ func runAction(t *testing.T, repo string, inputs map[string]string) actionRun {
 		return code, string(out)
 	}
 
+	// A shell error inside a step can leave the outputs looking right (a
+	// failed [[ ]] test reads as false); none is acceptable.
+	checkShell := func(log string) {
+		for _, bad := range []string{"syntax error", "command not found", "unbound variable", "bad substitution"} {
+			if strings.Contains(log, bad) {
+				t.Fatalf("shell error (%q) while running the Action:\n%s", bad, log)
+			}
+		}
+	}
+
 	code, log := run(stepScript(t, "prep"), env)
+	checkShell(log)
 	if code != 0 {
-		t.Fatalf("prep step failed (%d):\n%s", code, log)
+		return actionRun{exitCode: code, log: log, outputs: parseOutputs(t, outFile)}, false
 	}
 	prep := parseOutputs(t, outFile)
 	env = append(env,
+		"PREP_BASE_SHA="+prep["base_sha"],
 		"PREP_WORKTREE_DIR="+prep["worktree_dir"],
+		"PREP_DIFF_STREAM="+prep["diff_stream"],
 		"PREP_HAS_GO_FILES="+prep["has_go_files"],
 		"PREP_HAS_MOD_CHANGES="+prep["has_mod_changes"])
 	code, runLog := run(stepScript(t, "run-sfw"), env)
 	all := log + runLog
-	// A shell error inside a step can leave the outputs looking right (a
-	// failed [[ ]] test reads as false); none is acceptable.
-	for _, bad := range []string{"syntax error", "command not found", "unbound variable", "bad substitution"} {
-		if strings.Contains(all, bad) {
-			t.Fatalf("shell error (%q) while running the Action:\n%s", bad, all)
-		}
-	}
-	return actionRun{exitCode: code, log: all, outputs: parseOutputs(t, outFile)}
+	checkShell(all)
+	return actionRun{exitCode: code, log: all, outputs: parseOutputs(t, outFile)}, true
 }
 
 // parseOutputs reads a GITHUB_OUTPUT file: name=value lines and
