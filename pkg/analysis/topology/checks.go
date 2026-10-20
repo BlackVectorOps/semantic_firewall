@@ -435,12 +435,15 @@ func decidedPrimitive(instr ssa.Instruction) (string, bool) {
 // anyReturn is set, only a returned boolean or error counts: a getter
 // returning another value decides nothing.
 func resultDecides(v ssa.Value, anyReturn bool) bool {
+	// The phis of a large switch reach one another many times over. A value
+	// already walked with as much depth left found nothing then either.
+	walked := make(map[ssa.Value]int)
 	var decides func(v ssa.Value, depth int) bool
 	decides = func(v ssa.Value, depth int) bool {
-		// The depth bound also ends a cycle through phis.
-		if depth > 4 {
+		if d, ok := walked[v]; depth > 4 || ok && d <= depth {
 			return false
 		}
+		walked[v] = depth
 		for _, ref := range *v.Referrers() {
 			switch r := ref.(type) {
 			case *ssa.If:
