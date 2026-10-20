@@ -28,6 +28,14 @@ const maxCheckHelperDepth = 3
 //     verification word (authorize, verify, validate, ...; see
 //     isVerificationName) and whose result decides a branch or is returned.
 //
+// A static call that is not a name-based check but passes checks (see
+// passesChecks) to a function of the same package, processFlight say, puts
+// the name-based checks processFlight makes, and those of the functions it
+// calls as a name-based check or in a way that passes checks, up to
+// maxCheckHelperDepth deep, in t.HelperMovedChecks, not Checks: they
+// explain a check that left this function for processFlight, without
+// making every caller of processFlight lose it when processFlight changes.
+//
 // A check whose result nothing decides on has no effect, and is not one.
 // Static calls are keyed like CallTargets; interface calls are keyed by the
 // interface type and method, "(example.com/p.Verifier).Verify".
@@ -63,6 +71,10 @@ func collectCheckHelpers(fn *ssa.Function, t *FunctionTopology) {
 				// caller's too: moving them into validateHeaders removes none.
 				for _, c := range checksReached(callee, pkgOf(fn), maxCheckHelperDepth, true, memo) {
 					t.Checks[c] = true
+				}
+			} else if passesChecks(call) {
+				for _, c := range memo.helperChecks(callee, pkgOf(fn)) {
+					addHelperMovedCheck(t, c, key)
 				}
 			}
 			if call.Call.Signature().Results().Len() == 0 || resultDecides(call, true) {
@@ -113,7 +125,7 @@ func collectLiteralChecks(lit *ssa.Function, t *FunctionTopology) {
 		}
 		maps.Copy(t.Checks, inner.Checks)
 	} else {
-		if !errorDecides(call) {
+		if !typedResultDecides(call, func(_ int, t types.Type) bool { return isErrorType(t) }) {
 			return
 		}
 		via := calleeKey(&call.Call)
@@ -123,6 +135,21 @@ func collectLiteralChecks(lit *ssa.Function, t *FunctionTopology) {
 	}
 	for k, innerVia := range inner.MovedChecks {
 		addMovedCheck(t, k, innerVia)
+	}
+	for k, vias := range inner.HelperMovedChecks {
+		for _, via := range vias {
+			addHelperMovedCheck(t, k, via)
+		}
+	}
+}
+
+func addHelperMovedCheck(t *FunctionTopology, k, via string) {
+	if t.HelperMovedChecks == nil {
+		t.HelperMovedChecks = make(map[string][]string)
+	}
+	vias := t.HelperMovedChecks[k]
+	if i, found := slices.BinarySearch(vias, via); !found {
+		t.HelperMovedChecks[k] = slices.Insert(vias, i, via)
 	}
 }
 
@@ -140,20 +167,52 @@ func soleReferrer(v ssa.Value) ssa.Instruction {
 	return nil
 }
 
-// errorDecides reports whether call's error result decides (see
-// resultDecides). Its other results do not count: a branch on
-// singleflight's shared flag says nothing about whether a check passed.
-func errorDecides(call *ssa.Call) bool {
-	if isErrorType(call.Type()) {
-		return resultDecides(call, false)
+// typedResultDecides reports whether a result of call decides (see
+// resultDecides), directly or once boxed in an interface (var err error =
+// validate()), counting only the results is accepts by index and type. A
+// branch on another, singleflight's shared flag or a returned *Alert,
+// says nothing about whether a check passed.
+func typedResultDecides(call *ssa.Call, is func(i int, t types.Type) bool) bool {
+	decides := func(v ssa.Value) bool {
+		if resultDecides(v, true) {
+			return true
+		}
+		for _, ref := range *v.Referrers() {
+			if mi, ok := ref.(*ssa.MakeInterface); ok && resultDecides(mi, false) {
+				return true
+			}
+		}
+		return false
+	}
+	if call.Call.Signature().Results().Len() == 1 {
+		return is(0, call.Type()) && decides(call)
 	}
 	for _, ref := range *call.Referrers() {
-		if ex, ok := ref.(*ssa.Extract); ok && isErrorType(ex.Type()) && resultDecides(ex, false) {
+		if ex, ok := ref.(*ssa.Extract); ok && is(ex.Index, ex.Type()) && decides(ex) {
 			return true
 		}
 	}
 	return false
 }
+
+// passesChecks reports whether the name-based checks the static callee of
+// call makes count for the caller, when call is not a name-based check
+// itself: a bool or error result of it decides, or its last result, of a
+// type that implements error (*ValidationError), does, or it has no result
+// and the callee's name says it checks (mustVerify panics or exits on
+// failure). A generic helper with no result, a logger say, can branch on a
+// check without enforcing it.
+func passesChecks(call *ssa.Call) bool {
+	if n := call.Call.Signature().Results().Len(); n > 0 {
+		return typedResultDecides(call, func(i int, t types.Type) bool {
+			return isBoolOrError(t) || i == n-1 && types.Implements(t, errorInterface)
+		})
+	}
+	_, _, name, _ := calleeIdentity(call.Call.StaticCallee())
+	return isVerificationName(name)
+}
+
+var errorInterface = types.Universe.Lookup("error").Type().Underlying().(*types.Interface)
 
 // calleeKey returns the key of the function c calls, like CallTargets, or
 // "(iface).Method" for an interface call, or "func value".
@@ -200,19 +259,59 @@ type reachKey struct {
 type reachMemo struct {
 	reached map[reachKey][]string
 	bodies  map[*ssa.Function]*bodyRefs
+	helpers map[*ssa.Function][]string
 }
 
 func newReachMemo() *reachMemo {
-	return &reachMemo{reached: make(map[reachKey][]string), bodies: make(map[*ssa.Function]*bodyRefs)}
+	return &reachMemo{
+		reached: make(map[reachKey][]string),
+		bodies:  make(map[*ssa.Function]*bodyRefs),
+		helpers: make(map[*ssa.Function][]string),
+	}
+}
+
+// helperChecks returns the name-based checks fn, a function of package
+// pkg, makes and decides on, directly or through name-based checks and
+// calls that pass checks (see passesChecks) to other functions of pkg, at
+// most maxCheckHelperDepth functions deep counting fn. Each function is
+// read once, at the shallowest depth it is reached.
+func (m *reachMemo) helperChecks(fn *ssa.Function, pkg *ssa.Package) []string {
+	if found, ok := m.helpers[fn]; ok {
+		return found
+	}
+	var found []string
+	seen := make(map[*ssa.Function]bool)
+	level := []*ssa.Function{fn}
+	for depth := 0; depth < maxCheckHelperDepth && len(level) > 0; depth++ {
+		var next []*ssa.Function
+		for _, f := range level {
+			if seen[f] || pkg == nil || pkgOf(f) != pkg || len(f.Blocks) == 0 {
+				continue
+			}
+			seen[f] = true
+			r := m.refs(f)
+			for _, k := range r.named {
+				if !slices.Contains(found, k) {
+					found = append(found, k)
+				}
+			}
+			next = append(next, r.passing...)
+		}
+		level = next
+	}
+	m.helpers[fn] = found
+	return found
 }
 
 // bodyRefs is what a function body references, once each: the
 // verification primitives and the name-based checks it calls and decides
-// on, and the other functions.
+// on, the other functions, and those of them it calls as a name-based
+// check or in a way that passes checks (see passesChecks).
 type bodyRefs struct {
 	primitives []string
 	named      []string
 	callees    []*ssa.Function
+	passing    []*ssa.Function
 }
 
 func (m *reachMemo) refs(fn *ssa.Function) *bodyRefs {
@@ -238,8 +337,13 @@ func (m *reachMemo) refs(fn *ssa.Function) *bodyRefs {
 				r.primitives = append(r.primitives, k)
 			}
 			if call, ok := instr.(*ssa.Call); ok {
-				if k, ok := decidedNameCheck(call); ok && !slices.Contains(r.named, k) {
+				k, named := decidedNameCheck(call)
+				if named && !slices.Contains(r.named, k) {
 					r.named = append(r.named, k)
+				}
+				if callee := call.Call.StaticCallee(); callee != nil && slices.Contains(r.callees, callee) &&
+					!slices.Contains(r.passing, callee) && (named || passesChecks(call)) {
+					r.passing = append(r.passing, callee)
 				}
 			}
 		}

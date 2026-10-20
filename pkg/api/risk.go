@@ -261,7 +261,10 @@ func assessTopologyDeltaFor(oldT, newT *topology.FunctionTopology, profile riskP
 	// checks, through an implementation a reviewer should see. One that moved
 	// into a function literal passed to a call whose error result decides
 	// (see MovedChecks) is labelled MovedCheck without points: the callee,
-	// a cache say, may skip it, which a reviewer should see too.
+	// a cache say, may skip it, which a reviewer should see too. One that
+	// would be removed but that a helper the new version calls now makes
+	// (see HelperMovedChecks) is labelled CheckMovedIntoHelper without
+	// points: whether the helper still enforces it is for the reviewer.
 	var addedChecks []string
 	for target := range newT.Checks {
 		if !oldT.Checks[target] {
@@ -269,7 +272,7 @@ func assessTopologyDeltaFor(oldT, newT *topology.FunctionTopology, profile riskP
 		}
 	}
 	sort.Strings(addedChecks)
-	var removedChecks, replacedChecks, movedChecks []string
+	var removedChecks, replacedChecks, movedChecks, helperChecks []string
 	for target := range oldT.Checks {
 		if newT.Checks[target] {
 			continue
@@ -280,7 +283,11 @@ func assessTopologyDeltaFor(oldT, newT *topology.FunctionTopology, profile riskP
 		}
 		switch match, same := matchingCheck(target, addedChecks); {
 		case match == "":
-			removedChecks = append(removedChecks, target)
+			if vias, ok := newT.HelperMovedChecks[target]; ok {
+				helperChecks = append(helperChecks, target+" via "+strings.Join(vias, "|"))
+			} else {
+				removedChecks = append(removedChecks, target)
+			}
 		case !same:
 			replacedChecks = append(replacedChecks, target+"->"+match)
 		}
@@ -297,6 +304,10 @@ func assessTopologyDeltaFor(oldT, newT *topology.FunctionTopology, profile riskP
 	if len(movedChecks) > 0 {
 		sort.Strings(movedChecks)
 		r.labels = append(r.labels, fmt.Sprintf("MovedCheck(%s)", strings.Join(movedChecks, ",")))
+	}
+	if len(helperChecks) > 0 {
+		sort.Strings(helperChecks)
+		r.labels = append(r.labels, fmt.Sprintf("CheckMovedIntoHelper(%s)", strings.Join(helperChecks, ",")))
 	}
 
 	if newPlain > 0 {

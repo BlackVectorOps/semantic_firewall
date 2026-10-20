@@ -40,7 +40,7 @@ func (Config) InsecureIgnoreHostKey() HostKeyCallback { return nil }
 		"xcrypto/go.mod":     "module golang.org/x/crypto\n\ngo 1.23\n",
 		"xcrypto/ssh/ssh.go": sshStub,
 		"fake/ssh/ssh.go":    sshStub,
-		"helper/helper.go":   "package helper\n\nimport (\"crypto/hmac\"; \"net/http\"; \"os\")\n\nfunc Same(a, b []byte) bool { return hmac.Equal(a, b) }\n\nfunc Die() { os.Exit(1) }\n\nfunc Cookie(v string) *http.Cookie { return &http.Cookie{Name: \"s\", Value: v, Secure: true} }\n",
+		"helper/helper.go":   "package helper\n\nimport (\"crypto/hmac\"; \"net/http\"; \"os\")\n\nfunc Same(a, b []byte) bool { return hmac.Equal(a, b) }\n\nfunc Die() { os.Exit(1) }\n\nfunc Cookie(v string) *http.Cookie { return &http.Cookie{Name: \"s\", Value: v, Secure: true} }\n\nfunc validName(s string) bool { return s != \"\" }\n\nfunc Process(s string) bool { return validName(s) }\n",
 	}
 	// helper is a root, so its functions have SSA bodies.
 	patterns := []string{"./helper"}
@@ -104,6 +104,13 @@ func topologies(t *testing.T, srcs ...string) []*topology.FunctionTopology {
 		tp.CapabilityGuards = rekey(tp.CapabilityGuards, pkgPath)
 		tp.Checks = rekey(tp.Checks, pkgPath)
 		tp.MovedChecks = rekey(tp.MovedChecks, pkgPath)
+		tp.HelperMovedChecks = rekey(tp.HelperMovedChecks, pkgPath)
+		for k, vias := range tp.HelperMovedChecks {
+			for j, via := range vias {
+				vias[j] = strings.ReplaceAll(via, pkgPath, "testmod")
+			}
+			tp.HelperMovedChecks[k] = vias
+		}
 		for k, via := range tp.MovedChecks {
 			tp.MovedChecks[k] = strings.ReplaceAll(via, pkgPath, "testmod")
 		}
@@ -692,6 +699,11 @@ func main() {}`, nil},
 type Store interface{ Load(k string) error }
 func F(s Store, k string) int { if s.Load(k) != nil { return 0 }; return 1 }
 func main() {}`, nil},
+		{"a helper's string result passes its primitives", `package main
+import "crypto/hmac"
+func render(a, b []byte) string { if !hmac.Equal(a, b) { return "" }; return "ok" }
+func F(a, b []byte) string { return render(a, b) }
+func main() {}`, []string{"testmod.render", "crypto/hmac.Equal"}},
 	}
 	srcs := make([]string, len(cases))
 	for i, c := range cases {
@@ -707,6 +719,174 @@ func main() {}`, nil},
 			}
 			if !reflect.DeepEqual(tp.Checks, want) {
 				t.Errorf("Checks = %v; want %v", tp.Checks, c.want)
+			}
+		})
+	}
+}
+
+func TestHelperMovedChecks(t *testing.T) {
+	const ve = "package main\ntype ValidationError struct{ msg string }\nfunc (e *ValidationError) Error() string { return e.msg }\nfunc validName(s string) bool { return s != \"\" }\nfunc process(s string) *ValidationError { if !validName(s) { return &ValidationError{\"bad\"} }; return nil }\n"
+	moved := func(k string, vias ...string) map[string][]string { return map[string][]string{k: vias} }
+	cases := []struct {
+		name, src string
+		want      map[string][]string
+	}{
+		{"a helper whose error decides", `package main
+import "errors"
+func validName(s string) bool { return s != "" }
+func process(s string) error { if !validName(s) { return errors.New("bad") }; return nil }
+func F(s string) error { if err := process(s); err != nil { return err }; return nil }
+func main() {}`, moved("testmod.validName", "testmod.process")},
+		{"a helper with an action name", `package main
+import "errors"
+func validPath(p string) bool { return p != "" }
+func validWritePath(p string) error { if !validPath(p) { return errors.New("bad") }; return nil }
+func F(p string) error { return validWritePath(p) }
+func main() {}`, moved("testmod.validPath", "testmod.validWritePath")},
+		{"a helper whose bool and error decide", `package main
+import "errors"
+type Alert struct{}
+func verifyCert(c []byte) bool { return len(c) > 0 }
+func process(c []byte) (bool, *Alert, error) { if !verifyCert(c) { return false, &Alert{}, errors.New("bad") }; return true, nil, nil }
+func F(c []byte) (*Alert, error) { ready, a, err := process(c); if !ready || err != nil { return a, err }; return nil, nil }
+func main() {}`, moved("testmod.verifyCert", "testmod.process")},
+		{"a branch on a helper's other result", `package main
+import "errors"
+type Alert struct{}
+func verifyCert(c []byte) bool { return len(c) > 0 }
+func process(c []byte) (bool, *Alert, error) { if !verifyCert(c) { return false, &Alert{}, errors.New("bad") }; return true, nil, nil }
+func F(c []byte) *Alert { _, a, _ := process(c); if a != nil { return a }; return nil }
+func main() {}`, nil},
+		{"a helper whose result is unused", `package main
+import "errors"
+func validName(s string) bool { return s != "" }
+func process(s string) error { if !validName(s) { return errors.New("bad") }; return nil }
+func F(s string) { process(s) }
+func main() {}`, nil},
+		{"a helper with no result and another name", `package main
+func validName(s string) bool { return s != "" }
+func record(s string) { if !validName(s) { println("bad") } }
+func F(s string) { record(s) }
+func main() {}`, nil},
+		{"a check-named helper with no result", `package main
+func validName(s string) bool { return s != "" }
+func mustValidate(s string) { if !validName(s) { panic("bad") } }
+func F(s string) { mustValidate(s) }
+func main() {}`, moved("testmod.validName", "testmod.mustValidate")},
+		{"a name-based check's helpers stay in Checks", `package main
+import "errors"
+func validName(s string) bool { return s != "" }
+func process(s string) error { if !validName(s) { return errors.New("bad") }; return nil }
+func validateAll(s string) error { if err := process(s); err != nil { return err }; return nil }
+func F(s string) error { return validateAll(s) }
+func main() {}`, nil},
+		{"through two deciding helpers", `package main
+import "errors"
+func validName(s string) bool { return s != "" }
+func check(s string) error { if !validName(s) { return errors.New("bad") }; return nil }
+func process(s string) error { if err := check(s); err != nil { return err }; return nil }
+func F(s string) error { if err := process(s); err != nil { return err }; return nil }
+func main() {}`, moved("testmod.validName", "testmod.process")},
+		{"behind a string result", `package main
+import "errors"
+func validName(s string) bool { return s != "" }
+func render(s string) string { if !validName(s) { return "" }; return s }
+func process(s string) error { if render(s) == "" { return errors.New("bad") }; return nil }
+func F(s string) error { if err := process(s); err != nil { return err }; return nil }
+func main() {}`, nil},
+		{"three helpers deep", `package main
+func validName(s string) bool { return s != "" }
+func h3(s string) bool { return validName(s) }
+func h2(s string) bool { return h3(s) }
+func h1(s string) bool { return h2(s) }
+func F(s string) bool { return h1(s) }
+func main() {}`, moved("testmod.validName", "testmod.h1")},
+		{"four helpers deep is too far", `package main
+func validName(s string) bool { return s != "" }
+func h4(s string) bool { return validName(s) }
+func h3(s string) bool { return h4(s) }
+func h2(s string) bool { return h3(s) }
+func h1(s string) bool { return h2(s) }
+func F(s string) bool { return h1(s) }
+func main() {}`, nil},
+		{"mutually recursive helpers", `package main
+func validName(s string) bool { return s != "" }
+func a(s string, n int) bool { if n > 0 { return b(s, n-1) }; return validName(s) }
+func b(s string, n int) bool { return a(s, n) }
+func F(s string) bool { return a(s, 3) }
+func main() {}`, moved("testmod.validName", "testmod.a")},
+		{"two helpers reaching a check, sorted", `package main
+func validName(s string) bool { return s != "" }
+func zeta(s string) bool { return validName(s) }
+func alpha(s string) bool { return validName(s) }
+func F(s string) bool { return zeta(s) && alpha(s) }
+func main() {}`, moved("testmod.validName", "testmod.alpha", "testmod.zeta")},
+		{"a validate helper behind a deciding helper", `package main
+import "errors"
+func validName(s string) bool { return s != "" }
+func validateHeaders(h []string) string { for _, k := range h { if !validName(k) { return k } }; return "" }
+func process(h []string) error { if bad := validateHeaders(h); bad != "" { return errors.New(bad) }; return nil }
+func F(h []string) error { return process(h) }
+func main() {}`, map[string][]string{"testmod.validateHeaders": {"testmod.process"}, "testmod.validName": {"testmod.process"}}},
+		{"a helper in another package is not followed", `package main
+import "testmod/helper"
+func F(s string) bool { return helper.Process(s) }
+func main() {}`, nil},
+		{"a concrete error type", ve + `func F(s string) int { if e := process(s); e != nil { return 0 }; return 1 }
+func main() {}`, moved("testmod.validName", "testmod.process")},
+		{"a concrete error result returned", ve + `func F(s string) *ValidationError { return process(s) }
+func main() {}`, moved("testmod.validName", "testmod.process")},
+		{"a concrete error result boxed before the branch", ve + `func F(s string) int { var err error = process(s); if err != nil { return 0 }; return 1 }
+func main() {}`, moved("testmod.validName", "testmod.process")},
+		{"a concrete error result boxed and returned", ve + `func F(s string) error { return process(s) }
+func main() {}`, moved("testmod.validName", "testmod.process")},
+		{"a concrete error result boxed in any and returned", ve + `func F(s string) any { return process(s) }
+func main() {}`, nil},
+		{"a concrete error result before the last", `package main
+type ValidationError struct{ msg string }
+func (e *ValidationError) Error() string { return e.msg }
+func validName(s string) bool { return s != "" }
+func process(s string) (*ValidationError, *ValidationError) { if !validName(s) { return &ValidationError{"bad"}, nil }; return nil, nil }
+func F(s string) int { v, _ := process(s); if v != nil { return 0 }; return 1 }
+func main() {}`, nil},
+		{"a concrete error last of several results", `package main
+type ValidationError struct{ msg string }
+func (e *ValidationError) Error() string { return e.msg }
+func validName(s string) bool { return s != "" }
+func process(s string) (int, *ValidationError) { if !validName(s) { return 0, &ValidationError{"bad"} }; return 1, nil }
+func F(s string) int { n, e := process(s); if e != nil { return 0 }; return n }
+func main() {}`, moved("testmod.validName", "testmod.process")},
+		{"an instantiated helper returning a concrete error type", `package main
+type ValidationError struct{ msg string }
+func (e *ValidationError) Error() string { return e.msg }
+func validName(s string) bool { return s != "" }
+func process[E error](s string, bad E) E { var zero E; if !validName(s) { return bad }; return zero }
+func F(s string) int { if e := process(s, &ValidationError{"bad"}); e != nil { return 0 }; return 1 }
+func main() {}`, moved("testmod.validName", "testmod.process")},
+		{"a helper returning a type parameter constrained by error", `package main
+func validName(s string) bool { return s != "" }
+func process[E error](s string, bad E) E { var zero E; if !validName(s) { return bad }; return zero }
+func F[E error](s string, bad E) int { var err error = process(s, bad); if err != nil { return 0 }; return 1 }
+func main() {}`, moved("testmod.validName", "testmod.process")},
+		{"a helper called in a literal invoked on the spot", ve + `func F(s string) error { return func() error { return process(s) }() }
+func main() {}`, moved("testmod.validName", "testmod.process")},
+		{"a helper called in a literal passed to a call", ve + `func retry(f func() error) error { return f() }
+func F(s string) error { return retry(func() error { return process(s) }) }
+func main() {}`, moved("testmod.validName", "testmod.process")},
+		{"a helper called in a stored literal", ve + `var hook func() error
+func F(s string) { hook = func() error { return process(s) } }
+func main() {}`, nil},
+	}
+	srcs := make([]string, len(cases))
+	for i, c := range cases {
+		srcs[i] = c.src
+	}
+	tps := topologies(t, srcs...)
+	for i, c := range cases {
+		tp := tps[i]
+		t.Run(c.name, func(t *testing.T) {
+			if !reflect.DeepEqual(tp.HelperMovedChecks, c.want) {
+				t.Errorf("HelperMovedChecks = %v; want %v", tp.HelperMovedChecks, c.want)
 			}
 		})
 	}
