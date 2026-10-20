@@ -223,7 +223,7 @@ The package `init` function is diffed like any other. Swapping an import changes
 
 ### Files
 
-The diff reports the functions declared in the given file, closures and [body-less functions](#body-less-functions) included, plus the package's synthesized `init`. That function has no source file and runs every file's package-level initializers. The package's other files are loaded for type-checking but their functions are not reported. A function belongs to the file it is written in: a `//line` directive changes the position the compiler reports, not which file's diff the function is in.
+The diff reports the functions declared in the given file, closures and [body-less functions](#body-less-functions) included, plus the package's synthesized `init`. That function has no source file and runs every file's package-level initializers. A deleted file does not report it removed, since the package's other files still run it: the file's own functions and `init` functions are what goes. A check made directly in a deleted file's package-level variable initializer is therefore not reported. The package's other files are loaded for type-checking but their functions are not reported. A function belongs to the file it is written in: a `//line` directive changes the position the compiler reports, not which file's diff the function is in.
 
 A file that the host build excludes is loaded under a configuration that includes it, chosen before the file is loaded:
 - **`_test.go` file:** loaded with the package's tests.

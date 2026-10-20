@@ -27,7 +27,7 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 	processFile := func(path string) FileFingerprints {
 		content, absPath, err := readDiffInput(fsys, path)
 		if err != nil || content == nil {
-			return FileFingerprints{Results: []diff.FingerprintResult{}, Err: err}
+			return FileFingerprints{Results: []diff.FingerprintResult{}, Err: err, absent: err == nil}
 		}
 		paths := pathResolver{}
 		results, err := diff.FingerprintSourceWhere(absPath, string(content), ir.DefaultLiteralPolicy, false, paths.keepFiles(absPath))
@@ -60,6 +60,13 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 // diffLinknames). It is the part of a diff that does not depend on where
 // the functions came from.
 func diffResults(oldPath, newPath string, oldSide, newSide FileFingerprints, profile riskProfile) *models.DiffOutput {
+	// A deleted file's synthesized package initializer runs every file's
+	// package-level initializers, and the package's other files still do;
+	// reporting it removed would charge the deletion with their checks.
+	// The deleted file's own init functions have a file and stay.
+	if newSide.absent && !oldSide.absent {
+		oldSide.Results = withoutPackageInit(oldSide.Results)
+	}
 	matched, addedFuncs, removedFuncs := diff.MatchFunctionsByTopology(
 		oldSide.Results, newSide.Results, models.DefaultTopologyMatchThreshold,
 	)
@@ -295,6 +302,18 @@ func inFile(results []diff.FingerprintResult, path string, paths pathResolver) [
 	kept := results[:0:0]
 	for _, r := range results {
 		if r.Filename == "" || paths.resolve(r.Filename) == want {
+			kept = append(kept, r)
+		}
+	}
+	return kept
+}
+
+// withoutPackageInit drops the functions with no source file: the
+// synthesized package initializer.
+func withoutPackageInit(results []diff.FingerprintResult) []diff.FingerprintResult {
+	kept := results[:0:0]
+	for _, r := range results {
+		if r.Filename != "" {
 			kept = append(kept, r)
 		}
 	}

@@ -120,6 +120,8 @@ type FileFingerprints struct {
 	// source holds what the file's text declares that its SSA does not show
 	// (see parseUnanalyzed).
 	source unanalyzedSource
+	// absent is set when the path stands for no file (see readDiffInput).
+	absent bool
 }
 
 // inputReader reads a file to fingerprint: its content, or nil when the
@@ -153,7 +155,7 @@ func fingerprintFiles(fsys FileSystem, paths []string, read inputReader, strict 
 		}
 		content, abs, err := readSafely(read, fsys, path)
 		if err != nil || content == nil {
-			out[path] = FileFingerprints{Results: []diff.FingerprintResult{}, Err: err}
+			out[path] = FileFingerprints{Results: []diff.FingerprintResult{}, Err: err, absent: err == nil}
 			continue
 		}
 		out[path] = FileFingerprints{} // claimed; filled in below
