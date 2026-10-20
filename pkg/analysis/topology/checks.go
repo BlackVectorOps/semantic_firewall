@@ -169,7 +169,7 @@ func soleReferrer(v ssa.Value) ssa.Instruction {
 
 // typedResultDecides reports whether a result of call decides (see
 // resultDecides), directly or once boxed in an interface (var err error =
-// validate()), counting only the results is accepts by index and type. A
+// validate()), counting only the results it accepts by index and type. A
 // branch on another, singleflight's shared flag or a returned *Alert,
 // says nothing about whether a check passed.
 func typedResultDecides(call *ssa.Call, is func(i int, t types.Type) bool) bool {
