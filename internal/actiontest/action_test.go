@@ -180,8 +180,8 @@ func runSteps(t *testing.T, repo string, inputs map[string]string) (res actionRu
 	env = append(env,
 		"PREP_BASE_SHA="+prep["base_sha"],
 		"PREP_WORKTREE_DIR="+prep["worktree_dir"],
-		"PREP_DIFF_STREAM="+prep["diff_stream"],
-		"PREP_HAS_GO_FILES="+prep["has_go_files"],
+		"PREP_PAIRS_FILE="+prep["pairs_file"],
+		"PREP_PAIR_COUNT="+prep["pair_count"],
 		"PREP_HAS_MOD_CHANGES="+prep["has_mod_changes"])
 	code, runLog := run(stepScript(t, "run-sfw"), env)
 	all := log + runLog
@@ -320,12 +320,17 @@ func TestActionDiffMode(t *testing.T) {
 	if err := json.Unmarshal([]byte(res.outputs["result"]), &entries); err != nil {
 		t.Fatalf("result is not a JSON array: %v\n%s", err, res.outputs["result"])
 	}
-	// Deleted, test, generated, vendored and non-Go files are not diffed.
+	// Test and non-Go files are not diffed. A deleted file is diffed
+	// against /dev/null, and listed here as "-" and its old path.
 	got := map[string]diffEntry{}
 	for _, e := range entries {
-		got[e.NewFile] = e
+		name := e.NewFile
+		if name == "/dev/null" {
+			name = "-" + strings.TrimPrefix(e.OldFile, filepath.Dir(filepath.Dir(e.OldFile))+"/")
+		}
+		got[name] = e
 	}
-	want := []string{"p/a.go", "p/new.go", "p/new_name.go", "q/q.go"}
+	want := []string{"p/a.go", "p/new.go", "p/new_name.go", "q/q.go", "vendor/v/v.go", "p/z_generated.go", "-p/del.go"}
 	if len(entries) != len(want) {
 		t.Fatalf("diffed %d files; want %v:\n%s", len(entries), want, res.outputs["result"])
 	}

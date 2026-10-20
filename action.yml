@@ -219,24 +219,54 @@ runs:
         # and the suffix tests miss them.
         DIFF_STREAM_FILE="$WORK/diff.bin"
         git diff -z --no-ext-diff --name-status "$BASE" "$HEAD_SHA" > "$DIFF_STREAM_FILE" || fail "git diff ${BASE} ${HEAD_SHA} failed."
-        echo "diff_stream=${DIFF_STREAM_FILE}" >> "$GITHUB_OUTPUT"
         NAMES_FILE="$WORK/names.bin"
         git diff -z --no-ext-diff --name-only "$BASE" "$HEAD_SHA" > "$NAMES_FILE" || fail "git diff ${BASE} ${HEAD_SHA} failed."
         # grep -c prints 0 and exits 1 when nothing matches; `|| true` keeps
         # that single 0. A go.work redirects modules like a replace does, so
         # its changes count too.
-        GO_FILE_COUNT=$(tr '\0' '\n' < "$NAMES_FILE" | grep -c '\.go$' || true)
         MOD_FILE_COUNT=$(tr '\0' '\n' < "$NAMES_FILE" | grep -cE '(^|/)go\.(mod|sum|work|work\.sum)$' || true)
         if [[ "$MOD_FILE_COUNT" -gt 0 ]]; then
           echo "has_mod_changes=true" >> "$GITHUB_OUTPUT"
         else
           echo "has_mod_changes=false" >> "$GITHUB_OUTPUT"
         fi
-        if [[ "$GO_FILE_COUNT" -gt 0 ]]; then
-          echo "has_go_files=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "has_go_files=false" >> "$GITHUB_OUTPUT"
-        fi
+
+        # The old/new pairs diff and audit analyze: every changed Go file
+        # but tests, vendored and generated files included, since all of
+        # them compile. The status letter, not the file system, says which
+        # sides exist, and /dev/null stands for an absent one, so a deleted
+        # file is compared with nothing. A rename stays one pair only within
+        # a directory with both names in scope; otherwise it is a deletion
+        # plus an addition, so a file moved out of the build (foo_test.go,
+        # foo.go.bak, another directory) reads as removed.
+        in_scope() { [[ "$1" == *.go && "$1" != *_test.go ]]; }
+        dir_of() { if [[ "$1" == */* ]]; then printf '%s' "${1%/*}"; else printf '.'; fi; }
+        PAIRS_FILE="$WORK/pairs.bin"
+        : > "$PAIRS_FILE"
+        PAIR_COUNT=0
+        pair() { printf '%s\0%s\0' "$1" "$2" >> "$PAIRS_FILE"; PAIR_COUNT=$((PAIR_COUNT + 1)); }
+        old_side() { if in_scope "$1"; then pair "$WORKTREE_DIR/$1" /dev/null; fi; }
+        new_side() { if in_scope "$1"; then pair /dev/null "$1"; fi; }
+        while IFS= read -r -d '' status; do
+          case "$status" in
+            A) IFS= read -r -d '' p; new_side "$p" ;;
+            D) IFS= read -r -d '' p; old_side "$p" ;;
+            M|T) IFS= read -r -d '' p; if in_scope "$p"; then pair "$WORKTREE_DIR/$p" "$p"; fi ;;
+            R*)
+              IFS= read -r -d '' o; IFS= read -r -d '' n
+              if in_scope "$o" && in_scope "$n" && [[ "$(dir_of "$o")" == "$(dir_of "$n")" ]]; then
+                pair "$WORKTREE_DIR/$o" "$n"
+              else
+                old_side "$o"; new_side "$n"
+              fi
+              ;;
+            # A copy leaves its source in place.
+            C*) IFS= read -r -d '' _; IFS= read -r -d '' n; new_side "$n" ;;
+            *) fail "Unexpected git diff status '${status}'." ;;
+          esac
+        done < "$DIFF_STREAM_FILE"
+        echo "pairs_file=${PAIRS_FILE}" >> "$GITHUB_OUTPUT"
+        echo "pair_count=${PAIR_COUNT}" >> "$GITHUB_OUTPUT"
 
     - name: Install gVisor (runsc)
       shell: bash
@@ -293,8 +323,8 @@ runs:
         PR_BODY: ${{ github.event.pull_request.body }}
         PREP_BASE_SHA: ${{ steps.prep.outputs.base_sha }}
         PREP_WORKTREE_DIR: ${{ steps.prep.outputs.worktree_dir }}
-        PREP_DIFF_STREAM: ${{ steps.prep.outputs.diff_stream }}
-        PREP_HAS_GO_FILES: ${{ steps.prep.outputs.has_go_files }}
+        PREP_PAIRS_FILE: ${{ steps.prep.outputs.pairs_file }}
+        PREP_PAIR_COUNT: ${{ steps.prep.outputs.pair_count }}
         PREP_HAS_MOD_CHANGES: ${{ steps.prep.outputs.has_mod_changes }}
       run: |
         set -euo pipefail
@@ -327,12 +357,13 @@ runs:
         # without it there is nothing to compare, which is not a pass.
         case "$INPUT_MODE" in
           diff|audit|deps)
-            if [[ -z "${PREP_BASE_SHA:-}" ]] || [[ ! -d "${PREP_WORKTREE_DIR:-}" ]] || [[ ! -f "${PREP_DIFF_STREAM:-}" ]]; then
+            if [[ -z "${PREP_BASE_SHA:-}" ]] || [[ ! -d "${PREP_WORKTREE_DIR:-}" ]] || [[ ! -f "${PREP_PAIRS_FILE:-}" ]] || [[ ! "${PREP_PAIR_COUNT:-}" =~ ^[0-9]+$ ]]; then
               echo "::error::The prepare step did not resolve a base to compare with; nothing was analyzed."
               exit 1
             fi
             WORKTREE_DIR="$PREP_WORKTREE_DIR"
-            DIFF_STREAM_FILE="$PREP_DIFF_STREAM"
+            PAIRS_FILE="$PREP_PAIRS_FILE"
+            PAIR_COUNT="$PREP_PAIR_COUNT"
             ;;
         esac
 
@@ -345,68 +376,36 @@ runs:
             ;;
 
           diff)
-            if [[ "${PREP_HAS_GO_FILES:-false}" != "true" ]]; then
+            # One sfw run diffs every pair, loading each tree's packages once.
+            if [[ $PAIR_COUNT -eq 0 ]]; then
               OUTPUT="[]"
               echo "semantic-match-pct=100.0" >> "$GITHUB_OUTPUT"
             else
-              # Collect every changed file as an old/new pair and diff them in
-              # one sfw run, which loads each tree's packages once.
-              readonly PAIRS_FILE="$LOCAL_TEMP/sfw_pairs.bin"
-              : > "$PAIRS_FILE"
-              PAIR_COUNT=0
-
-              while IFS= read -r -d '' status; do
-                case "$status" in
-                  R*|C*) IFS= read -r -d '' o; IFS= read -r -d '' n; old_rel_path="$o"; new_rel_path="$n" ;;
-                  D) IFS= read -r -d '' _; continue ;;
-                  *) IFS= read -r -d '' p; old_rel_path="$p"; new_rel_path="$p" ;;
-                esac
-
-                [[ "$new_rel_path" != *.go ]] && continue
-                [[ "$new_rel_path" == *_test.go ]] && continue
-                [[ "$new_rel_path" == *_generated.go ]] && continue
-                [[ "$new_rel_path" == vendor/* ]] && continue
-
-                NEW_FILE="$new_rel_path"
-                OLD_FILE="$WORKTREE_DIR/$old_rel_path"
-                [[ ! -f "$NEW_FILE" ]] && NEW_FILE="/dev/null"
-                [[ ! -f "$OLD_FILE" ]] && OLD_FILE="/dev/null"
-                [[ "$NEW_FILE" == "/dev/null" && "$OLD_FILE" == "/dev/null" ]] && continue
-
-                printf '%s\0%s\0' "$OLD_FILE" "$NEW_FILE" >> "$PAIRS_FILE"
-                ((PAIR_COUNT++)) || true
-              done < "$DIFF_STREAM_FILE"
-
-              if [[ $PAIR_COUNT -eq 0 ]]; then
+              # sfw prints one result per pair and exits non-zero after
+              # printing when a pair could not be diffed; that pair's entry
+              # carries the reason in "error". Keep stderr (warnings such as
+              # the runsc fallback notice) out of OUTPUT, which is parsed.
+              DIFF_ERR="$LOCAL_TEMP/sfw_diff_stderr.log"
+              set +e
+              OUTPUT=$(sfw diff --batch "$PAIRS_FILE" 2>"$DIFF_ERR")
+              set -e
+              if ! echo "$OUTPUT" | jq -e 'type == "array" and length == '"$PAIR_COUNT" >/dev/null 2>&1; then
+                echo "::error::sfw diff produced no result for the ${PAIR_COUNT} changed file(s)"
+                sed 's/^/  [sfw] /' "$DIFF_ERR" || true
                 OUTPUT="[]"
-                echo "semantic-match-pct=100.0" >> "$GITHUB_OUTPUT"
+                echo "semantic-match-pct=0.0" >> "$GITHUB_OUTPUT"
+                EXIT_CODE=1
               else
-                # sfw prints one result per pair and exits non-zero after
-                # printing when a pair could not be diffed; that pair's entry
-                # carries the reason in "error". Keep stderr (warnings such as
-                # the runsc fallback notice) out of OUTPUT, which is parsed.
-                DIFF_ERR="$LOCAL_TEMP/sfw_diff_stderr.log"
-                set +e
-                OUTPUT=$(sfw diff --batch "$PAIRS_FILE" 2>"$DIFF_ERR")
-                set -e
-                if ! echo "$OUTPUT" | jq -e 'type == "array" and length == '"$PAIR_COUNT" >/dev/null 2>&1; then
-                  echo "::error::sfw diff produced no result for the ${PAIR_COUNT} changed file(s)"
-                  sed 's/^/  [sfw] /' "$DIFF_ERR" || true
-                  OUTPUT="[]"
-                  echo "semantic-match-pct=0.0" >> "$GITHUB_OUTPUT"
-                  EXIT_CODE=1
-                else
-                  echo "$OUTPUT" | jq -r '.[] | select((.error // "") != "") | "::warning::sfw diff failed for \(.new_file): \(.error)"'
-                  ERROR_COUNT=$(echo "$OUTPUT" | jq '[.[] | select((.error // "") != "")] | length')
-                  TOTAL_MATCH_PCT=$(echo "$OUTPUT" | jq '[.[] | .summary.semantic_match_pct // 0] | add')
-                  AVG_PCT=$(echo "scale=1; $TOTAL_MATCH_PCT / $PAIR_COUNT" | bc)
-                  echo "semantic-match-pct=${AVG_PCT}" >> "$GITHUB_OUTPUT"
+                echo "$OUTPUT" | jq -r '.[] | select((.error // "") != "") | "::warning::sfw diff failed for \(.new_file): \(.error)"'
+                ERROR_COUNT=$(echo "$OUTPUT" | jq '[.[] | select((.error // "") != "")] | length')
+                TOTAL_MATCH_PCT=$(echo "$OUTPUT" | jq '[.[] | .summary.semantic_match_pct // 0] | add')
+                AVG_PCT=$(echo "scale=1; $TOTAL_MATCH_PCT / $PAIR_COUNT" | bc)
+                echo "semantic-match-pct=${AVG_PCT}" >> "$GITHUB_OUTPUT"
 
-                  # A file that could not be analyzed is not a passing file.
-                  if [[ $ERROR_COUNT -gt 0 ]]; then
-                    echo "::error::sfw diff failed for ${ERROR_COUNT} file(s)"
-                    EXIT_CODE=1
-                  fi
+                # A file that could not be analyzed is not a passing file.
+                if [[ $ERROR_COUNT -gt 0 ]]; then
+                  echo "::error::sfw diff failed for ${ERROR_COUNT} file(s)"
+                  EXIT_CODE=1
                 fi
               fi
             fi
@@ -513,49 +512,30 @@ runs:
                 *)          export OPENAI_API_KEY="$SFW_API_KEY" ;;
               esac
             fi
-            if [[ "${PREP_HAS_GO_FILES:-false}" != "true" ]]; then
+            if [[ $PAIR_COUNT -eq 0 ]]; then
               echo "audit-verdict=PASS" >> "$GITHUB_OUTPUT"
               OUTPUT="Audit Passed. (No Go files changed)"
             else
               AUDIT_FAILS=0
               AUDIT_PASS=0
 
-              if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+              if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" || "${GITHUB_EVENT_NAME:-}" == "pull_request_target" ]]; then
                  COMMIT_MSG="${PR_TITLE:-Untitled PR}
             ${PR_BODY:-No description provided}"
               else
                  COMMIT_MSG=$(git log -1 --pretty=%B 2>/dev/null || echo "No commit message")
               fi
 
-              while IFS= read -r -d '' status; do
-                case "$status" in
-                  R*|C*)
-                     IFS= read -r -d '' old_rel_path
-                     IFS= read -r -d '' new_rel_path
-                     ;;
-                  D)
-                     IFS= read -r -d '' _deleted_path
-                     continue
-                     ;;
-                  *)
-                     IFS= read -r -d '' path
-                     old_rel_path="$path"
-                     new_rel_path="$path"
-                     ;;
-                esac
-
-                [[ "$new_rel_path" != *.go ]] && continue
-                [[ "$new_rel_path" == *_test.go ]] && continue
-                [[ "$new_rel_path" == *_generated.go ]] && continue
-                [[ "$new_rel_path" == vendor/* ]] && continue
-                [[ ! -f "$new_rel_path" ]] && continue
-
-                NEW_FILE="$new_rel_path"
-                OLD_FILE="$WORKTREE_DIR/$old_rel_path"
-                
-                if [[ ! -f "$OLD_FILE" ]]; then
+              # The pairs come in on fd 3, so nothing sfw does with stdin
+              # can eat them.
+              while IFS= read -r -d '' -u 3 OLD_FILE && IFS= read -r -d '' -u 3 NEW_FILE; do
+                # An absent side is an empty file: a deleted file's checks
+                # are gone too.
+                if [[ "$OLD_FILE" == /dev/null ]]; then
                    OLD_FILE=$(mktemp -p "$LOCAL_TEMP" "empty_XXXXXX.go")
-                   : > "$OLD_FILE"
+                fi
+                if [[ "$NEW_FILE" == /dev/null ]]; then
+                   NEW_FILE=$(mktemp -p "$LOCAL_TEMP" "empty_XXXXXX.go")
                 fi
 
                 # Flags must precede the positional arguments: Go's flag
@@ -579,7 +559,7 @@ runs:
                 else
                    ((AUDIT_PASS++)) || true
                 fi
-              done < "$DIFF_STREAM_FILE"
+              done 3< "$PAIRS_FILE"
 
               if [[ $AUDIT_FAILS -eq 0 ]]; then
                  echo "audit-verdict=PASS" >> "$GITHUB_OUTPUT"

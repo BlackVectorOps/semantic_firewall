@@ -1202,7 +1202,7 @@ The Action does the following before running `sfw`:
 
 The base is checked out as a worktree under `RUNNER_TEMP`, outside the checkout, with the Action's other scratch files.
 
-`diff` and `audit` analyze every `.go` file changed between the base and `HEAD`, and ignore `path`. `diff` mode passes all changed files (except `_test.go`, `_generated.go` and `vendor/` files) to one [`sfw diff --batch`](#batch-mode) run, and fails the job if any file could not be diffed.
+`diff` and `audit` analyze every `.go` file changed between the base and `HEAD` except `_test.go` files, vendored and generated files included, and ignore `path`. git's status says which sides of a change exist, and an absent side is `/dev/null`: an added file is compared with nothing, and a deleted one too, so the checks it made count as removed. A rename stays one pair when both names are `.go` files in scope in the same directory. Otherwise the old name counts as deleted and the new one as added, so moving a file out of the build (to `foo_test.go`, `foo.go.bak`, `testdata/` or another package) reads as removing it. A copy counts as an added file. `diff` mode passes every pair to one [`sfw diff --batch`](#batch-mode) run, and fails the job if any file could not be diffed.
 
 `deps` mode runs [`sfw deps diff`](#sfw-deps-diff) on the base and `HEAD` versions of the module at `path`, which must contain `go.mod` in both. It runs only when a `go.mod`, `go.sum`, `go.work` or `go.work.sum` changed; otherwise `result` is `{}`. It first runs `go mod download` in both trees, each with the workspace that governs it. This fetches and verifies module zips against `go.sum` and runs no code. With `fail-on-alert`, the job fails when `high_risk_changes` is above 0.
 

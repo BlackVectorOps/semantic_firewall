@@ -247,7 +247,7 @@ func TestActionRunNeedsPrep(t *testing.T) {
 		cmd := exec.Command("bash", "-c", stepScript(t, "run-sfw"))
 		cmd.Dir = repo
 		cmd.Env = append(os.Environ(), "INPUT_MODE="+mode, "INPUT_PATH=.", "GITHUB_OUTPUT="+filepath.Join(t.TempDir(), "out"),
-			"RUNNER_TEMP="+t.TempDir(), "PREP_BASE_SHA=", "PREP_WORKTREE_DIR=", "PREP_DIFF_STREAM=")
+			"RUNNER_TEMP="+t.TempDir(), "PREP_BASE_SHA=", "PREP_WORKTREE_DIR=", "PREP_PAIRS_FILE=", "PREP_PAIR_COUNT=")
 		out, err := cmd.CombinedOutput()
 		if err == nil || !strings.Contains(string(out), "did not resolve a base") {
 			t.Errorf("%s: err %v; want a failure naming the missing base:\n%s", mode, err, out)
