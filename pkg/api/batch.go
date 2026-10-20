@@ -75,7 +75,7 @@ func DiffBatchWithFS(fsys FileSystem, pairs []DiffPair) []*models.DiffOutput {
 		case n.Err != nil:
 			out[i] = failedDiff(p, fmt.Errorf("failed to process new file: %w", n.Err))
 		default:
-			out[i] = diffResults(p.Old, p.New, o, n, riskProfile{})
+			out[i] = diffSides(p.Old, p.New, o, n)
 		}
 	}
 	return out
@@ -196,7 +196,7 @@ func fingerprintFiles(fsys FileSystem, paths []string, read inputReader, strict 
 	// which the loads above do not keep.
 	for _, f := range sources {
 		r := out[f.path]
-		r.source = parseUnanalyzed(f.content)
+		r.source = parseUnanalyzed(f.abs, f.content)
 		out[f.path] = r
 	}
 	return out

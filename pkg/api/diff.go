@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/ir"
@@ -34,7 +35,7 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 		if err != nil {
 			return FileFingerprints{Err: err}
 		}
-		return FileFingerprints{Results: inFile(results, absPath, paths), source: parseUnanalyzed(content)}
+		return FileFingerprints{Results: inFile(results, absPath, paths), source: parseUnanalyzed(absPath, content)}
 	}
 
 	// Load the two versions at the same time; report the old side's error
@@ -51,7 +52,55 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 	if newSide.Err != nil {
 		return nil, fmt.Errorf("failed to process new file: %w", newSide.Err)
 	}
-	return diffResults(oldPath, newPath, oldSide, newSide, riskProfile{}), nil
+	return diffSides(oldPath, newPath, oldSide, newSide), nil
+}
+
+// diffSides is diffResults for the two versions of one file, except when
+// the file left a default build it was in, or entered the default builds
+// from none (see diff.DefaultBuilds): a //go:build line, a GOOS or GOARCH
+// name suffix or an import "C" changed which builds compile it. Its
+// functions then left or entered those builds whatever their code, so the
+// old version is diffed as removed and the new one as added (when some
+// build still compiles it), and the result carries a "build" change in
+// Unanalyzed. Otherwise the versions are compared as usual.
+func diffSides(oldPath, newPath string, oldSide, newSide FileFingerprints) *models.DiffOutput {
+	if oldSide.absent || newSide.absent {
+		return diffResults(oldPath, newPath, oldSide, newSide, riskProfile{})
+	}
+	oldBuilds, newBuilds := oldSide.source.builds, newSide.source.builds
+	left := false
+	for _, b := range oldBuilds {
+		left = left || !slices.Contains(newBuilds, b)
+	}
+	entered := len(oldBuilds) == 0 && len(newBuilds) > 0
+	if !left && !entered {
+		return diffResults(oldPath, newPath, oldSide, newSide, riskProfile{})
+	}
+
+	absent := FileFingerprints{Results: []diff.FingerprintResult{}, absent: true}
+	var parts []*models.DiffOutput
+	change := "added"
+	if left {
+		parts = append(parts, diffResults(oldPath, newPath, oldSide, absent, riskProfile{}))
+		change = "removed"
+	}
+	if len(newBuilds) > 0 {
+		parts = append(parts, diffResults(oldPath, newPath, absent, newSide, riskProfile{}))
+		if left {
+			change = "modified"
+		}
+	}
+	out := &models.DiffOutput{OldFile: oldPath, NewFile: newPath, Functions: []models.FunctionDiff{}}
+	for _, p := range parts {
+		out.Functions = append(out.Functions, p.Functions...)
+		out.Unanalyzed = append(out.Unanalyzed, p.Unanalyzed...)
+		out.Summary.TotalFunctions += p.Summary.TotalFunctions
+		out.Summary.Added += p.Summary.Added
+		out.Summary.Removed += p.Summary.Removed
+		out.Summary.HighRiskChanges += p.Summary.HighRiskChanges
+	}
+	out.Unanalyzed = append(out.Unanalyzed, models.FileChange{File: newPath, Kind: "build", Change: change})
+	return out
 }
 
 // diffResults pairs the fingerprinted functions of two versions of a file,

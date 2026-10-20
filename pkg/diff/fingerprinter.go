@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"go/build"
 	"go/build/constraint"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"go/version"
@@ -495,6 +496,54 @@ var knownPlatforms = [][2]string{
 	{"freebsd", "amd64"}, {"freebsd", "arm64"}, {"netbsd", "amd64"}, {"openbsd", "amd64"},
 	{"dragonfly", "amd64"}, {"solaris", "amd64"}, {"illumos", "amd64"}, {"aix", "ppc64"},
 	{"android", "arm64"}, {"ios", "arm64"}, {"js", "wasm"}, {"wasip1", "wasm"}, {"plan9", "amd64"},
+}
+
+// DefaultBuilds lists the builds without custom tags that compile the
+// file at absFilename with content src: each GOOS/GOARCH pair, the host's
+// first and then knownPlatforms, as "goos/goarch" with cgo disabled and
+// "goos/goarch/cgo" with it enabled. Name suffixes, //go:build lines,
+// import "C" and the go command's skipping of names starting with "_" or
+// "." all count; a _test.go file is in none.
+func DefaultBuilds(absFilename, src string) []string {
+	if strings.HasSuffix(absFilename, "_test.go") {
+		return nil
+	}
+	ctxt := build.Default
+	ctxt.BuildTags = nil
+	ctxt.OpenFile = func(path string) (io.ReadCloser, error) {
+		if filepath.Clean(path) == absFilename {
+			return io.NopCloser(strings.NewReader(src)), nil
+		}
+		return nil, fmt.Errorf("%s: not the file being matched", path)
+	}
+	// MatchFile leaves import "C" to Import, which drops such a file
+	// from builds without cgo.
+	cgoOnly := false
+	if f, err := parser.ParseFile(token.NewFileSet(), absFilename, src, parser.ImportsOnly); err == nil {
+		for _, imp := range f.Imports {
+			cgoOnly = cgoOnly || imp.Path.Value == `"C"`
+		}
+	}
+	dir, name := filepath.Dir(absFilename), filepath.Base(absFilename)
+	var builds []string
+	seen := make(map[string]bool)
+	for _, p := range append([][2]string{{build.Default.GOOS, build.Default.GOARCH}}, knownPlatforms...) {
+		for _, cgo := range []bool{false, true} {
+			key := p[0] + "/" + p[1]
+			if cgo {
+				key += "/cgo"
+			}
+			if seen[key] || (cgoOnly && !cgo) {
+				continue
+			}
+			seen[key] = true
+			ctxt.GOOS, ctxt.GOARCH, ctxt.CgoEnabled = p[0], p[1], cgo
+			if match, err := ctxt.MatchFile(dir, name); err == nil && match {
+				builds = append(builds, key)
+			}
+		}
+	}
+	return builds
 }
 
 // maxCustomTags bounds the tag subsets buildConfigFor tries (2^n).
