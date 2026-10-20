@@ -1202,7 +1202,9 @@ The Action does the following before running `sfw`:
 
 The base is checked out as a worktree under `RUNNER_TEMP`, outside the checkout, with the Action's other scratch files.
 
-`diff` and `audit` analyze every `.go` file changed between the base and `HEAD` except `_test.go` files, vendored and generated files included, and ignore `path`. git's status says which sides of a change exist, and an absent side is `/dev/null`: an added file is compared with nothing, and a deleted one too, so the checks it made count as removed. A rename stays one pair when both names are `.go` files in scope in the same directory. Otherwise the old name counts as deleted and the new one as added, so moving a file out of the build (to `foo_test.go`, `foo.go.bak`, `testdata/` or another package) reads as removing it. A copy counts as an added file. Text that comes from the change, such as file names and `sfw` or LLM output, is escaped in annotations and printed to the log with workflow commands stopped, so it cannot issue commands of its own. `diff` mode passes every pair to one [`sfw diff --batch`](#batch-mode) run, and fails the job if any file could not be diffed.
+`diff` and `audit` analyze every `.go` file changed between the base and `HEAD` except `_test.go` files, vendored and generated files included, and ignore `path`. git's status says which sides of a change exist, and an absent side is `/dev/null`: an added file is compared with nothing, and a deleted one too, so the checks it made count as removed. A rename stays one pair when both names are `.go` files in scope in the same directory. Otherwise the old name counts as deleted and the new one as added, so moving a file out of the build (to `foo_test.go`, `foo.go.bak`, `testdata/` or another package) reads as removing it. A copy counts as an added file. Text that comes from the change, such as file names and `sfw` or LLM output, is escaped in annotations and printed to the log with workflow commands stopped, so it cannot issue commands of its own. `diff` mode passes every pair to one [`sfw diff --batch`](#batch-mode) run, and fails the job if any file could not be diffed. With `fail-on-alert`, the default, it also fails when `high_risk_changes` summed over the files is above 0, and each high-risk change gets an error annotation on its file (a warning when `fail-on-alert` is `false`).
+
+A pull request runs the workflow as the pull request has it, so it can edit or remove the step that runs the Action. Make the check a required status check, and review changes to `.github/workflows/` with that in mind.
 
 `deps` mode runs [`sfw deps diff`](#sfw-deps-diff) on the base and `HEAD` versions of the module at `path`, which must contain `go.mod` in both. It runs only when a `go.mod`, `go.sum`, `go.work` or `go.work.sum` changed; otherwise `result` is `{}`. It first runs `go mod download` in both trees, each with the workspace that governs it. This fetches and verifies module zips against `go.sum` and runs no code. With `fail-on-alert`, the job fails when `high_risk_changes` is above 0.
 
@@ -1214,7 +1216,7 @@ The base is checked out as a worktree under `RUNNER_TEMP`, outside the checkout,
 | `signatures` | — | database path, required for `scan`; `.json` selects the JSON backend |
 | `threshold` | `0.75` | scan threshold |
 | `strict` | `false` | `check --strict` |
-| `fail-on-alert` | `true` | fail a `scan` with `total_alerts > 0`, or `deps` with `high_risk_changes > 0` |
+| `fail-on-alert` | `true` | fail a `scan` with `total_alerts > 0`, or `diff` or `deps` with `high_risk_changes > 0`; any value but `true` or `false` fails the job |
 | `scan-deps` | `false` | `scan --deps` |
 | `deps-depth` | `direct` | `scan --deps-depth` |
 | `api-key` | — | exported to the provider's variable according to `model` |
@@ -1227,7 +1229,7 @@ The outputs are:
 - `deps-scanned`
 - `semantic-match-pct`, the mean over changed files
 - `audit-verdict`, `PASS` or `FAIL`
-- `high-risk-changes`, from `deps` mode
+- `high-risk-changes`, from `diff` and `deps` modes
 
 ## Library usage
 

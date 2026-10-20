@@ -33,7 +33,7 @@ inputs:
     required: false
     default: 'false'
   fail-on-alert:
-    description: 'Fail workflow if malware is detected (scan mode) or a dependency change is high-risk (deps mode)'
+    description: 'Fail workflow if malware is detected (scan mode) or a change is high-risk (diff and deps modes): true or false'
     required: false
     default: 'true'
   scan-deps:
@@ -72,7 +72,7 @@ outputs:
     description: 'Final audit verdict (audit mode): PASS or FAIL'
     value: ${{ steps.run-sfw.outputs.audit-verdict }}
   high-risk-changes:
-    description: 'Number of high-risk dependency changes (deps mode)'
+    description: 'Number of high-risk changes (diff and deps modes)'
     value: ${{ steps.run-sfw.outputs.high-risk-changes }}
 
 runs:
@@ -356,6 +356,12 @@ runs:
           exit 1
         fi
 
+        # Anything but true or false is a mistake, not a quiet "off".
+        case "${INPUT_FAIL_ON_ALERT:-true}" in
+          true|false) FAIL_ON_ALERT="${INPUT_FAIL_ON_ALERT:-true}" ;;
+          *) echo "::error::fail-on-alert must be true or false, not '$(gh_msg "$INPUT_FAIL_ON_ALERT")'."; exit 1 ;;
+        esac
+
         EXIT_CODE=0
         # Outside the checkout, whose paths the analyzed change controls.
         LOCAL_TEMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/sfw-run.XXXXXXXX")
@@ -388,6 +394,7 @@ runs:
 
           diff)
             # One sfw run diffs every pair, loading each tree's packages once.
+            HIGH_RISK=0
             if [[ $PAIR_COUNT -eq 0 ]]; then
               OUTPUT="[]"
               echo "semantic-match-pct=100.0" >> "$GITHUB_OUTPUT"
@@ -399,8 +406,11 @@ runs:
               DIFF_ERR="$LOCAL_TEMP/sfw_diff_stderr.log"
               set +e
               OUTPUT=$(sfw diff --batch "$PAIRS_FILE" 2>"$DIFF_ERR")
+              SFW_RC=$?
               set -e
-              if ! echo "$OUTPUT" | jq -e 'type == "array" and length == '"$PAIR_COUNT" >/dev/null 2>&1; then
+              # One JSON array, one result per pair: -s, because jq alone
+              # reads several documents in a row and judges each.
+              if ! printf '%s' "$OUTPUT" | jq -s -e 'length == 1 and (.[0] | type == "array" and length == '"$PAIR_COUNT"')' >/dev/null 2>&1; then
                 echo "::error::sfw diff produced no result for the ${PAIR_COUNT} changed file(s)"
                 raw_log < "$DIFF_ERR"
                 OUTPUT="[]"
@@ -418,11 +428,41 @@ runs:
                 AVG_PCT=$(echo "scale=1; $TOTAL_MATCH_PCT / $PAIR_COUNT" | bc)
                 echo "semantic-match-pct=${AVG_PCT}" >> "$GITHUB_OUTPUT"
 
-                # A file that could not be analyzed is not a passing file.
+                # A file that could not be analyzed is not a passing file,
+                # and neither is a run that failed without saying which.
                 if [[ $ERROR_COUNT -gt 0 ]]; then
                   echo "::error::sfw diff failed for ${ERROR_COUNT} file(s)"
                   EXIT_CODE=1
+                elif [[ $SFW_RC -ne 0 ]]; then
+                  echo "::error::sfw diff exited with status ${SFW_RC}"
+                  raw_log < "$DIFF_ERR"
+                  EXIT_CODE=1
                 fi
+
+                HIGH_RISK=$(echo "$OUTPUT" | jq '[.[] | .summary.high_risk_changes // 0] | add // 0')
+                # One annotation per high-risk change, on its file.
+                LEVEL=warning
+                if [[ "$FAIL_ON_ALERT" == "true" ]]; then LEVEL=error; fi
+                echo "$OUTPUT" | jq -r --arg level "$LEVEL" 'def esc: gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A");
+                  def prop: esc | gsub(":"; "%3A") | gsub(","; "%2C");
+                  .[] | (if .new_file == "/dev/null" then .old_file else .new_file end) as $f
+                  | ((.functions // [])[] | select((.risk_score // 0) >= 10)
+                      | "::\($level) file=\($f | prop)::\(.function | esc) \(.status), risk \(.risk_score)\(if (.topology_delta // "") != "" then ": " + (.topology_delta | esc) else "" end)"),
+                    ((.unanalyzed // [])[] | select((.risk_score // 0) >= 10)
+                      | "::\($level) file=\($f | prop)::\(.kind | esc) \(.change | esc), risk \(.risk_score)")'
+              fi
+            fi
+            if [[ ! "$HIGH_RISK" =~ ^[0-9]+$ ]]; then
+              echo "::error::sfw diff gave no high-risk count."
+              exit 1
+            fi
+            echo "high-risk-changes=${HIGH_RISK}" >> "$GITHUB_OUTPUT"
+            if [[ $HIGH_RISK -gt 0 ]]; then
+              if [[ "$FAIL_ON_ALERT" == "true" ]]; then
+                echo "::error::${HIGH_RISK} high-risk change(s)"
+                EXIT_CODE=1
+              else
+                echo "::warning::${HIGH_RISK} high-risk change(s)"
               fi
             fi
             ;;
@@ -441,8 +481,7 @@ runs:
               # Downloading only fetches and verifies module zips against
               # go.sum; it runs no code. Each tree builds with the go.work
               # above it, but the search stops at the tree's root (a .git
-              # entry), as sfw's does: the base worktree sits inside the
-              # head's checkout and must not take its workspace.
+              # entry), as sfw's does.
               governing_work() {
                 local d
                 d=$(cd "$1" && pwd)
@@ -466,11 +505,15 @@ runs:
                 exit 1
               fi
               printf '%s\n' "$OUTPUT" | raw_log
-              HIGH_RISK=$(echo "$OUTPUT" | jq -r '.summary.high_risk_changes // 0')
+              HIGH_RISK=$(printf '%s' "$OUTPUT" | jq -s -r 'if length == 1 then .[0].summary.high_risk_changes // 0 else "" end' 2>/dev/null || true)
+              if [[ ! "$HIGH_RISK" =~ ^[0-9]+$ ]]; then
+                echo "::error::sfw deps diff gave no high-risk count."
+                exit 1
+              fi
               echo "high-risk-changes=${HIGH_RISK}" >> "$GITHUB_OUTPUT"
               if [[ "$HIGH_RISK" -gt 0 ]]; then
                 echo "::warning::${HIGH_RISK} high-risk dependency change(s)"
-                if [[ "${INPUT_FAIL_ON_ALERT:-true}" == "true" ]]; then
+                if [[ "$FAIL_ON_ALERT" == "true" ]]; then
                   EXIT_CODE=1
                 fi
               fi
@@ -506,12 +549,16 @@ runs:
             if [[ -s "$SCAN_STDERR_FILE" ]]; then raw_log < "$SCAN_STDERR_FILE"; fi
             printf '%s\n' "$OUTPUT" | raw_log
 
-            ALERT_COUNT=$(echo "$OUTPUT" | jq -r '.summary.total_alerts // 0')
+            ALERT_COUNT=$(printf '%s' "$OUTPUT" | jq -s -r 'if length == 1 then .[0].summary.total_alerts // 0 else "" end' 2>/dev/null || true)
+            DEPS_SCANNED=$(printf '%s' "$OUTPUT" | jq -s -r 'if length == 1 then .[0].dependencies_scanned // 0 else "" end' 2>/dev/null || true)
+            if [[ ! "$ALERT_COUNT" =~ ^[0-9]+$ ]] || [[ ! "$DEPS_SCANNED" =~ ^[0-9]+$ ]]; then
+              echo "::error::sfw scan gave no alert count."
+              exit 1
+            fi
             echo "alert-count=${ALERT_COUNT}" >> "$GITHUB_OUTPUT"
-            DEPS_SCANNED=$(echo "$OUTPUT" | jq -r '.dependencies_scanned // 0')
             echo "deps-scanned=${DEPS_SCANNED}" >> "$GITHUB_OUTPUT"
-            
-            if [[ "${INPUT_FAIL_ON_ALERT:-true}" == "true" ]] && [[ "$ALERT_COUNT" -gt 0 ]]; then
+
+            if [[ "$FAIL_ON_ALERT" == "true" ]] && [[ "$ALERT_COUNT" -gt 0 ]]; then
               EXIT_CODE=1
             fi
             ;;

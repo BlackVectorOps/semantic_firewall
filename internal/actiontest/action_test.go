@@ -312,7 +312,7 @@ func TestActionDiffMode(t *testing.T) {
 		"vendor/v/v.go":    str("package v\n\nfunc V() {}\n"),
 		"p/z_generated.go": str("package p\n\nfunc Gen() int { return 2 }\n"),
 	})
-	res := runAction(t, repo, map[string]string{"INPUT_MODE": "diff", "INPUT_PATH": "."})
+	res := runAction(t, repo, map[string]string{"INPUT_MODE": "diff", "INPUT_PATH": ".", "INPUT_FAIL_ON_ALERT": "false"})
 	if res.exitCode != 0 {
 		t.Fatalf("diff mode exit %d:\n%s", res.exitCode, res.log)
 	}
