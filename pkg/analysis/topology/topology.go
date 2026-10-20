@@ -59,6 +59,12 @@ type FunctionTopology struct {
 	// so these are not in Checks.
 	MovedChecks map[string]string
 
+	// HelperMovedChecks maps the name-based checks made by the helpers
+	// this function calls in a way that passes checks (see
+	// collectCheckHelpers) to those helpers' keys, sorted. They are not in
+	// Checks: they only explain where a check gone from Checks went.
+	HelperMovedChecks map[string][]string
+
 	// CapabilityGuards maps each Capabilities key to the fewest conditional
 	// branches, loop conditions excluded, that any of its references in this
 	// function is control-dependent on. 0 means some reference runs

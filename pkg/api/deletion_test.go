@@ -338,6 +338,46 @@ func validName(s string) bool { return s != "" }
 func validateHeaders(h map[string]string) string { for k := range h { if !validName(k) { return k } }; return "" }
 func Encode(h map[string]string) error { if bad := validateHeaders(h); bad != "" { return errors.New("bad header " + bad) }; return nil }
 `},
+		{name: "checks moved into a helper whose error decides", fn: "Encode", label: "RemovedCheck",
+			oldSrc: `package p
+import "errors"
+func validName(s string) bool { return s != "" }
+func Encode(h map[string]string) error { for k := range h { if !validName(k) { return errors.New("bad header") } }; return nil }
+`,
+			newSrc: `package p
+import "errors"
+func validName(s string) bool { return s != "" }
+func process(h map[string]string) error { for k := range h { if !validName(k) { return errors.New("bad header") } }; return nil }
+func Encode(h map[string]string) error { if err := process(h); err != nil { return err }; return nil }
+`},
+		{name: "a call to a checking helper dropped is not flagged", fn: "Encode", label: "RemovedCheck",
+			oldSrc: `package p
+import "errors"
+func validName(s string) bool { return s != "" }
+func process(h map[string]string) error { for k := range h { if !validName(k) { return errors.New("bad header") } }; return nil }
+func Encode(h map[string]string) error { if err := process(h); err != nil { return err }; return nil }
+`,
+			newSrc: `package p
+import "errors"
+func validName(s string) bool { return s != "" }
+func process(h map[string]string) error { for k := range h { if !validName(k) { return errors.New("bad header") } }; return nil }
+func Encode(h map[string]string) error { return nil }
+`},
+		{name: "a helper another function calls explains nothing", fn: "Encode", label: "RemovedCheck(command-line-arguments.validName)", high: true,
+			oldSrc: `package p
+import "errors"
+func validName(s string) bool { return s != "" }
+func process(h map[string]string) error { for k := range h { if !validName(k) { return errors.New("bad header") } }; return nil }
+func Decode(h map[string]string) error { return process(h) }
+func Encode(h map[string]string) error { for k := range h { if !validName(k) { return errors.New("bad header") } }; return nil }
+`,
+			newSrc: `package p
+import "errors"
+func validName(s string) bool { return s != "" }
+func process(h map[string]string) error { for k := range h { if !validName(k) { return errors.New("bad header") } }; return nil }
+func Decode(h map[string]string) error { return process(h) }
+func Encode(h map[string]string) error { return nil }
+`},
 		{name: "a check's role getter removed", fn: "Implicit", label: "RemovedCheck",
 			oldSrc: `package p
 type RM interface{ GetRoles(string) ([]string, error) }
