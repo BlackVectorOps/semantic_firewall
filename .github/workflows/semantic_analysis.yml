@@ -24,19 +24,33 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          # Match the version go.mod requires. sfw runs the loader with
-          # GOTOOLCHAIN=local, so a mismatched toolchain can't auto-upgrade and
-          # `go list` refuses with "go.mod requires go >= X (running go Y)".
-          go-version-file: 'go.mod'
+          # The newest 1.27 patch release, at least what go.mod requires: sfw
+          # runs the loader with GOTOOLCHAIN=local, so an older toolchain
+          # can't auto-upgrade and `go list` refuses.
+          go-version: '1.27'
+          check-latest: true
           cache: true
 
       - name: Build SFW
         # Built from this commit's source, outside the checkout, and put on
         # PATH, where the Action below takes it instead of installing a
-        # release.
+        # release. The wrapper adds --no-sandbox: gVisor's rootless run fails
+        # on GitHub-hosted runners ("gofer: fork/exec /proc/self/exe:
+        # operation not permitted"), and before this workflow ran the Action,
+        # sfw fell back to running unsandboxed here anyway, for lack of runsc.
         run: |
           mkdir -p "$RUNNER_TEMP/sfw-bin"
-          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/sfw-bin/sfw" ./cmd/sfw
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/sfw-bin/sfw-real" ./cmd/sfw
+          cat > "$RUNNER_TEMP/sfw-bin/sfw" <<EOF
+          #!/bin/bash
+          cmd=\$1; shift
+          case "\$cmd" in
+            deps) sub=\$1; shift; exec "$RUNNER_TEMP/sfw-bin/sfw-real" deps "\$sub" --no-sandbox "\$@" ;;
+            check|diff|scan|audit) exec "$RUNNER_TEMP/sfw-bin/sfw-real" "\$cmd" --no-sandbox "\$@" ;;
+            *) exec "$RUNNER_TEMP/sfw-bin/sfw-real" "\$cmd" "\$@" ;;
+          esac
+          EOF
+          chmod +x "$RUNNER_TEMP/sfw-bin/sfw"
           "$RUNNER_TEMP/sfw-bin/sfw" version
           echo "$RUNNER_TEMP/sfw-bin" >> "$GITHUB_PATH"
 

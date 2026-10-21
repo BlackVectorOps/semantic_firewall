@@ -22,7 +22,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: 'go.mod'
+          # The newest 1.27 patch release: go.mod's go line is only the
+          # floor, and standard-library fixes ship in patch releases.
+          go-version: '1.27'
+          check-latest: true
           cache: true
 
       - name: Tools the Action tests need
@@ -49,7 +52,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: 'go.mod'
+          # The newest 1.27 patch release: go.mod's go line is only the
+          # floor, and standard-library fixes ship in patch releases.
+          go-version: '1.27'
+          check-latest: true
           cache: true
 
       - name: Tools the Action tests need
