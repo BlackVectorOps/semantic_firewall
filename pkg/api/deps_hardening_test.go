@@ -498,6 +498,8 @@ func TestDepsDiff_AssemblyIncludes(t *testing.T) {
 		"assembly modified impl/b.inc":    5,
 		"assembly modified impl/sp.inc":   5,
 		"assembly modified impl/abs.inc":  5,
+		// Not included, but a module with assembly lists every file.
+		"other modified impl/not.inc": 5,
 	}
 	for k, risk := range want {
 		if r, ok := got[k]; !ok || r != risk {
