@@ -262,15 +262,19 @@ runs:
           echo "has_mod_changes=false" >> "$GITHUB_OUTPUT"
         fi
 
-        # The old/new pairs diff and audit analyze: every changed Go file
-        # but tests, vendored and generated files included, since all of
-        # them compile. The status letter, not the file system, says which
-        # sides exist, and /dev/null stands for an absent one, so a deleted
-        # file is compared with nothing. A rename stays one pair only within
-        # a directory with both names in scope; otherwise it is a deletion
-        # plus an addition, so a file moved out of the build (foo_test.go,
+        # The old/new pairs diff and audit analyze: every changed file but Go
+        # tests, vendored and generated files included. sfw diffs the Go
+        # files and, with --non-go, reports the other files the build uses
+        # (assembly, C, objects, embedded files). The status letter, not the
+        # file system, says which sides exist, and /dev/null stands for an
+        # absent one, so a deleted file is compared with nothing. A rename
+        # stays one pair only within a directory, with both names in scope
+        # and both Go or both not; otherwise it is a deletion plus an
+        # addition, so a file moved out of the build (foo_test.go,
         # foo.go.bak, another directory) reads as removed.
-        in_scope() { [[ "$1" == *.go && "$1" != *_test.go ]]; }
+        is_go() { [[ "$1" == *.go ]]; }
+        in_scope() { [[ "$1" != *_test.go ]]; }
+        same_kind() { if is_go "$1"; then is_go "$2"; else ! is_go "$2"; fi; }
         dir_of() { if [[ "$1" == */* ]]; then printf '%s' "${1%/*}"; else printf '.'; fi; }
         PAIRS_FILE="$WORK/pairs.bin"
         : > "$PAIRS_FILE"
@@ -306,7 +310,7 @@ runs:
             D) old_side "$o" ;;
             M|T) if in_scope "$n"; then pair "$WORKTREE_DIR/$o" "$n"; fi ;;
             R*)
-              if in_scope "$o" && in_scope "$n" && [[ "$(dir_of "$o")" == "$(dir_of "$n")" ]]; then
+              if in_scope "$o" && in_scope "$n" && [[ "$(dir_of "$o")" == "$(dir_of "$n")" ]] && same_kind "$o" "$n"; then
                 pair "$WORKTREE_DIR/$o" "$n"
               else
                 old_side "$o"; new_side "$n"
@@ -322,7 +326,7 @@ runs:
         # share that is not paired already.
         while IFS= read -r -d '' entry; do
           p=${entry#*$'\t'}
-          if [[ "${entry%% *}" == 120000 ]] && in_scope "$p" && [[ -z "${PAIRED[$p]:-}" ]] &&
+          if [[ "${entry%% *}" == 120000 ]] && is_go "$p" && in_scope "$p" && [[ -z "${PAIRED[$p]:-}" ]] &&
              git cat-file -e "${BASE}:${p}" 2>/dev/null; then
             pair "$WORKTREE_DIR/$p" "$p"
           fi
@@ -402,6 +406,7 @@ runs:
         # newline can't end it and start another; raw_log prints its input
         # with commands stopped, behind a token nobody can predict.
         gh_msg() { local s="$1"; s=${s//%/%25}; s=${s//$'\r'/%0D}; s=${s//$'\n'/%0A}; printf '%s' "$s"; }
+        is_go_path() { [[ "$1" == *.go ]]; }
         gh_prop() { local s; s=$(gh_msg "$1"); s=${s//:/%3A}; s=${s//,/%2C}; printf '%s' "$s"; }
         TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
         [[ ${#TOKEN} -eq 32 ]] || { echo "::error::Cannot read /dev/urandom."; exit 1; }
@@ -481,7 +486,7 @@ runs:
               # the runsc fallback notice) out of OUTPUT, which is parsed.
               DIFF_ERR="$LOCAL_TEMP/sfw_diff_stderr.log"
               set +e
-              OUTPUT=$(sfw diff --batch "$PAIRS_FILE" 2>"$DIFF_ERR")
+              OUTPUT=$(sfw diff --non-go --batch "$PAIRS_FILE" 2>"$DIFF_ERR")
               SFW_RC=$?
               set -e
               # One JSON array, one result per pair: -s, because jq alone
@@ -495,14 +500,22 @@ runs:
                 EXIT_CODE=1
               else
                 # Results name the base side by its path in the repository,
-                # not in the scratch worktree.
-                OUTPUT=$(echo "$OUTPUT" | jq --arg wt "$WORKTREE_DIR/" 'map(.old_file |= ltrimstr($wt) | if (.error | type) == "string" then .error |= (split($wt) | join("")) else . end)')
+                # not in the scratch worktree. A file the build doesn't use
+                # (docs, configuration) gives an empty result, left out.
+                OUTPUT=$(echo "$OUTPUT" | jq --arg wt "$WORKTREE_DIR/" 'map(.old_file |= ltrimstr($wt) | if (.error | type) == "string" then .error |= (split($wt) | join("")) else . end)
+                  | map(select(((.functions // []) | length) > 0 or ((.unanalyzed // []) | length) > 0 or (.error // "") != ""))')
                 echo "$OUTPUT" | jq -r 'def esc: gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A");
                   .[] | select((.error // "") != "")
                   | "::warning::sfw diff failed for \(if .new_file == "/dev/null" then .old_file else .new_file end | esc): \(.error | esc)"'
                 ERROR_COUNT=$(echo "$OUTPUT" | jq '[.[] | select((.error // "") != "")] | length')
-                TOTAL_MATCH_PCT=$(echo "$OUTPUT" | jq '[.[] | .summary.semantic_match_pct // 0] | add')
-                AVG_PCT=$(echo "scale=1; $TOTAL_MATCH_PCT / $PAIR_COUNT" | bc)
+                # The mean over the files that have functions to match.
+                FUNC_FILES=$(echo "$OUTPUT" | jq '[.[] | select((.summary.total_functions // 0) > 0)] | length')
+                if [[ $FUNC_FILES -eq 0 ]]; then
+                  AVG_PCT="100.0"
+                else
+                  TOTAL_MATCH_PCT=$(echo "$OUTPUT" | jq '[.[] | select((.summary.total_functions // 0) > 0) | .summary.semantic_match_pct // 0] | add')
+                  AVG_PCT=$(echo "scale=1; $TOTAL_MATCH_PCT / $FUNC_FILES" | bc)
+                fi
                 echo "semantic-match-pct=${AVG_PCT}" >> "$GITHUB_OUTPUT"
 
                 # A file that could not be analyzed is not a passing file,
@@ -658,7 +671,13 @@ runs:
             fi
             AUDIT_FAILS=0
             AUDIT_PASS=0
+            NON_GO_FAILS=0
             if [[ $PAIR_COUNT -gt 0 ]]; then
+              # The model reads Go. Files the build uses that are not Go go
+              # to sfw diff --non-go, and any high-risk one fails the audit.
+              NON_GO_PAIRS="$LOCAL_TEMP/non_go_pairs.bin"
+              : > "$NON_GO_PAIRS"
+              NON_GO_COUNT=0
               if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" || "${GITHUB_EVENT_NAME:-}" == "pull_request_target" ]]; then
                  COMMIT_MSG="${PR_TITLE:-Untitled PR}
             ${PR_BODY:-No description provided}"
@@ -669,6 +688,11 @@ runs:
               # The pairs come in on fd 3, so nothing sfw does with stdin
               # can eat them.
               while IFS= read -r -d '' -u 3 OLD_FILE && IFS= read -r -d '' -u 3 NEW_FILE; do
+                if ! is_go_path "$OLD_FILE" && ! is_go_path "$NEW_FILE"; then
+                   printf '%s\0%s\0' "$OLD_FILE" "$NEW_FILE" >> "$NON_GO_PAIRS"
+                   NON_GO_COUNT=$((NON_GO_COUNT + 1))
+                   continue
+                fi
                 # An absent side is an empty file: a deleted file's checks
                 # are gone too.
                 if [[ "$OLD_FILE" == /dev/null ]]; then
@@ -700,6 +724,27 @@ runs:
                    ((AUDIT_PASS++)) || true
                 fi
               done 3< "$PAIRS_FILE"
+
+              if [[ $NON_GO_COUNT -gt 0 ]]; then
+                NON_GO_ERR="$LOCAL_TEMP/sfw_non_go_stderr.log"
+                set +e
+                NON_GO_OUT=$(sfw diff --non-go --batch "$NON_GO_PAIRS" 2>"$NON_GO_ERR")
+                NON_GO_RC=$?
+                set -e
+                if [[ $NON_GO_RC -ne 0 ]] || ! printf '%s' "$NON_GO_OUT" | jq -s -e 'length == 1 and (.[0] | type == "array" and length == '"$NON_GO_COUNT"')' >/dev/null 2>&1; then
+                  echo "::error::sfw could not check the ${NON_GO_COUNT} changed non-Go file(s)"
+                  raw_log < "$NON_GO_ERR"
+                  NON_GO_FAILS=$NON_GO_COUNT
+                else
+                  NON_GO_FAILS=$(printf '%s' "$NON_GO_OUT" | jq '[.[] | select((.summary.high_risk_changes // 0) > 0)] | length')
+                  printf '%s' "$NON_GO_OUT" | jq -r --arg wt "$WORKTREE_DIR/" 'def esc: gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A");
+                    def prop: esc | gsub(":"; "%3A") | gsub(","; "%2C");
+                    .[] | (if .new_file == "/dev/null" then .old_file | ltrimstr($wt) else .new_file end) as $f
+                    | (.unanalyzed // [])[] | select((.risk_score // 0) >= 10)
+                    | "::error file=\($f | prop)::\(.kind | esc) \(.change | esc), risk \(.risk_score): the audit cannot read it"'
+                fi
+                if [[ $NON_GO_FAILS -gt 0 ]]; then EXIT_CODE=1; fi
+              fi
             fi
 
             # The audit can't read a submodule's change, so it doesn't pass.
@@ -710,13 +755,13 @@ runs:
 
             if [[ $PAIR_COUNT -eq 0 && $GITLINK_COUNT -eq 0 ]]; then
               echo "audit-verdict=PASS" >> "$GITHUB_OUTPUT"
-              OUTPUT="Audit Passed. (No Go files changed)"
-            elif [[ $AUDIT_FAILS -eq 0 && $GITLINK_COUNT -eq 0 ]]; then
+              OUTPUT="Audit Passed. (No files to audit)"
+            elif [[ $AUDIT_FAILS -eq 0 && $GITLINK_COUNT -eq 0 && $NON_GO_FAILS -eq 0 ]]; then
               echo "audit-verdict=PASS" >> "$GITHUB_OUTPUT"
               OUTPUT="Audit Passed. (${AUDIT_PASS} file(s) verified)"
             else
               echo "audit-verdict=FAIL" >> "$GITHUB_OUTPUT"
-              OUTPUT="Audit Failed. (${AUDIT_FAILS} deception(s) detected, ${GITLINK_COUNT} submodule change(s) not audited)"
+              OUTPUT="Audit Failed. (${AUDIT_FAILS} deception(s) detected, ${NON_GO_FAILS} non-Go and ${GITLINK_COUNT} submodule change(s) not audited)"
             fi
             ;;
           *)
