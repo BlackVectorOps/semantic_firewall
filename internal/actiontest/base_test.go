@@ -258,6 +258,14 @@ func TestActionBaseFailsClosed(t *testing.T) {
 			repo, shas := commitsRepo(t, baseFiles(), map[string]*string{"p/p.go": str(changedSrc)}, map[string]*string{"q/q.go": str("package q\n")})
 			return repo, map[string]string{"GITHUB_EVENT_NAME": "merge_group", "MG_BASE_SHA": shas[0], "MG_HEAD_SHA": shas[1]}
 		}, "HEAD is not the merge group head"},
+		// The default branch already holds the push, so it can't tell
+		// what the push changed.
+		"force push to the default branch, before gone": {func(t *testing.T) (string, map[string]string) {
+			up, _, pr := upstream(t)
+			gitIn(t, up)("update-ref", "refs/heads/main", pr)
+			clone, _ := cloneOf(t, up)
+			return clone, map[string]string{"GITHUB_EVENT_BEFORE": goneSHA, "DEFAULT_BRANCH": "main"}
+		}, "The base is HEAD itself"},
 		"other event, single commit": {func(t *testing.T) (string, map[string]string) {
 			repo, _ := commitsRepo(t, baseFiles())
 			return repo, map[string]string{"GITHUB_EVENT_NAME": "workflow_dispatch"}

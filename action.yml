@@ -219,8 +219,10 @@ runs:
               BASE=$(single_merge_base "refs/remotes/origin/$DEFAULT_BRANCH") ||
                 fail "HEAD and ${DEFAULT_BRANCH} have no single merge base. Use fetch-depth: 0."
               echo "::notice::The push has no usable before commit; comparing with ${DEFAULT_BRANCH}."
-              # HEAD already on the default branch adds nothing to compare.
-              SAME_OK=true
+              # A new branch or tag already on the default branch adds
+              # nothing to compare. A force push whose before is gone does
+              # not get that pass: the default branch may already hold it.
+              if [[ "${GITHUB_EVENT_BEFORE:-}" =~ ^0+$ ]]; then SAME_OK=true; fi
             fi
             ;;
           *)
@@ -242,11 +244,14 @@ runs:
         # -z everywhere: without it git quotes unusual names ("p/\303\251.go"),
         # and the suffix tests miss them.
         DIFF_STREAM_FILE="$WORK/diff.bin"
-        git diff -z --raw --no-abbrev --no-ext-diff "$BASE" "$HEAD_SHA" > "$DIFF_STREAM_FILE" || fail "git diff ${BASE} ${HEAD_SHA} failed."
+        # --ignore-submodules=none: the change's own .gitmodules could
+        # otherwise hide a submodule with ignore = all.
+        git diff -z --raw --no-abbrev --no-ext-diff --ignore-submodules=none "$BASE" "$HEAD_SHA" > "$DIFF_STREAM_FILE" || fail "git diff ${BASE} ${HEAD_SHA} failed."
         TREE_FILE="$WORK/tree.bin"
         git ls-tree -r -z --full-tree "$HEAD_SHA" > "$TREE_FILE" || fail "git ls-tree ${HEAD_SHA} failed."
         NAMES_FILE="$WORK/names.bin"
-        git diff -z --no-ext-diff --name-only "$BASE" "$HEAD_SHA" > "$NAMES_FILE" || fail "git diff ${BASE} ${HEAD_SHA} failed."
+        # --no-renames, so a go.mod renamed away counts by its old name.
+        git diff -z --no-ext-diff --no-renames --ignore-submodules=none --name-only "$BASE" "$HEAD_SHA" > "$NAMES_FILE" || fail "git diff ${BASE} ${HEAD_SHA} failed."
         # grep -c prints 0 and exits 1 when nothing matches; `|| true` keeps
         # that single 0. A go.work redirects modules like a replace does, so
         # its changes count too.
@@ -400,7 +405,9 @@ runs:
         gh_prop() { local s; s=$(gh_msg "$1"); s=${s//:/%3A}; s=${s//,/%2C}; printf '%s' "$s"; }
         TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
         [[ ${#TOKEN} -eq 32 ]] || { echo "::error::Cannot read /dev/urandom."; exit 1; }
-        raw_log() { echo "::stop-commands::${TOKEN}"; cat; echo "::${TOKEN}::"; }
+        # The input may not end in a newline; the resume token must start
+        # a line of its own.
+        raw_log() { echo "::stop-commands::${TOKEN}"; cat; echo; echo "::${TOKEN}::"; }
 
         # Plain assignments: readonly X=$(...) hides a failure from set -e.
         TARGET_ABS=$(realpath -m "${INPUT_PATH:-.}")
@@ -460,6 +467,8 @@ runs:
           diff)
             # One sfw run diffs every pair, loading each tree's packages once.
             HIGH_RISK=0
+            # Unset when sfw gave no usable result: the count is then unknown.
+            DIFF_OK=true
             LEVEL=warning
             if [[ "$FAIL_ON_ALERT" == "true" ]]; then LEVEL=error; fi
             if [[ $PAIR_COUNT -eq 0 ]]; then
@@ -482,6 +491,7 @@ runs:
                 raw_log < "$DIFF_ERR"
                 OUTPUT="[]"
                 echo "semantic-match-pct=0.0" >> "$GITHUB_OUTPUT"
+                DIFF_OK=false
                 EXIT_CODE=1
               else
                 # Results name the base side by its path in the repository,
@@ -525,7 +535,9 @@ runs:
               echo "::${LEVEL} file=$(gh_prop "$g")::Submodule changed; sfw cannot analyze the code it brings in."
             done 3< "$GITLINKS_FILE"
             HIGH_RISK=$((HIGH_RISK + GITLINK_COUNT))
-            echo "high-risk-changes=${HIGH_RISK}" >> "$GITHUB_OUTPUT"
+            if [[ "$DIFF_OK" == true ]]; then
+              echo "high-risk-changes=${HIGH_RISK}" >> "$GITHUB_OUTPUT"
+            fi
             if [[ $HIGH_RISK -gt 0 ]]; then
               if [[ "$FAIL_ON_ALERT" == "true" ]]; then
                 echo "::error::${HIGH_RISK} high-risk change(s)"

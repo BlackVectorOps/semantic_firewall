@@ -2,6 +2,8 @@ package actiontest
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -134,5 +136,37 @@ func TestActionSubmoduleChanged(t *testing.T) {
 	res = runAction(t, repo, map[string]string{"INPUT_MODE": "audit", "INPUT_PATH": ".", "GITHUB_EVENT_BEFORE": before})
 	if res.exitCode == 0 || res.outputs["audit-verdict"] != "FAIL" {
 		t.Errorf("audit: exit %d, verdict %q; want FAIL:\n%s", res.exitCode, res.outputs["audit-verdict"], res.log)
+	}
+}
+
+// The change's own .gitmodules can't hide a submodule from the diff.
+func TestActionSubmoduleIgnoreAll(t *testing.T) {
+	requireTools(t)
+	repo, _ := commitsRepo(t, map[string]*string{"go.mod": str(gomod), "p/p.go": str("package p\n")})
+	git := gitIn(t, repo)
+	modules := "[submodule \"lib\"]\n\tpath = third_party/lib\n\turl = ./lib\n"
+	os.WriteFile(filepath.Join(repo, ".gitmodules"), []byte(modules), 0o644)
+	git("add", ".gitmodules")
+	git("update-index", "--add", "--cacheinfo", "160000,1111111111111111111111111111111111111111,third_party/lib")
+	git("commit", "-q", "-m", "lib")
+	before := git("rev-parse", "HEAD")
+	os.WriteFile(filepath.Join(repo, ".gitmodules"), []byte(modules+"\tignore = all\n"), 0o644)
+	git("add", ".gitmodules")
+	git("update-index", "--cacheinfo", "160000,2222222222222222222222222222222222222222,third_party/lib")
+	git("commit", "-q", "-m", "lib bump")
+	res := runAction(t, repo, map[string]string{"INPUT_MODE": "diff", "INPUT_PATH": ".", "GITHUB_EVENT_BEFORE": before})
+	if res.exitCode == 0 || res.outputs["gitlink_count"] != "1" {
+		t.Errorf("exit %d, gitlink_count %q; want the bump counted and a failure:\n%s", res.exitCode, res.outputs["gitlink_count"], res.log)
+	}
+}
+
+// A go.mod renamed away is a module change, under its old name.
+func TestActionModFileRenamedAway(t *testing.T) {
+	requireTools(t)
+	repo := gitRepo(t, map[string]string{"go.mod": gomod, "sub/go.mod": "module example.com/m/sub\n\ngo 1.22\n", "p/p.go": "package p\n"},
+		map[string]*string{"sub/go.mod": nil, "sub/go.mod.bak": str("module example.com/m/sub\n\ngo 1.22\n")})
+	res := runAction(t, repo, map[string]string{"INPUT_MODE": "diff", "INPUT_PATH": "."})
+	if res.outputs["has_mod_changes"] != "true" {
+		t.Errorf("has_mod_changes %q; want true:\n%s", res.outputs["has_mod_changes"], res.log)
 	}
 }
