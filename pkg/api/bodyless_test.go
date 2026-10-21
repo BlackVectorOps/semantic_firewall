@@ -143,6 +143,9 @@ func TestDiffRisk_Linkname(t *testing.T) {
 			added: []string{"//go:linkname Get"}},
 		{name: "linknamestd spelling", oldSrc: base, newSrc: base + "//go:linknamestd x example.invalid/m/q.secret\n",
 			added: []string{"//go:linknamestd x example.invalid/m/q.secret"}},
+		// Binds a shared library's symbol with no cgo.
+		{name: "cgo_import_dynamic", oldSrc: base, newSrc: base + "//go:cgo_import_dynamic libc_getpid getpid \"/usr/lib/libSystem.B.dylib\"\n",
+			added: []string{"//go:cgo_import_dynamic libc_getpid getpid \"/usr/lib/libSystem.B.dylib\""}},
 		{name: "target changed", oldSrc: base + toHidden + "\n", newSrc: base + "//go:linkname hidden example.invalid/m/q.Other\n",
 			removed: []string{toHidden}, added: []string{"//go:linkname hidden example.invalid/m/q.Other"}},
 		{name: "removed", oldSrc: base + toHidden + "\n", newSrc: base,

@@ -669,3 +669,21 @@ func TestDepsDiff_Workspace(t *testing.T) {
 		}
 	})
 }
+
+// A dependency's //go:cgo_import_dynamic directive is reported like a
+// linkname directive: it binds a shared library's symbol with no cgo.
+func TestDepsDiff_CgoImportDynamic(t *testing.T) {
+	imports := "\t_ \"example.com/lib/codec\"\n"
+	deps := map[string]string{"example.com/lib": "lib"}
+	const directive = `//go:cgo_import_dynamic libc_getpid getpid "/usr/lib/libSystem.B.dylib"`
+	oldTree := appTree(t, imports, deps, map[string]string{"lib/lib/codec/codec.go": codecV1})
+	newTree := appTree(t, imports, deps, map[string]string{"lib/lib/codec/codec.go": codecV1, "lib/lib/codec/dyn.go": "package codec\n\n" + directive + "\n"})
+	out := depsDiff(t, oldTree, newTree)
+	key := "linkname added example.com/lib/codec: " + directive
+	for _, m := range out.Modules {
+		if _, ok := unanalyzedKeys(m)[key]; ok && m.RiskScore >= 10 {
+			return
+		}
+	}
+	t.Errorf("modules %+v; want %q at risk 10", out.Modules, key)
+}

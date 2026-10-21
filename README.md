@@ -457,6 +457,8 @@ A `//go:linkname local target` directive, or its `//go:linknamestd` spelling, wh
 
 An added directive scores 10 and counts in `high_risk_changes`, not in the function counts. A removed one scores 0 and is listed with the old file's path. A changed target is a removed directive and an added one, and a directive moved to another file of the package is added in that file. Text the compiler does not take as a directive, inside a block comment or with a tab after `//go:linkname`, is not reported.
 
+A `//go:cgo_import_dynamic local remote "library"` directive is listed the same way, with kind `linkname`. The compiler takes it outside cgo-generated code when it names a library, and the linker then binds `remote` from that shared library as `local`, with no cgo: `golang.org/x/sys/unix` calls libc this way on darwin, through an assembly trampoline. The other `//go:cgo_*` directives are refused outside cgo-generated code.
+
 ## Detection scope
 
 **Scored:**
@@ -559,7 +561,7 @@ For each compared module:
   | `kind` | Files | Added or modified |
   |--------|-------|-------------------|
   | `syso`, `object` | `.syso`; `.a`, `.o`, `.so`, `.dylib`, `.dll`, `.lib` | 20 |
-  | `linkname` | each `//go:linkname` or `//go:linknamestd` directive in a package's Go files, compiled or excluded, keyed by package (renaming its file is no change) | 10 |
+  | `linkname` | each `//go:linkname`, `//go:linknamestd` or `//go:cgo_import_dynamic` directive in a package's Go files, compiled or excluded, keyed by package (renaming its file is no change) | 10 |
   | `assembly`, `c` | `.s`, `.sx`; C, C++, Objective-C, Fortran and SWIG sources and headers | 5 |
   | `cgo`, `excluded-go` | Go files the build leaves out: those that import `"C"`, and those excluded by build constraints (other platforms included) | 5 |
   | `embed` | files embedded with `//go:embed` | 5 |

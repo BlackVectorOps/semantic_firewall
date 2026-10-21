@@ -854,15 +854,19 @@ func packageLinknames(p *packages.Package) []string {
 	return out
 }
 
-// fileLinknames returns a file's //go:linkname directives, and their
-// //go:linknamestd spelling, which the compiler takes alike, normalized to
-// single spaces. They are read from the parsed comments, so one inside a
-// block comment is not one.
+// fileLinknames returns a file's //go:linkname directives, their
+// //go:linknamestd spelling, which the compiler takes alike, and its
+// //go:cgo_import_dynamic directives, normalized to single spaces. The
+// compiler takes the last outside cgo-generated code when it names a
+// library, and the linker then binds the named symbol from that shared
+// library with no cgo (x/sys/unix calls libc this way on darwin). They are
+// read from the parsed comments, so one inside a block comment is not one.
 func fileLinknames(f *ast.File) []string {
 	var out []string
 	for _, group := range f.Comments {
 		for _, c := range group.List {
-			if strings.HasPrefix(c.Text, "//go:linkname ") || strings.HasPrefix(c.Text, "//go:linknamestd ") {
+			if strings.HasPrefix(c.Text, "//go:linkname ") || strings.HasPrefix(c.Text, "//go:linknamestd ") ||
+				strings.HasPrefix(c.Text, "//go:cgo_import_dynamic ") {
 				out = append(out, strings.Join(strings.Fields(c.Text), " "))
 			}
 		}
