@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,14 +36,63 @@ func isGoPair(p DiffPair) bool {
 // and content hash.
 type nonGoUse struct{ kind, hash string }
 
-// nonGoTrees caches, per module root, what its build uses that is not Go
+// nonGoTrees holds, per module root, what its build uses that is not Go
 // source (see treeUses), or why that could not be listed.
 type nonGoTrees map[string]struct {
 	uses map[string]nonGoUse
 	err  error
 }
 
-// nonGoDiff reports a pair with no Go file on either side. A file that
+// load lists the tree of the module the file at path is in, once.
+func (trees nonGoTrees) load(fsys FileSystem, path string) {
+	if path == "" || path == os.DevNull {
+		return
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = real
+	}
+	if root := moduleRoot(fsys, abs); root != "" {
+		if _, ok := trees[root]; !ok {
+			t := trees[root]
+			t.uses, t.err = treeUses(root)
+			trees[root] = t
+		}
+	}
+}
+
+// find looks the file at path up in every listed tree: an assembly file
+// can #include a file outside its own module. A file no tree uses is
+// unused unless some tree could not be listed.
+func (trees nonGoTrees) find(path string) (nonGoUse, bool, error) {
+	if path == "" || path == os.DevNull {
+		return nonGoUse{}, false, nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nonGoUse{}, false, err
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = real
+	}
+	var failed error
+	for _, t := range trees {
+		if t.err != nil {
+			failed = t.err
+			continue
+		}
+		if u, ok := t.uses[abs]; ok {
+			return u, true, nil
+		}
+	}
+	return nonGoUse{}, false, failed
+}
+
+// nonGoDiff reports a pair with no Go file on either side, looked up in
+// trees, which must hold every module of the batch's files. A file that
 // neither tree's build uses (documentation, configuration, test data, a
 // file outside any module) gives an empty result. Otherwise, unless both
 // sides hold the same content under the same use, the result lists the
@@ -56,37 +106,11 @@ func nonGoDiff(fsys FileSystem, trees nonGoTrees, p DiffPair) *models.DiffOutput
 		out.ErrorMessage = "a non-Go file can only be diffed on the real file system"
 		return out
 	}
-	use := func(path string) (nonGoUse, bool, error) {
-		if path == "" || path == os.DevNull {
-			return nonGoUse{}, false, nil
-		}
-		abs, err := filepath.Abs(path)
-		if err != nil {
-			return nonGoUse{}, false, err
-		}
-		if real, err := filepath.EvalSymlinks(abs); err == nil {
-			abs = real
-		}
-		root := moduleRoot(fsys, abs)
-		if root == "" {
-			return nonGoUse{}, false, nil
-		}
-		t, ok := trees[root]
-		if !ok {
-			t.uses, t.err = treeUses(root)
-			trees[root] = t
-		}
-		if t.err != nil {
-			return nonGoUse{}, false, t.err
-		}
-		u, ok := t.uses[abs]
-		return u, ok, nil
-	}
-	oldUse, inOld, err := use(p.Old)
+	oldUse, inOld, err := trees.find(p.Old)
 	if err == nil {
 		var newUse nonGoUse
 		var inNew bool
-		newUse, inNew, err = use(p.New)
+		newUse, inNew, err = trees.find(p.New)
 		if err == nil {
 			fc, changed := nonGoChange(p, oldUse, inOld, newUse, inNew)
 			if changed {
@@ -135,7 +159,11 @@ var nonGoRank = map[string]int{"other": 1, "embed": 2, "c": 3, "assembly": 3, "o
 // the build of the module at root uses, with their kinds and hashes: the
 // inventory sfw deps diff takes of a dependency (see inventory), over
 // every package the module's packages import from this tree, its vendor
-// directory and directories ./... skips (testdata, _x) included.
+// directory and directories ./... skips (testdata, _x) included. The
+// packages are those of the host's build; so that another platform's
+// imports count too, every assembly, C or object file beside a Go file
+// anywhere in the tree (nested modules aside) is listed as well, with the
+// files the assembly includes.
 func treeUses(root string) (map[string]nonGoUse, error) {
 	if real, err := filepath.EvalSymlinks(root); err == nil {
 		root = real
@@ -156,8 +184,10 @@ func treeUses(root string) (map[string]nonGoUse, error) {
 			m.pkgs = append(m.pkgs, p)
 		}
 	})
+	inv := inventory(m)
+	besideGo(root, inv)
 	uses := make(map[string]nonGoUse)
-	for key, hash := range inventory(m) {
+	for key, hash := range inv {
 		kind, rel, _ := strings.Cut(key, ":")
 		if kind == "linkname" || kind == "cgo" || kind == "excluded-go" {
 			continue
@@ -182,4 +212,66 @@ func packageDir(p *packages.Package) string {
 		}
 	}
 	return ""
+}
+
+// besideGo adds to inv, keyed as inventory keys, every assembly, C or
+// object file in a directory under root that holds a .go file, and the
+// files the assembly includes, skipping version control directories and
+// nested modules.
+func besideGo(root string, inv map[string]string) {
+	listed := make(map[string]bool)
+	for key := range inv {
+		_, rel, _ := strings.Cut(key, ":")
+		listed[filepath.Join(root, filepath.FromSlash(rel))] = true
+	}
+	hash := func(kind, f string) {
+		if listed[f] {
+			return
+		}
+		if sum, ok := hashFile(f); ok {
+			rel, err := filepath.Rel(root, f)
+			if err != nil {
+				return
+			}
+			inv[kind+":"+filepath.ToSlash(rel)] = sum
+			listed[f] = true
+		}
+	}
+	included := make(map[string]bool)
+	filepath.WalkDir(root, func(dir string, e fs.DirEntry, err error) error {
+		if err != nil || !e.IsDir() {
+			return nil
+		}
+		switch e.Name() {
+		case ".git", ".hg", ".svn", ".bzr":
+			return filepath.SkipDir
+		}
+		if dir != root {
+			if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+				return filepath.SkipDir
+			}
+		}
+		entries, _ := os.ReadDir(dir)
+		hasGo := false
+		for _, f := range entries {
+			hasGo = hasGo || strings.HasSuffix(f.Name(), ".go")
+		}
+		if !hasGo {
+			return nil
+		}
+		for _, f := range entries {
+			path := filepath.Join(dir, f.Name())
+			if f.IsDir() || !isRegular(path, f) {
+				continue
+			}
+			switch kind := fileKind(path); kind {
+			case "assembly":
+				hash(kind, path)
+				hashIncludes(path, included, hash)
+			case "c", "syso", "object":
+				hash(kind, path)
+			}
+		}
+		return nil
+	})
 }

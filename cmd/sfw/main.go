@@ -41,7 +41,7 @@ A Semantic Malware Scanner for Go source files.
 Usage (flags must come before file arguments):
   sfw check [--strict] <file.go|directory>    Fingerprint a file or recursively scan a directory
   sfw diff <old.go> <new.go>                  Semantic diff between two Go files
-  sfw diff --batch [--non-go] <pairs-file>    Diff many file pairs, loading each tree once
+  sfw diff [--non-go] --batch <pairs-file>    Diff many file pairs, loading each tree once
   sfw deps diff <old-dir> <new-dir>           Diff the dependencies two module trees compile in
   sfw audit <old.go> <new.go> "<message>"     Audit a commit for deception using Semantic Analysis + LLM
   sfw index --name <name> <file.go>           Index a malware sample into the signature database

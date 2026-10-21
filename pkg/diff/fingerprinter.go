@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -498,18 +499,52 @@ var knownPlatforms = [][2]string{
 	{"android", "arm64"}, {"ios", "arm64"}, {"js", "wasm"}, {"wasip1", "wasm"}, {"plan9", "amd64"},
 }
 
+// distPlatforms are the GOOS/GOARCH pairs of `go tool dist list` (Go 1.27).
+var distPlatforms = [][2]string{
+	{"aix", "ppc64"}, {"android", "386"}, {"android", "amd64"}, {"android", "arm"}, {"android", "arm64"},
+	{"darwin", "amd64"}, {"darwin", "arm64"}, {"dragonfly", "amd64"},
+	{"freebsd", "386"}, {"freebsd", "amd64"}, {"freebsd", "arm"}, {"freebsd", "arm64"},
+	{"illumos", "amd64"}, {"ios", "amd64"}, {"ios", "arm64"}, {"js", "wasm"},
+	{"linux", "386"}, {"linux", "amd64"}, {"linux", "arm"}, {"linux", "arm64"}, {"linux", "loong64"},
+	{"linux", "mips"}, {"linux", "mips64"}, {"linux", "mips64le"}, {"linux", "mipsle"},
+	{"linux", "ppc64"}, {"linux", "ppc64le"}, {"linux", "riscv64"}, {"linux", "s390x"},
+	{"netbsd", "386"}, {"netbsd", "amd64"}, {"netbsd", "arm"}, {"netbsd", "arm64"},
+	{"openbsd", "386"}, {"openbsd", "amd64"}, {"openbsd", "arm"}, {"openbsd", "arm64"},
+	{"openbsd", "ppc64"}, {"openbsd", "riscv64"},
+	{"plan9", "386"}, {"plan9", "amd64"}, {"plan9", "arm"},
+	{"solaris", "amd64"}, {"wasip1", "wasm"},
+	{"windows", "386"}, {"windows", "amd64"}, {"windows", "arm64"},
+}
+
+// archToolTags are the architecture feature tags each GOARCH sets at its
+// default level (GOAMD64=v1, GOARM=7, ...), as the go command reports them.
+var archToolTags = map[string][]string{
+	"386": {"386.sse2"}, "amd64": {"amd64.v1"}, "arm": {"arm.5", "arm.6", "arm.7"}, "arm64": {"arm64.v8.0"},
+	"mips": {"mips.hardfloat"}, "mipsle": {"mipsle.hardfloat"}, "mips64": {"mips64.hardfloat"}, "mips64le": {"mips64le.hardfloat"},
+	"ppc64": {"ppc64.power8"}, "ppc64le": {"ppc64le.power8"}, "riscv64": {"riscv64.rva20u64"},
+	"wasm": {"wasm.satconv", "wasm.signext"},
+}
+
 // DefaultBuilds lists the builds without custom tags that compile the
-// file at absFilename with content src: each GOOS/GOARCH pair, the host's
-// first and then knownPlatforms, as "goos/goarch" with cgo disabled and
-// "goos/goarch/cgo" with it enabled. Name suffixes, //go:build lines,
-// import "C" and the go command's skipping of names starting with "_" or
-// "." all count; a _test.go file is in none.
+// file at absFilename with content src: each GOOS/GOARCH pair of
+// `go tool dist list`, as "goos/goarch" with cgo disabled and
+// "goos/goarch/cgo" with it enabled, at the architecture's default feature
+// level. Release and goexperiment tags are those of the Go toolchain sfw
+// runs on. Name suffixes, //go:build and // +build lines, import "C" and the
+// go command's skipping of names starting with "_" or "." all count; a
+// _test.go file is in none.
 func DefaultBuilds(absFilename, src string) []string {
 	if strings.HasSuffix(absFilename, "_test.go") {
 		return nil
 	}
 	ctxt := build.Default
 	ctxt.BuildTags = nil
+	var experiments []string
+	for _, t := range build.Default.ToolTags {
+		if strings.HasPrefix(t, "goexperiment.") {
+			experiments = append(experiments, t)
+		}
+	}
 	ctxt.OpenFile = func(path string) (io.ReadCloser, error) {
 		if filepath.Clean(path) == absFilename {
 			return io.NopCloser(strings.NewReader(src)), nil
@@ -526,19 +561,19 @@ func DefaultBuilds(absFilename, src string) []string {
 	}
 	dir, name := filepath.Dir(absFilename), filepath.Base(absFilename)
 	var builds []string
-	seen := make(map[string]bool)
-	for _, p := range append([][2]string{{build.Default.GOOS, build.Default.GOARCH}}, knownPlatforms...) {
+	for _, p := range distPlatforms {
+		ctxt.GOOS, ctxt.GOARCH = p[0], p[1]
+		ctxt.ToolTags = append(slices.Clone(experiments), archToolTags[p[1]]...)
 		for _, cgo := range []bool{false, true} {
-			key := p[0] + "/" + p[1]
-			if cgo {
-				key += "/cgo"
-			}
-			if seen[key] || (cgoOnly && !cgo) {
+			if cgoOnly && !cgo {
 				continue
 			}
-			seen[key] = true
-			ctxt.GOOS, ctxt.GOARCH, ctxt.CgoEnabled = p[0], p[1], cgo
+			ctxt.CgoEnabled = cgo
 			if match, err := ctxt.MatchFile(dir, name); err == nil && match {
+				key := p[0] + "/" + p[1]
+				if cgo {
+					key += "/cgo"
+				}
 				builds = append(builds, key)
 			}
 		}

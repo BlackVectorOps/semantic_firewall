@@ -5,6 +5,7 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -59,6 +60,16 @@ func DiffBatchWithFS(fsys FileSystem, pairs []DiffPair) []*models.DiffOutput {
 func DiffBatchWithOptions(fsys FileSystem, pairs []DiffPair, opts BatchOptions) []*models.DiffOutput {
 	out := make([]*models.DiffOutput, len(pairs))
 	trees := nonGoTrees{}
+	if opts.NonGo {
+		// Every module of the batch is listed first: a file one module
+		// includes can sit in another, or in none.
+		if _, onDisk := fsys.(RealFileSystem); onDisk && slices.ContainsFunc(pairs, func(p DiffPair) bool { return !isGoPair(p) }) {
+			for _, p := range pairs {
+				trees.load(fsys, p.Old)
+				trees.load(fsys, p.New)
+			}
+		}
+	}
 	var oldPaths, newPaths []string
 	for i, p := range pairs {
 		if opts.NonGo && !isGoPair(p) {

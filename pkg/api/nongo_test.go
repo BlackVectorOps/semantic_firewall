@@ -113,3 +113,45 @@ func TestDiffBatch_NonGoFiles(t *testing.T) {
 		t.Errorf("broken module: %+v; want an error", out)
 	}
 }
+
+// An assembly file can #include a file outside its module, and a package
+// only another platform's build imports still has its assembly listed.
+func TestDiffBatch_NonGoReach(t *testing.T) {
+	const gomod = "module example.invalid/m\n\ngo 1.22\n"
+	asm := "#include \"../../inc/evil.h\"\n"
+	vendored := "# example.invalid/dep v1.0.0\n## explicit; go 1.22\nexample.invalid/dep/w\n"
+	appMod := gomod + "\nrequire example.invalid/dep v1.0.0\n"
+	dir := writeTree(t, map[string]string{
+		"base/inc/evil.h":        "// v1\n",
+		"base/mod/go.mod":        gomod,
+		"base/mod/p/p.go":        "package p\n\nfunc add(a, b int) int\n",
+		"base/mod/p/add_amd64.s": asm,
+		"head/inc/evil.h":        "// v2\n",
+		"head/mod/go.mod":        gomod,
+		"head/mod/p/p.go":        "package p\n\nfunc add(a, b int) int\n\nfunc Sub(a, b int) int { return a - b }\n",
+		"head/mod/p/add_amd64.s": asm,
+
+		"app/go.mod":                            appMod,
+		"app/main.go":                           "package main\n\nfunc main() {}\n",
+		"app/main_windows.go":                   "package main\n\nimport _ \"example.invalid/dep/w\"\n",
+		"app/vendor/modules.txt":                vendored,
+		"app/vendor/example.invalid/dep/w/w.go": "package w\n",
+		"app/vendor/example.invalid/dep/w/x_windows_amd64.s": "// changed\n",
+	})
+	at := func(p string) string { return filepath.Join(dir, p) }
+	pairs := []api.DiffPair{
+		{Old: at("base/mod/p/p.go"), New: at("head/mod/p/p.go")},
+		{Old: at("base/inc/evil.h"), New: at("head/inc/evil.h")},
+		{Old: os.DevNull, New: at("app/vendor/example.invalid/dep/w/x_windows_amd64.s")},
+	}
+	got := api.DiffBatchWithOptions(api.RealFileSystem{}, pairs, api.BatchOptions{NonGo: true})
+	for i, kind := range []string{"", "assembly", "assembly"} {
+		if kind == "" {
+			continue
+		}
+		out := got[i]
+		if out.ErrorMessage != "" || len(out.Unanalyzed) != 1 || out.Unanalyzed[0].Kind != kind || out.Summary.HighRiskChanges != 1 {
+			t.Errorf("%s: %+v; want one high-risk %s change", pairs[i].New, out, kind)
+		}
+	}
+}

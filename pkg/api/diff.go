@@ -56,48 +56,69 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 }
 
 // diffSides is diffResults for the two versions of one file, except when
-// the file left a default build it was in, or entered the default builds
-// from none (see diff.DefaultBuilds): a //go:build line, a GOOS or GOARCH
-// name suffix or an import "C" changed which builds compile it. Its
-// functions then left or entered those builds whatever their code, so the
-// old version is diffed as removed and the new one as added (when some
-// build still compiles it), and the result carries a "build" change in
-// Unanalyzed. Otherwise the versions are compared as usual.
+// a //go:build line, a GOOS or GOARCH name suffix or an import "C" changed
+// which default builds compile it (see diff.DefaultBuilds). The builds that
+// compile both versions compare them as usual. A build that compiles only
+// the old version lost its functions, which are diffed as removed; one
+// that compiles only the new version gained them, diffed as added. The
+// parts merge into one result that carries a "build" change in Unanalyzed.
+// The synthesized package initializer, which runs the package's other
+// files' initializers too, is left out of the removed part, and out of the
+// added part unless the file was in no build before.
 func diffSides(oldPath, newPath string, oldSide, newSide FileFingerprints) *models.DiffOutput {
 	if oldSide.absent || newSide.absent {
 		return diffResults(oldPath, newPath, oldSide, newSide, riskProfile{})
 	}
 	oldBuilds, newBuilds := oldSide.source.builds, newSide.source.builds
-	left := false
+	shared, left, gained := false, false, false
 	for _, b := range oldBuilds {
-		left = left || !slices.Contains(newBuilds, b)
+		in := slices.Contains(newBuilds, b)
+		shared, left = shared || in, left || !in
 	}
-	entered := len(oldBuilds) == 0 && len(newBuilds) > 0
-	if !left && !entered {
+	for _, b := range newBuilds {
+		gained = gained || !slices.Contains(oldBuilds, b)
+	}
+	if !left && !gained {
 		return diffResults(oldPath, newPath, oldSide, newSide, riskProfile{})
 	}
 
 	absent := FileFingerprints{Results: []diff.FingerprintResult{}, absent: true}
 	var parts []*models.DiffOutput
-	change := "added"
+	if shared {
+		parts = append(parts, diffResults(oldPath, newPath, oldSide, newSide, riskProfile{}))
+	}
+	change := "modified"
 	if left {
 		parts = append(parts, diffResults(oldPath, newPath, oldSide, absent, riskProfile{}))
 		change = "removed"
 	}
-	if len(newBuilds) > 0 {
-		parts = append(parts, diffResults(oldPath, newPath, absent, newSide, riskProfile{}))
+	if gained {
+		added := newSide
+		if shared {
+			added.Results = withoutPackageInit(newSide.Results)
+		}
+		parts = append(parts, diffResults(oldPath, newPath, absent, added, riskProfile{}))
 		if left {
 			change = "modified"
+		} else {
+			change = "added"
 		}
 	}
 	out := &models.DiffOutput{OldFile: oldPath, NewFile: newPath, Functions: []models.FunctionDiff{}}
 	for _, p := range parts {
 		out.Functions = append(out.Functions, p.Functions...)
 		out.Unanalyzed = append(out.Unanalyzed, p.Unanalyzed...)
+		out.TopologyMatches = append(out.TopologyMatches, p.TopologyMatches...)
 		out.Summary.TotalFunctions += p.Summary.TotalFunctions
+		out.Summary.Preserved += p.Summary.Preserved
+		out.Summary.Modified += p.Summary.Modified
 		out.Summary.Added += p.Summary.Added
 		out.Summary.Removed += p.Summary.Removed
+		out.Summary.RenamedFunctions += p.Summary.RenamedFunctions
 		out.Summary.HighRiskChanges += p.Summary.HighRiskChanges
+	}
+	if out.Summary.TotalFunctions > 0 {
+		out.Summary.SemanticMatchPct = float64(out.Summary.Preserved) / float64(out.Summary.TotalFunctions) * 100.0
 	}
 	out.Unanalyzed = append(out.Unanalyzed, models.FileChange{File: newPath, Kind: "build", Change: change})
 	return out

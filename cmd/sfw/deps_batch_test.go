@@ -135,7 +135,7 @@ func TestMainBinaryDepsAndBatch(t *testing.T) {
 		contains string
 	}{
 		{"usage lists deps diff", nil, 1, "sfw deps diff <old-dir> <new-dir>"},
-		{"usage lists diff --batch", nil, 1, "sfw diff --batch [--non-go] <pairs-file>"},
+		{"usage lists diff --batch", nil, 1, "sfw diff [--non-go] --batch <pairs-file>"},
 		{"diff --non-go without --batch", []string{"diff", "--non-go", file, file}, 1, "--non-go needs --batch"},
 		{"diff --batch --non-go", []string{"diff", "--no-sandbox", "--non-go", "--batch", pairs}, 0, `"new_file": "` + file + `"`},
 		{"deps without diff", []string{"deps"}, 1, "Usage: sfw deps diff [--no-sandbox] <old-module-dir> <new-module-dir>"},

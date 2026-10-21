@@ -21,6 +21,13 @@ func TestDefaultBuilds(t *testing.T) {
 		{"_hidden.go", body, nil, []string{"linux/amd64"}},
 		{".hidden.go", body, nil, []string{"linux/amd64"}},
 		{"f_test.go", body, nil, []string{"linux/amd64"}},
+		// Feature tags hold at the architecture's default level only, not
+		// at the host's.
+		{"feature.go", "//go:build amd64 && arm64.v8.0\n\n" + body, nil, []string{"linux/amd64"}},
+		{"level.go", "//go:build amd64 && amd64.v1\n\n" + body, []string{"linux/amd64", "windows/amd64"}, []string{"linux/arm64"}},
+		{"bsd.go", "//go:build openbsd && arm64\n\n" + body, []string{"openbsd/arm64"}, []string{"linux/arm64"}},
+		{"future.go", "//go:build go1.99\n\n" + body, nil, []string{"linux/amd64"}},
+		{"legacy.go", "// +build linux\n\n" + body, []string{"linux/amd64"}, []string{"darwin/arm64"}},
 	}
 	for _, c := range cases {
 		got := DefaultBuilds("/m/p/"+c.name, c.src)
