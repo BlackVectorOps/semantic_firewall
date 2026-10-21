@@ -282,11 +282,13 @@ The pair below was produced by the code shown. The fingerprints differ, because 
 
 ### Batch mode
 
-`sfw diff --batch <pairs-file>` diffs many files in one run. The pairs file holds NUL-terminated paths, alternately the old and the new version of each file (`old1\0new1\0old2\0new2\0`). An empty path or `/dev/null` stands for the absent side of an added or deleted file.
+`sfw diff --batch [--non-go] <pairs-file>` diffs many files in one run. The pairs file holds NUL-terminated paths, alternately the old and the new version of each file (`old1\0new1\0old2\0new2\0`). An empty path or `/dev/null` stands for the absent side of an added or deleted file.
 
 The output is a JSON array with one `sfw diff` result per pair, in order. A pair that cannot be diffed (a file that does not parse, say) has an `error` field and an empty `functions` list. The command prints every result, then exits 1 with `Error: 1 of 3 file pair(s) could not be diffed` on stderr.
 
-Each result equals what `sfw diff` prints for that pair alone. The difference is loading: the files of one side that share a module root (the nearest `go.mod`) and the `go.work` that governs them are loaded with one `go/packages` call, so a package and its imports are type-checked once however many of its files changed. A file outside any module, a file the module's default build excludes (see [Files](#files)), a file in a package that does not type-check, and every file of a group whose load fails are loaded on their own, as `sfw diff` loads them. The old and new sides load concurrently.
+With `--non-go`, a pair with no `.go` file on either side is not loaded as Go. Each side's module (the nearest `go.mod`) is listed with `go list` once, over `./...` and every package it imports from the same tree (`vendor/`, and directories `./...` skips such as `_x` or `testdata`), and the file is looked up among the files its build uses, with the kinds of [`sfw deps diff`](#sfw-deps-diff)'s `unanalyzed` list. When either tree uses it and its kind or content differs, the result lists it under `unanalyzed`, `added`, `modified` or `removed`, with no functions: `assembly` and `c` score 10, `syso` and `object` 20, `embed` and `other` 5, a removal 0, and a score of 10 or more counts in `high_risk_changes`. A file neither tree uses (documentation, a file outside any module) gives an empty result, and a module whose packages `go list` cannot list fails the pair. Without `--non-go`, such a pair is loaded as Go and fails.
+
+Each Go result equals what `sfw diff` prints for that pair alone. The difference is loading: the files of one side that share a module root (the nearest `go.mod`) and the `go.work` that governs them are loaded with one `go/packages` call, so a package and its imports are type-checked once however many of its files changed. A file outside any module, a file the module's default build excludes (see [Files](#files)), a file in a package that does not type-check, and every file of a group whose load fails are loaded on their own, as `sfw diff` loads them. The old and new sides load concurrently.
 
 ## Risk scoring
 
@@ -561,9 +563,9 @@ For each compared module:
   | `assembly`, `c` | `.s`, `.sx`; C, C++, Objective-C, Fortran and SWIG sources and headers | 5 |
   | `cgo`, `excluded-go` | Go files the build leaves out: those that import `"C"`, and those excluded by build constraints (other platforms included) | 5 |
   | `embed` | files embedded with `//go:embed` | 5 |
-  | `other` | in a module with a cgo file, any other non-Go file | 5 |
+  | `other` | in a module with a cgo or assembly file, any other non-Go file | 5 |
 
-  Removed files score 0. Files are taken from each built package's directory, tests excluded, and a symbolic link counts as the regular file it points to. Every file an assembly file `#include`s is included, wherever it is and whatever its name. In a module with a cgo file, every non-Go file anywhere in the module is included, since `#include` and `#cgo LDFLAGS` (`-l:payload.bin`) can reach any file under any name: one that starts like an ELF, Mach-O or PE file or an ar archive is an `object`, others are `other`. `go list` itself omits a cgo package's C files when cgo is disabled. Directives are read from the parsed comments, so one inside a block comment is not one.
+  Removed files score 0. Files are taken from each built package's directory, tests excluded, and a symbolic link counts as the regular file it points to. Every file an assembly file `#include`s is included, wherever it is and whatever its name. In a module with a cgo or assembly file, every non-Go file anywhere in the module is included, since `#include` and `#cgo LDFLAGS` (`-l:payload.bin`) can reach any file under any name, and a comment before an `#include` hides it from the scan above: one that starts like an ELF, Mach-O or PE file or an ar archive is an `object`, others are `other`. `go list` itself omits a cgo package's C files when cgo is disabled. Directives are read from the parsed comments, so one inside a block comment is not one.
 
 A module's `risk_score` is the highest of its changes, and `high_risk_changes` counts those scoring 10 or more. An `added` module, and the packages the new tree newly builds from a module at an unchanged version, list the capability classes their entry points can reach (`capabilities`), initializers that reach any (`reach`), and their new `syso`, `object` and `linkname` files.
 

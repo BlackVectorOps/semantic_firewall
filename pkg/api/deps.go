@@ -609,10 +609,11 @@ func reachChange(name string, oldReach, newReach map[string]string, isInit bool)
 //     build configuration excludes (cgo files among them, as the loader
 //     disables cgo, which also hides the package's C files from go list);
 //   - every file an assembly file #includes, whatever its name or place;
-//   - in a module with a cgo file, every other non-Go file anywhere in the
-//     module, as #include and #cgo directives reach any file under any name
-//     (-l:payload.bin): one that holds machine code is an object, any other
-//     file not listed already is "other";
+//   - in a module with a cgo or assembly file, every other non-Go file
+//     anywhere in the module, as #include and #cgo directives reach any file
+//     under any name (-l:payload.bin), and a comment can hide an #include
+//     from the scan below: one that holds machine code is an object, any
+//     other file not listed already is "other";
 //   - every file a built package embeds.
 //
 // A symbolic link counts as the regular file it points to.
@@ -634,7 +635,7 @@ func inventory(m *depModule) map[string]string {
 			listed[filepath.Clean(f)] = true
 		}
 	}
-	usesCgo := false
+	usesCgo, usesAsm := false, false
 	included := make(map[string]bool)
 	for _, p := range m.pkgs {
 		compiled := make(map[string]bool)
@@ -657,6 +658,7 @@ func inventory(m *depModule) map[string]string {
 				case "cgo":
 					usesCgo = true
 				case "assembly":
+					usesAsm = true
 					hashIncludes(f, included, hash)
 				}
 				if kind != "" {
@@ -671,7 +673,7 @@ func inventory(m *depModule) map[string]string {
 			out["linkname:"+p.PkgPath+": "+d] = d
 		}
 	}
-	if usesCgo {
+	if usesCgo || usesAsm {
 		filepath.WalkDir(m.dir, func(f string, e fs.DirEntry, err error) error {
 			if err != nil {
 				return nil

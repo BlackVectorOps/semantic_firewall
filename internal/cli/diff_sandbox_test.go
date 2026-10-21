@@ -113,15 +113,15 @@ func TestRunDiffBatch_SandboxedMissingSideWithoutRoot(t *testing.T) {
 	pairs := writePairs(t, oldFile+"\x00"+newFile+"\x00")
 
 	// Unsandboxed, the pair diffs fine.
-	if err := RunDiffBatchLogic(RealFileSystem{}, devNullWriter{}, pairs); err != nil {
+	if err := RunDiffBatchLogic(RealFileSystem{}, devNullWriter{}, pairs, false); err != nil {
 		t.Fatalf("unsandboxed batch: %v", err)
 	}
 	// Control: with both files present the faked sandbox runs.
-	if err := RunDiffBatch(writePairs(t, newFile+"\x00"+newFile+"\x00"), false); err != nil {
+	if err := RunDiffBatch(writePairs(t, newFile+"\x00"+newFile+"\x00"), false, false); err != nil {
 		t.Fatalf("control: sandboxed batch of present files: %v", err)
 	}
 	t.Logf("mounts: %v", batchMounts(pairs, []api.DiffPair{{Old: oldFile, New: newFile}}))
-	if err := RunDiffBatch(pairs, false); err != nil {
+	if err := RunDiffBatch(pairs, false, false); err != nil {
 		t.Errorf("sandboxed batch with a missing old file: %v; want it to run like --no-sandbox", err)
 	}
 }

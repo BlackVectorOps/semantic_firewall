@@ -73,7 +73,7 @@ func TestRunDiff_SandboxFails(t *testing.T) {
 	if err := RunDiff(file, file, false); err == nil || !strings.Contains(err.Error(), "failed to run sandboxed process") {
 		t.Errorf("error %v; want the sandbox's failure", err)
 	}
-	if err := RunDiffBatch(writePairs(t, file+"\x00"+file+"\x00"), false); err == nil || !strings.Contains(err.Error(), "failed to run sandboxed process") {
+	if err := RunDiffBatch(writePairs(t, file+"\x00"+file+"\x00"), false, false); err == nil || !strings.Contains(err.Error(), "failed to run sandboxed process") {
 		t.Errorf("batch error %v; want the sandbox's failure", err)
 	}
 }
@@ -85,7 +85,7 @@ func TestRunDiffBatch_Sandbox(t *testing.T) {
 	dir, file := looseGoFile(t)
 	pairs := writePairs(t, filepath.Join(dir, "gone.go")+"\x00"+file+"\x00")
 	spec := fakeRunsc(t, 0)
-	if err := RunDiffBatch(pairs, false); err != nil {
+	if err := RunDiffBatch(pairs, false, false); err != nil {
 		t.Fatal(err)
 	}
 	args, mounts := sandboxSpec(t, spec)
@@ -96,14 +96,23 @@ func TestRunDiffBatch_Sandbox(t *testing.T) {
 		t.Errorf("mounts %q; want the pairs file and %s", mounts, file)
 	}
 
+	// --non-go reaches the worker.
+	if err := RunDiffBatch(pairs, false, true); err != nil {
+		t.Fatal(err)
+	}
+	args, _ = sandboxSpec(t, spec)
+	if want := []string{"internal-worker", "diff-batch", pairs, "--non-go"}; len(args) < 4 || !reflect.DeepEqual(args[len(args)-4:], want) {
+		t.Errorf("worker args %q; want them to end %q", args, want)
+	}
+
 	if err := os.Remove(spec); err != nil {
 		t.Fatal(err)
 	}
-	if err := RunDiffBatch(writePairs(t, file), false); err == nil || !strings.Contains(err.Error(), "not NUL-terminated") {
+	if err := RunDiffBatch(writePairs(t, file), false, false); err == nil || !strings.Contains(err.Error(), "not NUL-terminated") {
 		t.Errorf("malformed pairs file: %v; want its error", err)
 	}
 	quietStdout(t)
-	if err := RunDiffBatch(pairs, true); err != nil {
+	if err := RunDiffBatch(pairs, true, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(spec); err == nil {
@@ -136,17 +145,17 @@ func TestDiffLogic_OutputAndErrors(t *testing.T) {
 
 	pairs := writePairs(t, "\x00"+file+"\x00")
 	var batch bytes.Buffer
-	if err := RunDiffBatchLogic(RealFileSystem{}, &batch, pairs); err != nil {
+	if err := RunDiffBatchLogic(RealFileSystem{}, &batch, pairs, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(batch.String(), "[\n  {\n    \"old_file\"") {
 		t.Errorf("sfw diff --batch output starts %.40q; want two-space indentation", batch.String())
 	}
 	var malformed bytes.Buffer
-	if err := RunDiffBatchLogic(RealFileSystem{}, &malformed, writePairs(t, file)); err == nil || malformed.Len() != 0 {
+	if err := RunDiffBatchLogic(RealFileSystem{}, &malformed, writePairs(t, file), false); err == nil || malformed.Len() != 0 {
 		t.Errorf("malformed pairs file: error %v, output %q; want an error and no output", err, malformed.String())
 	}
-	if err := RunDiffBatchLogic(RealFileSystem{}, failingWriter{}, pairs); err == nil || !strings.Contains(err.Error(), "disk full") {
+	if err := RunDiffBatchLogic(RealFileSystem{}, failingWriter{}, pairs, false); err == nil || !strings.Contains(err.Error(), "disk full") {
 		t.Errorf("a failing writer: %v; want its error", err)
 	}
 }

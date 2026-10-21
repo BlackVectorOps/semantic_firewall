@@ -40,6 +40,7 @@ func TestWorkerDepsAndBatchArgs(t *testing.T) {
 		{[]string{"deps-diff", "", "b"}, `deps diff needs two module directories; got old "" and new "b"`},
 		{[]string{"diff-batch"}, "diff-batch worker requires a pairs file; got 0 arguments"},
 		{[]string{"diff-batch", "a", "b"}, "diff-batch worker requires a pairs file; got 2 arguments"},
+		{[]string{"diff-batch", "a", "--other"}, "diff-batch worker requires a pairs file; got 2 arguments"},
 	} {
 		err := runWorker(c.args)
 		if err == nil || err.Error() != c.errSub {
@@ -134,7 +135,9 @@ func TestMainBinaryDepsAndBatch(t *testing.T) {
 		contains string
 	}{
 		{"usage lists deps diff", nil, 1, "sfw deps diff <old-dir> <new-dir>"},
-		{"usage lists diff --batch", nil, 1, "sfw diff --batch <pairs-file>"},
+		{"usage lists diff --batch", nil, 1, "sfw diff --batch [--non-go] <pairs-file>"},
+		{"diff --non-go without --batch", []string{"diff", "--non-go", file, file}, 1, "--non-go needs --batch"},
+		{"diff --batch --non-go", []string{"diff", "--no-sandbox", "--non-go", "--batch", pairs}, 0, `"new_file": "` + file + `"`},
 		{"deps without diff", []string{"deps"}, 1, "Usage: sfw deps diff [--no-sandbox] <old-module-dir> <new-module-dir>"},
 		{"deps with another subcommand", []string{"deps", "list"}, 1, "Usage: sfw deps diff"},
 		{"deps diff with one directory", []string{"deps", "diff", "--no-sandbox", dir}, 1, "Usage: sfw deps diff"},

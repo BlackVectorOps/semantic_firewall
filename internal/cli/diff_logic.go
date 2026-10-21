@@ -64,8 +64,10 @@ func RunDiffLogic(fsys FileSystem, w io.Writer, oldFile, newFile string) error {
 }
 
 // RunDiffBatch diffs the file pairs listed in pairsFile (see
-// ReadDiffPairs), inside the sandbox unless noSandbox is set.
-func RunDiffBatch(pairsFile string, noSandbox bool) error {
+// ReadDiffPairs), inside the sandbox unless noSandbox is set. With nonGo, a
+// pair with no Go file is reported by what the build makes of it (see
+// api.BatchOptions).
+func RunDiffBatch(pairsFile string, noSandbox, nonGo bool) error {
 	cleanPairs := filepath.Clean(pairsFile)
 	sb := RealSandboxer{}
 	fsys := RealFileSystem{}
@@ -74,9 +76,13 @@ func RunDiffBatch(pairsFile string, noSandbox bool) error {
 		if err != nil {
 			return err
 		}
-		return SandboxExec(sb, os.Stdout, os.Stderr, "diff-batch", []string{cleanPairs}, batchMounts(cleanPairs, pairs)...)
+		args := []string{cleanPairs}
+		if nonGo {
+			args = append(args, "--non-go")
+		}
+		return SandboxExec(sb, os.Stdout, os.Stderr, "diff-batch", args, batchMounts(cleanPairs, pairs)...)
 	}
-	return RunDiffBatchLogic(fsys, os.Stdout, cleanPairs)
+	return RunDiffBatchLogic(fsys, os.Stdout, cleanPairs, nonGo)
 }
 
 // batchMounts lists what a sandboxed batch needs to see: the pairs file,
@@ -134,12 +140,12 @@ func inDir(path, dir string) bool {
 // RunDiffBatchLogic prints the JSON array of api.DiffBatch results for the
 // pairs in pairsFile, in order. It returns an error, after printing, when a
 // pair could not be diffed; that pair's entry carries the reason in "error".
-func RunDiffBatchLogic(fsys FileSystem, w io.Writer, pairsFile string) error {
+func RunDiffBatchLogic(fsys FileSystem, w io.Writer, pairsFile string, nonGo bool) error {
 	pairs, err := ReadDiffPairs(fsys, pairsFile)
 	if err != nil {
 		return err
 	}
-	results := api.DiffBatchWithFS(fsys, pairs)
+	results := api.DiffBatchWithOptions(fsys, pairs, api.BatchOptions{NonGo: nonGo})
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(results); err != nil {

@@ -52,10 +52,20 @@ func DiffBatch(pairs []DiffPair) []*models.DiffOutput {
 // FileSystem but RealFileSystem, each file is loaded on its own, so each
 // result is what DiffWithFS returns for its pair.
 func DiffBatchWithFS(fsys FileSystem, pairs []DiffPair) []*models.DiffOutput {
-	oldPaths := make([]string, len(pairs))
-	newPaths := make([]string, len(pairs))
+	return DiffBatchWithOptions(fsys, pairs, BatchOptions{})
+}
+
+// DiffBatchWithOptions is DiffBatchWithFS with opts.
+func DiffBatchWithOptions(fsys FileSystem, pairs []DiffPair, opts BatchOptions) []*models.DiffOutput {
+	out := make([]*models.DiffOutput, len(pairs))
+	trees := nonGoTrees{}
+	var oldPaths, newPaths []string
 	for i, p := range pairs {
-		oldPaths[i], newPaths[i] = p.Old, p.New
+		if opts.NonGo && !isGoPair(p) {
+			out[i] = nonGoDiff(fsys, trees, p)
+			continue
+		}
+		oldPaths, newPaths = append(oldPaths, p.Old), append(newPaths, p.New)
 	}
 	// The two trees are independent; load them at the same time. They
 	// share the loader's cache of standard-library and pinned-module types.
@@ -66,8 +76,10 @@ func DiffBatchWithFS(fsys FileSystem, pairs []DiffPair) []*models.DiffOutput {
 	go func() { defer wg.Done(); newSide = fingerprintFiles(fsys, newPaths, readDiffInput, false) }()
 	wg.Wait()
 
-	out := make([]*models.DiffOutput, len(pairs))
 	for i, p := range pairs {
+		if out[i] != nil {
+			continue
+		}
 		o, n := oldSide[p.Old], newSide[p.New]
 		switch {
 		case o.Err != nil:
