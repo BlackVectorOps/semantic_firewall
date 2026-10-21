@@ -170,3 +170,56 @@ func TestActionModFileRenamedAway(t *testing.T) {
 		t.Errorf("has_mod_changes %q; want true:\n%s", res.outputs["has_mod_changes"], res.log)
 	}
 }
+
+// Files the build uses that are not Go are reported with no Go file
+// changed: assembly and a .syso fail the gate, and an embedded file is
+// listed.
+func TestActionDiffModeNonGoFiles(t *testing.T) {
+	requireTools(t)
+	repo := gitRepo(t, map[string]string{
+		"go.mod":        gomod,
+		"p/p.go":        "package p\n\nimport _ \"embed\"\n\n//go:embed payload.txt\nvar payload string\n\nfunc add(a, b int) int\n",
+		"p/add_amd64.s": "// v1\n",
+		"p/payload.txt": "v1\n",
+		"README.md":     "a\n",
+	}, map[string]*string{
+		"p/add_amd64.s": str("// v2\n"),
+		"p/payload.txt": str("v2\n"),
+		"p/blob.syso":   str("\x7fELF...."),
+		"README.md":     str("b\n"),
+	})
+	res := runAction(t, repo, map[string]string{"INPUT_MODE": "diff", "INPUT_PATH": "."})
+	var entries []struct {
+		NewFile    string `json:"new_file"`
+		Unanalyzed []struct {
+			Kind string `json:"kind"`
+		} `json:"unanalyzed"`
+	}
+	if err := json.Unmarshal([]byte(res.outputs["result"]), &entries); err != nil {
+		t.Fatalf("result is not a JSON array: %v\n%s", err, res.log)
+	}
+	got := map[string]string{}
+	for _, e := range entries {
+		if len(e.Unanalyzed) == 1 {
+			got[e.NewFile] = e.Unanalyzed[0].Kind
+		} else {
+			got[e.NewFile] = "?"
+		}
+	}
+	// In a module with assembly any file can be #included, so README.md
+	// is listed too, below the threshold.
+	want := map[string]string{"p/add_amd64.s": "assembly", "p/payload.txt": "embed", "p/blob.syso": "syso", "README.md": "other"}
+	if len(got) != len(want) || got["p/add_amd64.s"] != "assembly" || got["p/payload.txt"] != "embed" || got["p/blob.syso"] != "syso" || got["README.md"] != "other" {
+		t.Errorf("result files %v; want %v", got, want)
+	}
+	if res.exitCode == 0 || res.outputs["high-risk-changes"] != "2" || res.outputs["semantic-match-pct"] != "100.0" ||
+		!strings.Contains(res.log, "::error file=p/blob.syso::syso added, risk 20") {
+		t.Errorf("exit %d, high risk %q, pct %q; want a failure on 2 and 100.0:\n%s", res.exitCode, res.outputs["high-risk-changes"], res.outputs["semantic-match-pct"], res.log)
+	}
+
+	// Audit mode fails on them too: the model never reads them.
+	res = runAction(t, repo, map[string]string{"INPUT_MODE": "audit", "INPUT_PATH": "."})
+	if res.exitCode == 0 || res.outputs["audit-verdict"] != "FAIL" || !strings.Contains(res.log, "::error file=p/add_amd64.s::assembly modified, risk 10") {
+		t.Errorf("audit: exit %d, verdict %q; want FAIL with the assembly named:\n%s", res.exitCode, res.outputs["audit-verdict"], res.log)
+	}
+}
