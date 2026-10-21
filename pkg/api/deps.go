@@ -609,10 +609,11 @@ func reachChange(name string, oldReach, newReach map[string]string, isInit bool)
 //     build configuration excludes (cgo files among them, as the loader
 //     disables cgo, which also hides the package's C files from go list);
 //   - every file an assembly file #includes, whatever its name or place;
-//   - in a module with a cgo file, every other non-Go file anywhere in the
-//     module, as #include and #cgo directives reach any file under any name
-//     (-l:payload.bin): one that holds machine code is an object, any other
-//     file not listed already is "other";
+//   - in a module with a cgo or assembly file, every other non-Go file
+//     anywhere in the module, as #include and #cgo directives reach any file
+//     under any name (-l:payload.bin), and a comment can hide an #include
+//     from the scan below: one that holds machine code is an object, any
+//     other file not listed already is "other";
 //   - every file a built package embeds.
 //
 // A symbolic link counts as the regular file it points to.
@@ -634,7 +635,7 @@ func inventory(m *depModule) map[string]string {
 			listed[filepath.Clean(f)] = true
 		}
 	}
-	usesCgo := false
+	usesCgo, usesAsm := false, false
 	included := make(map[string]bool)
 	for _, p := range m.pkgs {
 		compiled := make(map[string]bool)
@@ -657,6 +658,7 @@ func inventory(m *depModule) map[string]string {
 				case "cgo":
 					usesCgo = true
 				case "assembly":
+					usesAsm = true
 					hashIncludes(f, included, hash)
 				}
 				if kind != "" {
@@ -671,7 +673,7 @@ func inventory(m *depModule) map[string]string {
 			out["linkname:"+p.PkgPath+": "+d] = d
 		}
 	}
-	if usesCgo {
+	if usesCgo || usesAsm {
 		filepath.WalkDir(m.dir, func(f string, e fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
@@ -852,15 +854,19 @@ func packageLinknames(p *packages.Package) []string {
 	return out
 }
 
-// fileLinknames returns a file's //go:linkname directives, and their
-// //go:linknamestd spelling, which the compiler takes alike, normalized to
-// single spaces. They are read from the parsed comments, so one inside a
-// block comment is not one.
+// fileLinknames returns a file's //go:linkname directives, their
+// //go:linknamestd spelling, which the compiler takes alike, and its
+// //go:cgo_import_dynamic directives, normalized to single spaces. The
+// compiler takes the last outside cgo-generated code when it names a
+// library, and the linker then binds the named symbol from that shared
+// library with no cgo (x/sys/unix calls libc this way on darwin). They are
+// read from the parsed comments, so one inside a block comment is not one.
 func fileLinknames(f *ast.File) []string {
 	var out []string
 	for _, group := range f.Comments {
 		for _, c := range group.List {
-			if strings.HasPrefix(c.Text, "//go:linkname ") || strings.HasPrefix(c.Text, "//go:linknamestd ") {
+			if strings.HasPrefix(c.Text, "//go:linkname ") || strings.HasPrefix(c.Text, "//go:linknamestd ") ||
+				strings.HasPrefix(c.Text, "//go:cgo_import_dynamic ") {
 				out = append(out, strings.Join(strings.Fields(c.Text), " "))
 			}
 		}

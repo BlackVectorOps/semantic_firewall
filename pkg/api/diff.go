@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/ir"
@@ -27,14 +28,14 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 	processFile := func(path string) FileFingerprints {
 		content, absPath, err := readDiffInput(fsys, path)
 		if err != nil || content == nil {
-			return FileFingerprints{Results: []diff.FingerprintResult{}, Err: err}
+			return FileFingerprints{Results: []diff.FingerprintResult{}, Err: err, absent: err == nil}
 		}
 		paths := pathResolver{}
 		results, err := diff.FingerprintSourceWhere(absPath, string(content), ir.DefaultLiteralPolicy, false, paths.keepFiles(absPath))
 		if err != nil {
 			return FileFingerprints{Err: err}
 		}
-		return FileFingerprints{Results: inFile(results, absPath, paths), source: parseUnanalyzed(content)}
+		return FileFingerprints{Results: inFile(results, absPath, paths), source: parseUnanalyzed(absPath, content)}
 	}
 
 	// Load the two versions at the same time; report the old side's error
@@ -51,7 +52,76 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 	if newSide.Err != nil {
 		return nil, fmt.Errorf("failed to process new file: %w", newSide.Err)
 	}
-	return diffResults(oldPath, newPath, oldSide, newSide, riskProfile{}), nil
+	return diffSides(oldPath, newPath, oldSide, newSide), nil
+}
+
+// diffSides is diffResults for the two versions of one file, except when
+// a //go:build line, a GOOS or GOARCH name suffix or an import "C" changed
+// which default builds compile it (see diff.DefaultBuilds). The builds that
+// compile both versions compare them as usual. A build that compiles only
+// the old version lost its functions, which are diffed as removed; one
+// that compiles only the new version gained them, diffed as added. The
+// parts merge into one result that carries a "build" change in Unanalyzed.
+// The synthesized package initializer, which runs the package's other
+// files' initializers too, is left out of the removed part, and out of the
+// added part unless the file was in no build before.
+func diffSides(oldPath, newPath string, oldSide, newSide FileFingerprints) *models.DiffOutput {
+	if oldSide.absent || newSide.absent {
+		return diffResults(oldPath, newPath, oldSide, newSide, riskProfile{})
+	}
+	oldBuilds, newBuilds := oldSide.source.builds, newSide.source.builds
+	shared, left, gained := false, false, false
+	for _, b := range oldBuilds {
+		in := slices.Contains(newBuilds, b)
+		shared, left = shared || in, left || !in
+	}
+	for _, b := range newBuilds {
+		gained = gained || !slices.Contains(oldBuilds, b)
+	}
+	if !left && !gained {
+		return diffResults(oldPath, newPath, oldSide, newSide, riskProfile{})
+	}
+
+	absent := FileFingerprints{Results: []diff.FingerprintResult{}, absent: true}
+	var parts []*models.DiffOutput
+	if shared {
+		parts = append(parts, diffResults(oldPath, newPath, oldSide, newSide, riskProfile{}))
+	}
+	change := "modified"
+	if left {
+		parts = append(parts, diffResults(oldPath, newPath, oldSide, absent, riskProfile{}))
+		change = "removed"
+	}
+	if gained {
+		added := newSide
+		if shared {
+			added.Results = withoutPackageInit(newSide.Results)
+		}
+		parts = append(parts, diffResults(oldPath, newPath, absent, added, riskProfile{}))
+		if left {
+			change = "modified"
+		} else {
+			change = "added"
+		}
+	}
+	out := &models.DiffOutput{OldFile: oldPath, NewFile: newPath, Functions: []models.FunctionDiff{}}
+	for _, p := range parts {
+		out.Functions = append(out.Functions, p.Functions...)
+		out.Unanalyzed = append(out.Unanalyzed, p.Unanalyzed...)
+		out.TopologyMatches = append(out.TopologyMatches, p.TopologyMatches...)
+		out.Summary.TotalFunctions += p.Summary.TotalFunctions
+		out.Summary.Preserved += p.Summary.Preserved
+		out.Summary.Modified += p.Summary.Modified
+		out.Summary.Added += p.Summary.Added
+		out.Summary.Removed += p.Summary.Removed
+		out.Summary.RenamedFunctions += p.Summary.RenamedFunctions
+		out.Summary.HighRiskChanges += p.Summary.HighRiskChanges
+	}
+	if out.Summary.TotalFunctions > 0 {
+		out.Summary.SemanticMatchPct = float64(out.Summary.Preserved) / float64(out.Summary.TotalFunctions) * 100.0
+	}
+	out.Unanalyzed = append(out.Unanalyzed, models.FileChange{File: newPath, Kind: "build", Change: change})
+	return out
 }
 
 // diffResults pairs the fingerprinted functions of two versions of a file,
@@ -60,6 +130,13 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 // diffLinknames). It is the part of a diff that does not depend on where
 // the functions came from.
 func diffResults(oldPath, newPath string, oldSide, newSide FileFingerprints, profile riskProfile) *models.DiffOutput {
+	// A deleted file's synthesized package initializer runs every file's
+	// package-level initializers, and the package's other files still do;
+	// reporting it removed would charge the deletion with their checks.
+	// The deleted file's own init functions have a file and stay.
+	if newSide.absent && !oldSide.absent {
+		oldSide.Results = withoutPackageInit(oldSide.Results)
+	}
 	matched, addedFuncs, removedFuncs := diff.MatchFunctionsByTopology(
 		oldSide.Results, newSide.Results, models.DefaultTopologyMatchThreshold,
 	)
@@ -295,6 +372,18 @@ func inFile(results []diff.FingerprintResult, path string, paths pathResolver) [
 	kept := results[:0:0]
 	for _, r := range results {
 		if r.Filename == "" || paths.resolve(r.Filename) == want {
+			kept = append(kept, r)
+		}
+	}
+	return kept
+}
+
+// withoutPackageInit drops the functions with no source file: the
+// synthesized package initializer.
+func withoutPackageInit(results []diff.FingerprintResult) []diff.FingerprintResult {
+	kept := results[:0:0]
+	for _, r := range results {
+		if r.Filename != "" {
 			kept = append(kept, r)
 		}
 	}

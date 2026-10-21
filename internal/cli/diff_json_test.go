@@ -33,7 +33,7 @@ func TestDiff_EmptyDiffPrintsFunctionsArray(t *testing.T) {
 	}
 
 	var batch bytes.Buffer
-	if err := RunDiffBatchLogic(RealFileSystem{}, &batch, writePairs(t, blank+"\x00"+os.DevNull+"\x00")); err != nil {
+	if err := RunDiffBatchLogic(RealFileSystem{}, &batch, writePairs(t, blank+"\x00"+os.DevNull+"\x00"), false); err != nil {
 		t.Fatalf("RunDiffBatchLogic: %v", err)
 	}
 	var many []map[string]json.RawMessage

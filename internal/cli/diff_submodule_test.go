@@ -40,7 +40,7 @@ func TestBatchMounts_SubmoduleWithoutGoMod(t *testing.T) {
 	pairsFile := writePairs(t, "\x00"+input+"\x00")
 
 	// Unsandboxed, the file loads as part of module example.com/m.
-	if err := RunDiffBatchLogic(RealFileSystem{}, &bytes.Buffer{}, pairsFile); err != nil {
+	if err := RunDiffBatchLogic(RealFileSystem{}, &bytes.Buffer{}, pairsFile, false); err != nil {
 		t.Fatalf("unsandboxed: %v", err)
 	}
 

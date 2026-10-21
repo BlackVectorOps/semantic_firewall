@@ -51,7 +51,7 @@ func TestBatchMounts_SymlinkOutOfItsRoot(t *testing.T) {
 
 	// Outside the sandbox the pair is a high-risk added function.
 	var buf bytes.Buffer
-	if err := RunDiffBatchLogic(RealFileSystem{}, &buf, pairsFile); err != nil {
+	if err := RunDiffBatchLogic(RealFileSystem{}, &buf, pairsFile, false); err != nil {
 		t.Fatalf("RunDiffBatchLogic: %v", err)
 	}
 	var out []models.DiffOutput

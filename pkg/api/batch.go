@@ -5,6 +5,7 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -52,10 +53,30 @@ func DiffBatch(pairs []DiffPair) []*models.DiffOutput {
 // FileSystem but RealFileSystem, each file is loaded on its own, so each
 // result is what DiffWithFS returns for its pair.
 func DiffBatchWithFS(fsys FileSystem, pairs []DiffPair) []*models.DiffOutput {
-	oldPaths := make([]string, len(pairs))
-	newPaths := make([]string, len(pairs))
+	return DiffBatchWithOptions(fsys, pairs, BatchOptions{})
+}
+
+// DiffBatchWithOptions is DiffBatchWithFS with opts.
+func DiffBatchWithOptions(fsys FileSystem, pairs []DiffPair, opts BatchOptions) []*models.DiffOutput {
+	out := make([]*models.DiffOutput, len(pairs))
+	trees := nonGoTrees{}
+	if opts.NonGo {
+		// Every module of the batch is listed first: a file one module
+		// includes can sit in another, or in none.
+		if _, onDisk := fsys.(RealFileSystem); onDisk && slices.ContainsFunc(pairs, func(p DiffPair) bool { return !isGoPair(p) }) {
+			for _, p := range pairs {
+				trees.load(fsys, p.Old)
+				trees.load(fsys, p.New)
+			}
+		}
+	}
+	var oldPaths, newPaths []string
 	for i, p := range pairs {
-		oldPaths[i], newPaths[i] = p.Old, p.New
+		if opts.NonGo && !isGoPair(p) {
+			out[i] = nonGoDiff(fsys, trees, p)
+			continue
+		}
+		oldPaths, newPaths = append(oldPaths, p.Old), append(newPaths, p.New)
 	}
 	// The two trees are independent; load them at the same time. They
 	// share the loader's cache of standard-library and pinned-module types.
@@ -66,8 +87,10 @@ func DiffBatchWithFS(fsys FileSystem, pairs []DiffPair) []*models.DiffOutput {
 	go func() { defer wg.Done(); newSide = fingerprintFiles(fsys, newPaths, readDiffInput, false) }()
 	wg.Wait()
 
-	out := make([]*models.DiffOutput, len(pairs))
 	for i, p := range pairs {
+		if out[i] != nil {
+			continue
+		}
 		o, n := oldSide[p.Old], newSide[p.New]
 		switch {
 		case o.Err != nil:
@@ -75,7 +98,7 @@ func DiffBatchWithFS(fsys FileSystem, pairs []DiffPair) []*models.DiffOutput {
 		case n.Err != nil:
 			out[i] = failedDiff(p, fmt.Errorf("failed to process new file: %w", n.Err))
 		default:
-			out[i] = diffResults(p.Old, p.New, o, n, riskProfile{})
+			out[i] = diffSides(p.Old, p.New, o, n)
 		}
 	}
 	return out
@@ -120,6 +143,8 @@ type FileFingerprints struct {
 	// source holds what the file's text declares that its SSA does not show
 	// (see parseUnanalyzed).
 	source unanalyzedSource
+	// absent is set when the path stands for no file (see readDiffInput).
+	absent bool
 }
 
 // inputReader reads a file to fingerprint: its content, or nil when the
@@ -153,7 +178,7 @@ func fingerprintFiles(fsys FileSystem, paths []string, read inputReader, strict 
 		}
 		content, abs, err := readSafely(read, fsys, path)
 		if err != nil || content == nil {
-			out[path] = FileFingerprints{Results: []diff.FingerprintResult{}, Err: err}
+			out[path] = FileFingerprints{Results: []diff.FingerprintResult{}, Err: err, absent: err == nil}
 			continue
 		}
 		out[path] = FileFingerprints{} // claimed; filled in below
@@ -194,7 +219,7 @@ func fingerprintFiles(fsys FileSystem, paths []string, read inputReader, strict 
 	// which the loads above do not keep.
 	for _, f := range sources {
 		r := out[f.path]
-		r.source = parseUnanalyzed(f.content)
+		r.source = parseUnanalyzed(f.abs, f.content)
 		out[f.path] = r
 	}
 	return out

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/diff"
 	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/models"
 )
 
@@ -22,15 +23,19 @@ type unanalyzedSource struct {
 	bodyless map[string]string
 	// linknames are the file's //go:linkname directives (see fileLinknames).
 	linknames []string
+	// builds are the default builds that compile the file (see
+	// diff.DefaultBuilds).
+	builds []string
 }
 
 // parseUnanalyzed reads a file's unanalyzedSource. A file that does not
-// parse has none: its load fails before the diff gets here.
-func parseUnanalyzed(src []byte) unanalyzedSource {
+// parse has none but its builds: its load fails before the diff gets here.
+func parseUnanalyzed(abs string, src []byte) unanalyzedSource {
+	builds := diff.DefaultBuilds(abs, string(src))
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "", src, parser.ParseComments|parser.SkipObjectResolution)
 	if err != nil {
-		return unanalyzedSource{}
+		return unanalyzedSource{builds: builds}
 	}
 	bodyless := make(map[string]string)
 	for _, d := range f.Decls {
@@ -44,7 +49,7 @@ func parseUnanalyzed(src []byte) unanalyzedSource {
 		}
 		bodyless[name] = fieldTypes(fset, fd.Type.Params) + " " + fieldTypes(fset, fd.Type.Results)
 	}
-	return unanalyzedSource{bodyless: bodyless, linknames: fileLinknames(f)}
+	return unanalyzedSource{bodyless: bodyless, linknames: fileLinknames(f), builds: builds}
 }
 
 // fieldTypes prints a parameter or result list's types, one per name, so a

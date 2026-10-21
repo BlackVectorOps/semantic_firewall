@@ -65,7 +65,7 @@ func TestRunDiffBatchLogic(t *testing.T) {
 
 	run := func(pairs string) ([]models.DiffOutput, error) {
 		var buf bytes.Buffer
-		err := RunDiffBatchLogic(RealFileSystem{}, &buf, writePairs(t, pairs))
+		err := RunDiffBatchLogic(RealFileSystem{}, &buf, writePairs(t, pairs), false)
 		var out []models.DiffOutput
 		if jerr := json.Unmarshal(buf.Bytes(), &out); jerr != nil {
 			t.Fatalf("output is not a JSON array: %v\n%s", jerr, buf.String())

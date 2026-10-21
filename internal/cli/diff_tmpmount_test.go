@@ -43,7 +43,7 @@ func TestRunDiffBatch_SandboxedFilesDirectlyInTmp(t *testing.T) {
 		t.Fatalf("control: sandboxed single diff: %v", err)
 	}
 	pairs := writePairs(t, oldFile+"\x00"+newFile+"\x00")
-	if err := RunDiffBatch(pairs, false); err != nil {
+	if err := RunDiffBatch(pairs, false, false); err != nil {
 		t.Errorf("sandboxed batch of the same pair: %v; want it to run like the single diff", err)
 	}
 }

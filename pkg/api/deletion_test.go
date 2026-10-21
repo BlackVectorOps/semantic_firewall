@@ -537,3 +537,58 @@ func TestDiffRisk_InsecureIgnoreHostKey(t *testing.T) {
 		t.Errorf("Client: risk %d, delta %q; want WeakenedSecurity for InsecureIgnoreHostKey", f.RiskScore, f.TopologyDelta)
 	}
 }
+
+// A deleted file reports the functions declared in it, its own init
+// functions included, but not the package initializer, whose checks belong
+// to the files still there. Diff and DiffBatch agree.
+func TestDiff_DeletedFileKeepsPackageInit(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"go.mod": "module example.com/m\n\ngo 1.22\n",
+		"p/config.go": `package p
+
+import "crypto/hmac"
+
+var key = []byte("k")
+
+func init() {
+	if !hmac.Equal(key, []byte("k")) {
+		panic("bad key")
+	}
+}
+`,
+		"p/util.go": "package p\n\nfunc Add(a, b int) int { return a + b }\n",
+		"p/auth.go": `package p
+
+import "crypto/subtle"
+
+var hooks []func([]byte) bool
+
+func verifyToken(tok []byte) bool { return subtle.ConstantTimeCompare(tok, key) == 1 }
+
+func init() { hooks = append(hooks, verifyToken) }
+`,
+	})
+	util, auth := filepath.Join(dir, "p/util.go"), filepath.Join(dir, "p/auth.go")
+	single := func(path string) *models.DiffOutput {
+		out, err := api.Diff(path, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	batch := api.DiffBatch([]api.DiffPair{{Old: util, New: ""}, {Old: auth, New: ""}})
+	for i, out := range []*models.DiffOutput{single(util), batch[0]} {
+		if out.Summary.HighRiskChanges != 0 || len(out.Functions) != 1 || out.Functions[0].Function != "Add" {
+			t.Errorf("util.go (%d): high risk %d, functions %+v; want only Add removed", i, out.Summary.HighRiskChanges, out.Functions)
+		}
+	}
+	for i, out := range []*models.DiffOutput{single(auth), batch[1]} {
+		var names []string
+		for _, f := range out.Functions {
+			names = append(names, f.Function)
+		}
+		if out.Summary.HighRiskChanges != 1 || len(out.Functions) != 2 || !strings.Contains(findFunc(t, out, "verifyToken").TopologyDelta, "RemovedCheck(crypto/subtle.ConstantTimeCompare)") {
+			t.Errorf("auth.go (%d): high risk %d, functions %v; want verifyToken's RemovedCheck and its init, nothing else", i, out.Summary.HighRiskChanges, names)
+		}
+	}
+}

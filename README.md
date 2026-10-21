@@ -58,7 +58,7 @@ Flags must come before positional arguments. The CLI parses each command with Go
 | Command | Flags (default) | Arguments | Sandboxed |
 |---------|-----------------|-----------|-----------|
 | `check` | `--strict` (false), `--scan` (false), `--db` (""), `--no-sandbox` (false) | `<file.go\|dir>` | yes |
-| `diff` | `--no-sandbox` (false), `--batch` ("") | `<old.go> <new.go>`, or none with `--batch <pairs-file>` | yes |
+| `diff` | `--no-sandbox` (false), `--batch` (""), `--non-go` (false, only with `--batch`) | `<old.go> <new.go>`, or none with `--batch <pairs-file>` | yes |
 | `deps diff` | `--no-sandbox` (false) | `<old-module-dir> <new-module-dir>` | yes |
 | `audit` | `--model` (`claude-opus-5-5`), `--api-key` (""), `--api-base` (""), `--no-sandbox` (false) | `<old.go> <new.go> "<commit message>"` | yes (the diff step) |
 | `index` | `--name` (required), `--severity` (`HIGH`), `--category` (`malware`), `--db` ("") | `<file.go\|dir>` | no |
@@ -223,12 +223,14 @@ The package `init` function is diffed like any other. Swapping an import changes
 
 ### Files
 
-The diff reports the functions declared in the given file, closures and [body-less functions](#body-less-functions) included, plus the package's synthesized `init`. That function has no source file and runs every file's package-level initializers. The package's other files are loaded for type-checking but their functions are not reported. A function belongs to the file it is written in: a `//line` directive changes the position the compiler reports, not which file's diff the function is in.
+The diff reports the functions declared in the given file, closures and [body-less functions](#body-less-functions) included, plus the package's synthesized `init`. That function has no source file and runs every file's package-level initializers. A deleted file does not report it removed, since the package's other files still run it: the file's own functions and `init` functions are what goes. A check made directly in a deleted file's package-level variable initializer is therefore not reported. The package's other files are loaded for type-checking but their functions are not reported. A function belongs to the file it is written in: a `//line` directive changes the position the compiler reports, not which file's diff the function is in.
 
 A file that the host build excludes is loaded under a configuration that includes it, chosen before the file is loaded:
 - **`_test.go` file:** loaded with the package's tests.
 - **`_GOOS`/`_GOARCH` name suffix or `//go:build` line:** `go/build` matches the file against GOOS/GOARCH pairs, the host's first and then a fixed list of 27 (`knownPlatforms` in `pkg/diff/fingerprinter.go`). For each pair it tries every subset of the line's custom tags, at most 4. Platform names, `unix`, `cgo`, `gc`, `gccgo`, `ignore`, `go1.*` and `goexperiment.*` do not count as custom tags (`ignore` is never supplied: the standard library's generators carry it, and a build with it set fails). The first match is loaded, with cgo disabled. The configuration is chosen up front because `go list`, asked for a file that is the only Go file of its directory, does not report it excluded: it builds an ad-hoc package of the file under the host's GOOS and GOARCH, where the platform's API is undefined and the sizes are the host's.
 - A file that no combination matches (a `//go:build ignore` script beside a package's files) is loaded alone, as `go build file.go` builds it: an ad-hoc package of the one file under the host's GOOS and GOARCH, its constraints ignored.
+
+The two versions of a file can differ in which default builds compile them: builds without custom tags for each GOOS/GOARCH pair of `go tool dist list`, with cgo off and on, at each architecture's default feature level (`amd64.v1`, `arm64.v8.0`, `arm.7`), with the release and `goexperiment` tags of the Go toolchain `sfw` runs on. A `//go:build` or `// +build` line, a GOOS or GOARCH name suffix, or an `import "C"` decides it. The builds that compile both versions compare them as usual. Functions that leave a build whatever their code, because only the old version is in it, are reported removed (a check among them as `RemovedCheck`); functions that enter one, because only the new version is in it, are reported added, so code moved from `plan9` into `linux` is scored as new. Both parts go in the one result, with an `unanalyzed` entry of kind `build`, change `removed`, `added` or `modified` (both), risk 0. The package's synthesized `init` is left out of the removed part, and out of the added part unless the file was in no build before, since it also runs the package's other files' initializers.
 
 A module with a `vendor` directory is loaded from it, as the go command builds it (a `go.mod` of go 1.14 or later; in a workspace, the workspace's `vendor` directory with a `go.work` of go 1.22 or later), whatever the module cache holds. Every mode of `sfw` applies this rule (`diff.VendorDir`).
 
@@ -280,11 +282,13 @@ The pair below was produced by the code shown. The fingerprints differ, because 
 
 ### Batch mode
 
-`sfw diff --batch <pairs-file>` diffs many files in one run. The pairs file holds NUL-terminated paths, alternately the old and the new version of each file (`old1\0new1\0old2\0new2\0`). An empty path or `/dev/null` stands for the absent side of an added or deleted file.
+`sfw diff [--non-go] --batch <pairs-file>` diffs many files in one run (`--batch` takes the next argument as its file, so `--non-go` goes before it). The pairs file holds NUL-terminated paths, alternately the old and the new version of each file (`old1\0new1\0old2\0new2\0`). An empty path or `/dev/null` stands for the absent side of an added or deleted file.
 
 The output is a JSON array with one `sfw diff` result per pair, in order. A pair that cannot be diffed (a file that does not parse, say) has an `error` field and an empty `functions` list. The command prints every result, then exits 1 with `Error: 1 of 3 file pair(s) could not be diffed` on stderr.
 
-Each result equals what `sfw diff` prints for that pair alone. The difference is loading: the files of one side that share a module root (the nearest `go.mod`) and the `go.work` that governs them are loaded with one `go/packages` call, so a package and its imports are type-checked once however many of its files changed. A file outside any module, a file the module's default build excludes (see [Files](#files)), a file in a package that does not type-check, and every file of a group whose load fails are loaded on their own, as `sfw diff` loads them. The old and new sides load concurrently.
+With `--non-go`, a pair with no `.go` file on either side is not loaded as Go. The module (the nearest `go.mod`) of every file in the batch is listed with `go list` once, over `./...` and every package it imports from the same tree (`vendor/`, and directories `./...` skips such as `_x` or `testdata`). Since that is the host's build, every assembly, C or object file beside a `.go` file anywhere in the module is listed too, with what its assembly `#include`s. The file is looked up among the files these builds use, in every listed module (an `#include` can reach outside its own), with the kinds of [`sfw deps diff`](#sfw-deps-diff)'s `unanalyzed` list. A file included only from a module none of the batch's files is in is not found. When either tree uses it and its kind or content differs, the result lists it under `unanalyzed`, `added`, `modified` or `removed`, with no functions: `assembly` and `c` score 10, `syso` and `object` 20, `embed` and `other` 5, a removal 0, and a score of 10 or more counts in `high_risk_changes`. A file neither tree uses (documentation, a file outside any module) gives an empty result, and when a listed module's packages cannot be listed, a file no other module uses fails. Without `--non-go`, such a pair is loaded as Go and fails.
+
+Each Go result equals what `sfw diff` prints for that pair alone. The difference is loading: the files of one side that share a module root (the nearest `go.mod`) and the `go.work` that governs them are loaded with one `go/packages` call, so a package and its imports are type-checked once however many of its files changed. A file outside any module, a file the module's default build excludes (see [Files](#files)), a file in a package that does not type-check, and every file of a group whose load fails are loaded on their own, as `sfw diff` loads them. The old and new sides load concurrently.
 
 ## Risk scoring
 
@@ -453,6 +457,8 @@ A `//go:linkname local target` directive, or its `//go:linknamestd` spelling, wh
 
 An added directive scores 10 and counts in `high_risk_changes`, not in the function counts. A removed one scores 0 and is listed with the old file's path. A changed target is a removed directive and an added one, and a directive moved to another file of the package is added in that file. Text the compiler does not take as a directive, inside a block comment or with a tab after `//go:linkname`, is not reported.
 
+A `//go:cgo_import_dynamic local remote "library"` directive is listed the same way, with kind `linkname`. The compiler takes it outside cgo-generated code when it names a library, and the linker then binds `remote` from that shared library as `local`, with no cgo: `golang.org/x/sys/unix` calls libc this way on darwin, through an assembly trampoline. The other `//go:cgo_*` directives are refused outside cgo-generated code.
+
 ## Detection scope
 
 **Scored:**
@@ -555,13 +561,13 @@ For each compared module:
   | `kind` | Files | Added or modified |
   |--------|-------|-------------------|
   | `syso`, `object` | `.syso`; `.a`, `.o`, `.so`, `.dylib`, `.dll`, `.lib` | 20 |
-  | `linkname` | each `//go:linkname` or `//go:linknamestd` directive in a package's Go files, compiled or excluded, keyed by package (renaming its file is no change) | 10 |
+  | `linkname` | each `//go:linkname`, `//go:linknamestd` or `//go:cgo_import_dynamic` directive in a package's Go files, compiled or excluded, keyed by package (renaming its file is no change) | 10 |
   | `assembly`, `c` | `.s`, `.sx`; C, C++, Objective-C, Fortran and SWIG sources and headers | 5 |
   | `cgo`, `excluded-go` | Go files the build leaves out: those that import `"C"`, and those excluded by build constraints (other platforms included) | 5 |
   | `embed` | files embedded with `//go:embed` | 5 |
-  | `other` | in a module with a cgo file, any other non-Go file | 5 |
+  | `other` | in a module with a cgo or assembly file, any other non-Go file | 5 |
 
-  Removed files score 0. Files are taken from each built package's directory, tests excluded, and a symbolic link counts as the regular file it points to. Every file an assembly file `#include`s is included, wherever it is and whatever its name. In a module with a cgo file, every non-Go file anywhere in the module is included, since `#include` and `#cgo LDFLAGS` (`-l:payload.bin`) can reach any file under any name: one that starts like an ELF, Mach-O or PE file or an ar archive is an `object`, others are `other`. `go list` itself omits a cgo package's C files when cgo is disabled. Directives are read from the parsed comments, so one inside a block comment is not one.
+  Removed files score 0. Files are taken from each built package's directory, tests excluded, and a symbolic link counts as the regular file it points to. Every file an assembly file `#include`s is included, wherever it is and whatever its name. In a module with a cgo or assembly file, every non-Go file anywhere in the module is included, since `#include` and `#cgo LDFLAGS` (`-l:payload.bin`) can reach any file under any name, and a comment before an `#include` hides it from the scan above: one that starts like an ELF, Mach-O or PE file or an ar archive is an `object`, others are `other`. `go list` itself omits a cgo package's C files when cgo is disabled. Directives are read from the parsed comments, so one inside a block comment is not one.
 
 A module's `risk_score` is the highest of its changes, and `high_risk_changes` counts those scoring 10 or more. An `added` module, and the packages the new tree newly builds from a module at an unchanged version, list the capability classes their entry points can reach (`capabilities`), initializers that reach any (`reach`), and their new `syso`, `object` and `linkname` files.
 
