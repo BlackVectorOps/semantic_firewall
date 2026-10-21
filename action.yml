@@ -33,7 +33,7 @@ inputs:
     required: false
     default: 'false'
   fail-on-alert:
-    description: 'Fail workflow if malware is detected (scan mode) or a dependency change is high-risk (deps mode)'
+    description: 'Fail workflow if malware is detected (scan mode) or a change is high-risk (diff and deps modes): true or false'
     required: false
     default: 'true'
   scan-deps:
@@ -72,7 +72,7 @@ outputs:
     description: 'Final audit verdict (audit mode): PASS or FAIL'
     value: ${{ steps.run-sfw.outputs.audit-verdict }}
   high-risk-changes:
-    description: 'Number of high-risk dependency changes (deps mode)'
+    description: 'Number of high-risk changes (diff and deps modes)'
     value: ${{ steps.run-sfw.outputs.high-risk-changes }}
 
 runs:
@@ -133,81 +133,204 @@ runs:
       shell: bash
       env:
         INPUT_MODE: ${{ inputs.mode }}
-        GITHUB_BASE_REF: ${{ github.base_ref }}
         GITHUB_EVENT_NAME: ${{ github.event_name }}
         GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+        MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       run: |
         set -euo pipefail
-        
+
         if [[ "$INPUT_MODE" != "diff" ]] && [[ "$INPUT_MODE" != "audit" ]] && [[ "$INPUT_MODE" != "deps" ]]; then
-          echo "mode_needs_prep=false" >> "$GITHUB_OUTPUT"
           exit 0
         fi
-        
-        echo "mode_needs_prep=true" >> "$GITHUB_OUTPUT"
-        
-        determine_base_ref() {
-          if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
-            for attempt in 1 2 3; do
-              if git fetch origin "$GITHUB_BASE_REF" --depth=100 2>/dev/null; then
-                break
-              fi
-              [[ $attempt -lt 3 ]] && sleep 2
-            done
-            printf '%s' "origin/$GITHUB_BASE_REF"
-          elif [[ "${GITHUB_EVENT_NAME:-}" == "push" ]]; then
-            local before_sha="${GITHUB_EVENT_BEFORE:-}"
-            if [[ "$before_sha" == "0000000000000000000000000000000000000000" ]] || [[ -z "$before_sha" ]]; then
-              printf '%s' "HEAD^"
-            else
-              printf '%s' "$before_sha"
-            fi
-          else
-            printf '%s' "HEAD~1"
+
+        # Every failure to find the base fails the job: a base that is
+        # missing or wrong would analyze nothing, or the wrong changes.
+        fail() { local m="$*"; m=${m//%/%25}; m=${m//$'\r'/%0D}; m=${m//$'\n'/%0A}; echo "::error::${m}"; exit 1; }
+        is_sha() { [[ "$1" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] && [[ ! "$1" =~ ^0+$ ]]; }
+        have() { git cat-file -e "$1^{commit}" 2>/dev/null; }
+        # A commit by hash, from origin or else the repository the workflow
+        # runs in: a checkout of a fork's head has the fork as origin. The
+        # hash names the commit, wherever it comes from.
+        fetch_sha() {
+          have "$1" && return 0
+          git fetch -q --no-tags origin "$1" >/dev/null 2>&1 || true
+          have "$1" && return 0
+          if [[ -n "${GITHUB_SERVER_URL:-}" && -n "${GITHUB_REPOSITORY:-}" ]]; then
+            git fetch -q --no-tags "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" "$1" >/dev/null 2>&1 || true
           fi
+          have "$1"
         }
-        
-        readonly BASE_REF=$(determine_base_ref)
-        readonly HEAD_REF="HEAD"
-        echo "base_ref=${BASE_REF}" >> "$GITHUB_OUTPUT"
-        
-        readonly WORKTREE_DIR=".sfw_base_worktree"
-        if [[ -d "$WORKTREE_DIR" ]]; then
-          git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"
-        fi
-        
-        if ! git rev-parse --verify "$BASE_REF" >/dev/null 2>&1; then
-          git fetch --unshallow 2>/dev/null || git fetch --depth=500 2>/dev/null || true
-        fi
-        
-        if git worktree add --detach "$WORKTREE_DIR" "$BASE_REF" >/dev/null 2>&1; then
-          echo "::debug::Worktree created successfully."
-        else
-          mkdir -p "$WORKTREE_DIR"
-        fi
+        # Fully qualified, so a tag of the same name is never taken for the
+        # branch.
+        fetch_branch() { [[ -n "$1" ]] && git fetch -q --no-tags origin "+refs/heads/$1:refs/remotes/origin/$1"; }
+        # The one best common ancestor of $1 and HEAD. A criss-cross history
+        # has several, and a diff from any one of them can miss what the
+        # merge changes.
+        single_merge_base() {
+          local bases
+          [[ "$(git rev-parse --is-shallow-repository)" == false ]] || return 1
+          bases=$(git merge-base --all "$1" HEAD) || return 1
+          [[ -n "$bases" && "$bases" != *$'\n'* ]] || return 1
+          printf '%s' "$bases"
+        }
+
+        HEAD_SHA=$(git rev-parse --verify 'HEAD^{commit}')
+        # Set when HEAD may be its own base: a push that adds nothing.
+        SAME_OK=false
+        case "${GITHUB_EVENT_NAME:-}" in
+          pull_request|pull_request_target)
+            # The base comes from the event, never from a branch of the
+            # repository the checkout calls origin, which can be a fork.
+            is_sha "${PR_HEAD_SHA:-}" || fail "The event has no pull request head commit."
+            is_sha "${PR_BASE_SHA:-}" || fail "The event has no pull request base commit."
+            git merge-base --is-ancestor "$PR_HEAD_SHA" HEAD 2>/dev/null ||
+              fail "HEAD does not contain the pull request head ${PR_HEAD_SHA}. Check out the pull request's merge or head commit."
+            fetch_sha "$PR_BASE_SHA" || fail "Cannot fetch the pull request's base commit ${PR_BASE_SHA}."
+            if [[ "$(git rev-parse -q --verify 'HEAD^2^{commit}' || true)" == "$PR_HEAD_SHA" ]] &&
+               [[ "$(git rev-parse -q --verify 'HEAD^1^{commit}' || true)" == "$PR_BASE_SHA" ]]; then
+              # GitHub's merge commit of the head onto the base.
+              BASE=$PR_BASE_SHA
+            else
+              BASE=$(single_merge_base "$PR_BASE_SHA") ||
+                fail "HEAD and the pull request's base ${PR_BASE_SHA} have no single merge base. Use fetch-depth: 0, or check out the merge commit."
+            fi
+            ;;
+          merge_group)
+            { is_sha "${MG_BASE_SHA:-}" && fetch_sha "$MG_BASE_SHA"; } || fail "Cannot resolve the merge group base ${MG_BASE_SHA:-}."
+            [[ "$HEAD_SHA" == "${MG_HEAD_SHA:-}" ]] || fail "HEAD is not the merge group head ${MG_HEAD_SHA:-}."
+            BASE=$MG_BASE_SHA
+            ;;
+          push)
+            if is_sha "${GITHUB_EVENT_BEFORE:-}" && fetch_sha "$GITHUB_EVENT_BEFORE"; then
+              BASE=$GITHUB_EVENT_BEFORE
+            else
+              # A new branch, a tag, or a force push whose old tip is gone:
+              # compare with the default branch, not just the last commit. A
+              # stale local copy of it only widens the comparison.
+              if ! fetch_branch "${DEFAULT_BRANCH:-}" 2>/dev/null; then
+                have "refs/remotes/origin/${DEFAULT_BRANCH:-}" ||
+                  fail "The push has no before commit and the default branch cannot be fetched."
+                echo "::warning::Cannot fetch ${DEFAULT_BRANCH}; comparing with the checkout's copy of it."
+              fi
+              BASE=$(single_merge_base "refs/remotes/origin/$DEFAULT_BRANCH") ||
+                fail "HEAD and ${DEFAULT_BRANCH} have no single merge base. Use fetch-depth: 0."
+              echo "::notice::The push has no usable before commit; comparing with ${DEFAULT_BRANCH}."
+              # A new branch or tag already on the default branch adds
+              # nothing to compare. A force push whose before is gone does
+              # not get that pass: the default branch may already hold it.
+              if [[ "${GITHUB_EVENT_BEFORE:-}" =~ ^0+$ ]]; then SAME_OK=true; fi
+            fi
+            ;;
+          *)
+            BASE=$(git rev-parse -q --verify 'HEAD~1^{commit}') || fail "HEAD has no parent to compare with."
+            ;;
+        esac
+        [[ "$BASE" != "$HEAD_SHA" || "$SAME_OK" == true ]] || fail "The base is HEAD itself (${BASE}); there is nothing to compare."
+        echo "base_sha=${BASE}" >> "$GITHUB_OUTPUT"
+
+        # Scratch files live outside the checkout: the change being analyzed
+        # controls every path in it, symlinks included.
+        WORK=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/sfw.XXXXXXXX")
+        echo "work_dir=${WORK}" >> "$GITHUB_OUTPUT"
+        WORKTREE_DIR="$WORK/base"
+        git worktree prune
+        git worktree add -q --detach "$WORKTREE_DIR" "$BASE" >/dev/null || fail "Cannot check out the base ${BASE}."
         echo "worktree_dir=${WORKTREE_DIR}" >> "$GITHUB_OUTPUT"
-        
-        readonly DIFF_STREAM_FILE=".sfw_diff_stream.bin"
-        if ! git diff -z --name-status "$BASE_REF" "$HEAD_REF" > "$DIFF_STREAM_FILE" 2>/dev/null; then
-          : > "$DIFF_STREAM_FILE"
-        fi
-        
+
+        # -z everywhere: without it git quotes unusual names ("p/\303\251.go"),
+        # and the suffix tests miss them.
+        DIFF_STREAM_FILE="$WORK/diff.bin"
+        # --ignore-submodules=none: the change's own .gitmodules could
+        # otherwise hide a submodule with ignore = all.
+        git diff -z --raw --no-abbrev --no-ext-diff --ignore-submodules=none "$BASE" "$HEAD_SHA" > "$DIFF_STREAM_FILE" || fail "git diff ${BASE} ${HEAD_SHA} failed."
+        TREE_FILE="$WORK/tree.bin"
+        git ls-tree -r -z --full-tree "$HEAD_SHA" > "$TREE_FILE" || fail "git ls-tree ${HEAD_SHA} failed."
+        NAMES_FILE="$WORK/names.bin"
+        # --no-renames, so a go.mod renamed away counts by its old name.
+        git diff -z --no-ext-diff --no-renames --ignore-submodules=none --name-only "$BASE" "$HEAD_SHA" > "$NAMES_FILE" || fail "git diff ${BASE} ${HEAD_SHA} failed."
         # grep -c prints 0 and exits 1 when nothing matches; `|| true` keeps
-        # that single 0 instead of appending a second one.
-        GO_FILE_COUNT=$(git diff --name-only "$BASE_REF" "$HEAD_REF" 2>/dev/null | grep -c '\.go$' || true)
-        # A go.work redirects modules like a replace does, so its changes
-        # count too.
-        MOD_FILE_COUNT=$(git diff --name-only "$BASE_REF" "$HEAD_REF" 2>/dev/null | grep -cE '(^|/)go\.(mod|sum|work|work\.sum)$' || true)
+        # that single 0. A go.work redirects modules like a replace does, so
+        # its changes count too.
+        MOD_FILE_COUNT=$(tr '\0' '\n' < "$NAMES_FILE" | grep -cE '(^|/)go\.(mod|sum|work|work\.sum)$' || true)
         if [[ "$MOD_FILE_COUNT" -gt 0 ]]; then
           echo "has_mod_changes=true" >> "$GITHUB_OUTPUT"
         else
           echo "has_mod_changes=false" >> "$GITHUB_OUTPUT"
         fi
-        if [[ "$GO_FILE_COUNT" -gt 0 ]]; then
-          echo "has_go_files=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "has_go_files=false" >> "$GITHUB_OUTPUT"
-        fi
+
+        # The old/new pairs diff and audit analyze: every changed Go file
+        # but tests, vendored and generated files included, since all of
+        # them compile. The status letter, not the file system, says which
+        # sides exist, and /dev/null stands for an absent one, so a deleted
+        # file is compared with nothing. A rename stays one pair only within
+        # a directory with both names in scope; otherwise it is a deletion
+        # plus an addition, so a file moved out of the build (foo_test.go,
+        # foo.go.bak, another directory) reads as removed.
+        in_scope() { [[ "$1" == *.go && "$1" != *_test.go ]]; }
+        dir_of() { if [[ "$1" == */* ]]; then printf '%s' "${1%/*}"; else printf '.'; fi; }
+        PAIRS_FILE="$WORK/pairs.bin"
+        : > "$PAIRS_FILE"
+        PAIR_COUNT=0
+        declare -A PAIRED=()
+        pair() {
+          printf '%s\0%s\0' "$1" "$2" >> "$PAIRS_FILE"
+          PAIR_COUNT=$((PAIR_COUNT + 1))
+          if [[ "$2" != /dev/null ]]; then PAIRED["$2"]=1; fi
+        }
+        old_side() { if in_scope "$1"; then pair "$WORKTREE_DIR/$1" /dev/null; fi; }
+        new_side() { if in_scope "$1"; then pair /dev/null "$1"; fi; }
+        # A submodule's code can't be paired file by file; the run step
+        # reports each changed one as a change sfw could not analyze.
+        GITLINKS_FILE="$WORK/gitlinks.bin"
+        : > "$GITLINKS_FILE"
+        GITLINK_COUNT=0
+        # --raw entries: ":<old mode> <new mode> <old hash> <new hash> <status>",
+        # then one path, or two for a rename or copy.
+        while IFS= read -r -d '' header; do
+          read -r omode nmode _ _ status <<< "${header#:}"
+          case "$status" in
+            R*|C*) IFS= read -r -d '' o; IFS= read -r -d '' n ;;
+            *) IFS= read -r -d '' o; n=$o ;;
+          esac
+          if [[ "$omode" == 160000 || "$nmode" == 160000 ]]; then
+            printf '%s\0' "$n" >> "$GITLINKS_FILE"
+            GITLINK_COUNT=$((GITLINK_COUNT + 1))
+            continue
+          fi
+          case "$status" in
+            A) new_side "$n" ;;
+            D) old_side "$o" ;;
+            M|T) if in_scope "$n"; then pair "$WORKTREE_DIR/$o" "$n"; fi ;;
+            R*)
+              if in_scope "$o" && in_scope "$n" && [[ "$(dir_of "$o")" == "$(dir_of "$n")" ]]; then
+                pair "$WORKTREE_DIR/$o" "$n"
+              else
+                old_side "$o"; new_side "$n"
+              fi
+              ;;
+            # A copy leaves its source in place.
+            C*) new_side "$n" ;;
+            *) fail "Unexpected git diff status '${status}'." ;;
+          esac
+        done < "$DIFF_STREAM_FILE"
+        # A .go symbolic link compiles whatever it points to, which can
+        # change while the link does not: pair every such link the two trees
+        # share that is not paired already.
+        while IFS= read -r -d '' entry; do
+          p=${entry#*$'\t'}
+          if [[ "${entry%% *}" == 120000 ]] && in_scope "$p" && [[ -z "${PAIRED[$p]:-}" ]] &&
+             git cat-file -e "${BASE}:${p}" 2>/dev/null; then
+            pair "$WORKTREE_DIR/$p" "$p"
+          fi
+        done < "$TREE_FILE"
+        echo "pairs_file=${PAIRS_FILE}" >> "$GITHUB_OUTPUT"
+        echo "pair_count=${PAIR_COUNT}" >> "$GITHUB_OUTPUT"
+        echo "gitlinks_file=${GITLINKS_FILE}" >> "$GITHUB_OUTPUT"
+        echo "gitlink_count=${GITLINK_COUNT}" >> "$GITHUB_OUTPUT"
 
     - name: Install gVisor (runsc)
       shell: bash
@@ -262,16 +385,35 @@ runs:
         INPUT_API_BASE: ${{ inputs.api-base }}
         PR_TITLE: ${{ github.event.pull_request.title }}
         PR_BODY: ${{ github.event.pull_request.body }}
+        PREP_BASE_SHA: ${{ steps.prep.outputs.base_sha }}
         PREP_WORKTREE_DIR: ${{ steps.prep.outputs.worktree_dir }}
-        PREP_HAS_GO_FILES: ${{ steps.prep.outputs.has_go_files }}
+        PREP_PAIRS_FILE: ${{ steps.prep.outputs.pairs_file }}
+        PREP_PAIR_COUNT: ${{ steps.prep.outputs.pair_count }}
+        PREP_GITLINKS_FILE: ${{ steps.prep.outputs.gitlinks_file }}
+        PREP_GITLINK_COUNT: ${{ steps.prep.outputs.gitlink_count }}
         PREP_HAS_MOD_CHANGES: ${{ steps.prep.outputs.has_mod_changes }}
       run: |
         set -euo pipefail
-        
-        readonly TARGET_ABS=$(realpath -m "${INPUT_PATH:-.}")
-        readonly BASE_ABS=$(realpath -m ".")
-        readonly REL_PATH=$(realpath -m --relative-to="$BASE_ABS" "$TARGET_ABS")
-        
+
+        # The log runs workflow commands (::error::, ::add-mask::,
+        # ::stop-commands:: and the rest), and much of what this step
+        # prints comes from the change being analyzed: file names, sfw's
+        # output, the LLM's. gh_msg escapes a command's message, so a
+        # newline can't end it and start another; raw_log prints its input
+        # with commands stopped, behind a token nobody can predict.
+        gh_msg() { local s="$1"; s=${s//%/%25}; s=${s//$'\r'/%0D}; s=${s//$'\n'/%0A}; printf '%s' "$s"; }
+        gh_prop() { local s; s=$(gh_msg "$1"); s=${s//:/%3A}; s=${s//,/%2C}; printf '%s' "$s"; }
+        TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+        [[ ${#TOKEN} -eq 32 ]] || { echo "::error::Cannot read /dev/urandom."; exit 1; }
+        # The input may not end in a newline; the resume token must start
+        # a line of its own.
+        raw_log() { echo "::stop-commands::${TOKEN}"; cat; echo; echo "::${TOKEN}::"; }
+
+        # Plain assignments: readonly X=$(...) hides a failure from set -e.
+        TARGET_ABS=$(realpath -m "${INPUT_PATH:-.}")
+        BASE_ABS=$(realpath -m ".")
+        REL_PATH=$(realpath -m --relative-to="$BASE_ABS" "$TARGET_ABS")
+
         if [[ "$REL_PATH" == ".."* ]] || [[ "$REL_PATH" == /* ]]; then
            echo "::error::Security Violation: Path Traversal"
            exit 1
@@ -279,99 +421,134 @@ runs:
         readonly TARGET_PATH="./${REL_PATH}"
 
         if [[ ! -e "$TARGET_PATH" ]]; then
-          echo "::error::Target path not found: ${TARGET_PATH}"
+          echo "::error::Target path not found: $(gh_msg "$TARGET_PATH")"
           exit 1
         fi
 
+        # Anything but true or false is a mistake, not a quiet "off".
+        case "${INPUT_FAIL_ON_ALERT:-true}" in
+          true|false) FAIL_ON_ALERT="${INPUT_FAIL_ON_ALERT:-true}" ;;
+          *) echo "::error::fail-on-alert must be true or false, not '$(gh_msg "$INPUT_FAIL_ON_ALERT")'."; exit 1 ;;
+        esac
+
         EXIT_CODE=0
-        readonly LOCAL_TEMP=".sfw_temp_$$"
-        mkdir -p "$LOCAL_TEMP"
+        # Outside the checkout, whose paths the analyzed change controls.
+        LOCAL_TEMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/sfw-run.XXXXXXXX")
         cleanup() {
           rm -rf "$LOCAL_TEMP" 2>/dev/null || true
         }
         trap cleanup EXIT INT TERM
+
+        # diff, audit and deps need the base the prepare step resolved;
+        # without it there is nothing to compare, which is not a pass.
+        case "$INPUT_MODE" in
+          diff|audit|deps)
+            if [[ -z "${PREP_BASE_SHA:-}" ]] || [[ ! -d "${PREP_WORKTREE_DIR:-}" ]] || [[ ! -f "${PREP_PAIRS_FILE:-}" ]] || [[ ! "${PREP_PAIR_COUNT:-}" =~ ^[0-9]+$ ]] ||
+               [[ ! -f "${PREP_GITLINKS_FILE:-}" ]] || [[ ! "${PREP_GITLINK_COUNT:-}" =~ ^[0-9]+$ ]]; then
+              echo "::error::The prepare step did not resolve a base to compare with; nothing was analyzed."
+              exit 1
+            fi
+            WORKTREE_DIR="$PREP_WORKTREE_DIR"
+            PAIRS_FILE="$PREP_PAIRS_FILE"
+            PAIR_COUNT="$PREP_PAIR_COUNT"
+            GITLINKS_FILE="$PREP_GITLINKS_FILE"
+            GITLINK_COUNT="$PREP_GITLINK_COUNT"
+            ;;
+        esac
 
         case "$INPUT_MODE" in
           check)
             STRICT_FLAG=""
             if [[ "$INPUT_STRICT" == "true" ]]; then STRICT_FLAG="--strict"; fi
             OUTPUT=$(sfw check $STRICT_FLAG -- "$TARGET_PATH")
-            echo "$OUTPUT"
+            printf '%s\n' "$OUTPUT" | raw_log
             ;;
 
           diff)
-            readonly WORKTREE_DIR="${PREP_WORKTREE_DIR:-.sfw_base_worktree}"
-            readonly DIFF_STREAM_FILE=".sfw_diff_stream.bin"
-            
-            if [[ "${PREP_HAS_GO_FILES:-false}" != "true" ]]; then
+            # One sfw run diffs every pair, loading each tree's packages once.
+            HIGH_RISK=0
+            # Unset when sfw gave no usable result: the count is then unknown.
+            DIFF_OK=true
+            LEVEL=warning
+            if [[ "$FAIL_ON_ALERT" == "true" ]]; then LEVEL=error; fi
+            if [[ $PAIR_COUNT -eq 0 ]]; then
               OUTPUT="[]"
               echo "semantic-match-pct=100.0" >> "$GITHUB_OUTPUT"
             else
-              # Collect every changed file as an old/new pair and diff them in
-              # one sfw run, which loads each tree's packages once.
-              readonly PAIRS_FILE="$LOCAL_TEMP/sfw_pairs.bin"
-              : > "$PAIRS_FILE"
-              PAIR_COUNT=0
-
-              while IFS= read -r -d '' status; do
-                case "$status" in
-                  R*|C*) IFS= read -r -d '' o; IFS= read -r -d '' n; old_rel_path="$o"; new_rel_path="$n" ;;
-                  D) IFS= read -r -d '' _; continue ;;
-                  *) IFS= read -r -d '' p; old_rel_path="$p"; new_rel_path="$p" ;;
-                esac
-
-                [[ "$new_rel_path" != *.go ]] && continue
-                [[ "$new_rel_path" == *_test.go ]] && continue
-                [[ "$new_rel_path" == *_generated.go ]] && continue
-                [[ "$new_rel_path" == vendor/* ]] && continue
-
-                NEW_FILE="$new_rel_path"
-                OLD_FILE="$WORKTREE_DIR/$old_rel_path"
-                [[ ! -f "$NEW_FILE" ]] && NEW_FILE="/dev/null"
-                [[ ! -f "$OLD_FILE" ]] && OLD_FILE="/dev/null"
-                [[ "$NEW_FILE" == "/dev/null" && "$OLD_FILE" == "/dev/null" ]] && continue
-
-                printf '%s\0%s\0' "$OLD_FILE" "$NEW_FILE" >> "$PAIRS_FILE"
-                ((PAIR_COUNT++)) || true
-              done < "$DIFF_STREAM_FILE"
-
-              if [[ $PAIR_COUNT -eq 0 ]]; then
+              # sfw prints one result per pair and exits non-zero after
+              # printing when a pair could not be diffed; that pair's entry
+              # carries the reason in "error". Keep stderr (warnings such as
+              # the runsc fallback notice) out of OUTPUT, which is parsed.
+              DIFF_ERR="$LOCAL_TEMP/sfw_diff_stderr.log"
+              set +e
+              OUTPUT=$(sfw diff --batch "$PAIRS_FILE" 2>"$DIFF_ERR")
+              SFW_RC=$?
+              set -e
+              # One JSON array, one result per pair: -s, because jq alone
+              # reads several documents in a row and judges each.
+              if ! printf '%s' "$OUTPUT" | jq -s -e 'length == 1 and (.[0] | type == "array" and length == '"$PAIR_COUNT"')' >/dev/null 2>&1; then
+                echo "::error::sfw diff produced no result for the ${PAIR_COUNT} changed file(s)"
+                raw_log < "$DIFF_ERR"
                 OUTPUT="[]"
-                echo "semantic-match-pct=100.0" >> "$GITHUB_OUTPUT"
+                echo "semantic-match-pct=0.0" >> "$GITHUB_OUTPUT"
+                DIFF_OK=false
+                EXIT_CODE=1
               else
-                # sfw prints one result per pair and exits non-zero after
-                # printing when a pair could not be diffed; that pair's entry
-                # carries the reason in "error". Keep stderr (warnings such as
-                # the runsc fallback notice) out of OUTPUT, which is parsed.
-                DIFF_ERR="$LOCAL_TEMP/sfw_diff_stderr.log"
-                set +e
-                OUTPUT=$(sfw diff --batch "$PAIRS_FILE" 2>"$DIFF_ERR")
-                set -e
-                if ! echo "$OUTPUT" | jq -e 'type == "array" and length == '"$PAIR_COUNT" >/dev/null 2>&1; then
-                  echo "::error::sfw diff produced no result for the ${PAIR_COUNT} changed file(s)"
-                  sed 's/^/  [sfw] /' "$DIFF_ERR" || true
-                  OUTPUT="[]"
-                  echo "semantic-match-pct=0.0" >> "$GITHUB_OUTPUT"
-                  EXIT_CODE=1
-                else
-                  echo "$OUTPUT" | jq -r '.[] | select((.error // "") != "") | "::warning::sfw diff failed for \(.new_file): \(.error)"'
-                  ERROR_COUNT=$(echo "$OUTPUT" | jq '[.[] | select((.error // "") != "")] | length')
-                  TOTAL_MATCH_PCT=$(echo "$OUTPUT" | jq '[.[] | .summary.semantic_match_pct // 0] | add')
-                  AVG_PCT=$(echo "scale=1; $TOTAL_MATCH_PCT / $PAIR_COUNT" | bc)
-                  echo "semantic-match-pct=${AVG_PCT}" >> "$GITHUB_OUTPUT"
+                # Results name the base side by its path in the repository,
+                # not in the scratch worktree.
+                OUTPUT=$(echo "$OUTPUT" | jq --arg wt "$WORKTREE_DIR/" 'map(.old_file |= ltrimstr($wt) | if (.error | type) == "string" then .error |= (split($wt) | join("")) else . end)')
+                echo "$OUTPUT" | jq -r 'def esc: gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A");
+                  .[] | select((.error // "") != "")
+                  | "::warning::sfw diff failed for \(if .new_file == "/dev/null" then .old_file else .new_file end | esc): \(.error | esc)"'
+                ERROR_COUNT=$(echo "$OUTPUT" | jq '[.[] | select((.error // "") != "")] | length')
+                TOTAL_MATCH_PCT=$(echo "$OUTPUT" | jq '[.[] | .summary.semantic_match_pct // 0] | add')
+                AVG_PCT=$(echo "scale=1; $TOTAL_MATCH_PCT / $PAIR_COUNT" | bc)
+                echo "semantic-match-pct=${AVG_PCT}" >> "$GITHUB_OUTPUT"
 
-                  # A file that could not be analyzed is not a passing file.
-                  if [[ $ERROR_COUNT -gt 0 ]]; then
-                    echo "::error::sfw diff failed for ${ERROR_COUNT} file(s)"
-                    EXIT_CODE=1
-                  fi
+                # A file that could not be analyzed is not a passing file,
+                # and neither is a run that failed without saying which.
+                if [[ $ERROR_COUNT -gt 0 ]]; then
+                  echo "::error::sfw diff failed for ${ERROR_COUNT} file(s)"
+                  EXIT_CODE=1
+                elif [[ $SFW_RC -ne 0 ]]; then
+                  echo "::error::sfw diff exited with status ${SFW_RC}"
+                  raw_log < "$DIFF_ERR"
+                  EXIT_CODE=1
                 fi
+
+                HIGH_RISK=$(echo "$OUTPUT" | jq '[.[] | .summary.high_risk_changes // 0] | add // 0')
+                # One annotation per high-risk change, on its file.
+                echo "$OUTPUT" | jq -r --arg level "$LEVEL" 'def esc: gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A");
+                  def prop: esc | gsub(":"; "%3A") | gsub(","; "%2C");
+                  .[] | (if .new_file == "/dev/null" then .old_file else .new_file end) as $f
+                  | ((.functions // [])[] | select((.risk_score // 0) >= 10)
+                      | "::\($level) file=\($f | prop)::\(.function | esc) \(.status), risk \(.risk_score)\(if (.topology_delta // "") != "" then ": " + (.topology_delta | esc) else "" end)"),
+                    ((.unanalyzed // [])[] | select((.risk_score // 0) >= 10)
+                      | "::\($level) file=\($f | prop)::\(.kind | esc) \(.change | esc), risk \(.risk_score)")'
+              fi
+            fi
+            if [[ ! "$HIGH_RISK" =~ ^[0-9]+$ ]]; then
+              echo "::error::sfw diff gave no high-risk count."
+              exit 1
+            fi
+            while IFS= read -r -d '' -u 3 g; do
+              echo "::${LEVEL} file=$(gh_prop "$g")::Submodule changed; sfw cannot analyze the code it brings in."
+            done 3< "$GITLINKS_FILE"
+            HIGH_RISK=$((HIGH_RISK + GITLINK_COUNT))
+            if [[ "$DIFF_OK" == true ]]; then
+              echo "high-risk-changes=${HIGH_RISK}" >> "$GITHUB_OUTPUT"
+            fi
+            if [[ $HIGH_RISK -gt 0 ]]; then
+              if [[ "$FAIL_ON_ALERT" == "true" ]]; then
+                echo "::error::${HIGH_RISK} high-risk change(s)"
+                EXIT_CODE=1
+              else
+                echo "::warning::${HIGH_RISK} high-risk change(s)"
               fi
             fi
             ;;
 
           deps)
-            readonly WORKTREE_DIR="${PREP_WORKTREE_DIR:-.sfw_base_worktree}"
             if [[ "${PREP_HAS_MOD_CHANGES:-false}" != "true" ]]; then
               OUTPUT='{}'
               echo "high-risk-changes=0" >> "$GITHUB_OUTPUT"
@@ -385,8 +562,7 @@ runs:
               # Downloading only fetches and verifies module zips against
               # go.sum; it runs no code. Each tree builds with the go.work
               # above it, but the search stops at the tree's root (a .git
-              # entry), as sfw's does: the base worktree sits inside the
-              # head's checkout and must not take its workspace.
+              # entry), as sfw's does.
               governing_work() {
                 local d
                 d=$(cd "$1" && pwd)
@@ -398,23 +574,27 @@ runs:
               }
               for root in "$OLD_ROOT" "$TARGET_PATH"; do
                 work=$(governing_work "$root")
-                if ! (cd "$root" && GOWORK="$work" go mod download); then
-                  echo "::error::go mod download failed in ${root}"
+                if ! (cd "$root" && GOWORK="$work" go mod download) 2>&1 | raw_log; then
+                  echo "::error::go mod download failed in $(gh_msg "$root")"
                   exit 1
                 fi
               done
               DEPS_ERR="$LOCAL_TEMP/sfw_deps_stderr.log"
               if ! OUTPUT=$(sfw deps diff -- "$OLD_ROOT" "$TARGET_PATH" 2>"$DEPS_ERR"); then
-                sed 's/^/  [sfw] /' "$DEPS_ERR" || true
+                raw_log < "$DEPS_ERR"
                 echo "::error::sfw deps diff failed"
                 exit 1
               fi
-              echo "$OUTPUT"
-              HIGH_RISK=$(echo "$OUTPUT" | jq -r '.summary.high_risk_changes // 0')
+              printf '%s\n' "$OUTPUT" | raw_log
+              HIGH_RISK=$(printf '%s' "$OUTPUT" | jq -s -r 'if length == 1 then .[0].summary.high_risk_changes // 0 else "" end' 2>/dev/null || true)
+              if [[ ! "$HIGH_RISK" =~ ^[0-9]+$ ]]; then
+                echo "::error::sfw deps diff gave no high-risk count."
+                exit 1
+              fi
               echo "high-risk-changes=${HIGH_RISK}" >> "$GITHUB_OUTPUT"
               if [[ "$HIGH_RISK" -gt 0 ]]; then
                 echo "::warning::${HIGH_RISK} high-risk dependency change(s)"
-                if [[ "${INPUT_FAIL_ON_ALERT:-true}" == "true" ]]; then
+                if [[ "$FAIL_ON_ALERT" == "true" ]]; then
                   EXIT_CODE=1
                 fi
               fi
@@ -444,18 +624,22 @@ runs:
             
             SCAN_STDERR_FILE="$LOCAL_TEMP/sfw_scan_stderr.log"
             if ! OUTPUT=$(sfw scan --db "$TEMP_DB" --threshold "${INPUT_THRESHOLD:-0.75}" "${DEPS_ARGS[@]}" -- "$TARGET_PATH" 2>"$SCAN_STDERR_FILE"); then
-              cat "$SCAN_STDERR_FILE" || true
+              raw_log < "$SCAN_STDERR_FILE"
               exit 1
             fi
-            if [[ -s "$SCAN_STDERR_FILE" ]]; then cat "$SCAN_STDERR_FILE"; fi
-            echo "$OUTPUT"
+            if [[ -s "$SCAN_STDERR_FILE" ]]; then raw_log < "$SCAN_STDERR_FILE"; fi
+            printf '%s\n' "$OUTPUT" | raw_log
 
-            ALERT_COUNT=$(echo "$OUTPUT" | jq -r '.summary.total_alerts // 0')
+            ALERT_COUNT=$(printf '%s' "$OUTPUT" | jq -s -r 'if length == 1 then .[0].summary.total_alerts // 0 else "" end' 2>/dev/null || true)
+            DEPS_SCANNED=$(printf '%s' "$OUTPUT" | jq -s -r 'if length == 1 then .[0].dependencies_scanned // 0 else "" end' 2>/dev/null || true)
+            if [[ ! "$ALERT_COUNT" =~ ^[0-9]+$ ]] || [[ ! "$DEPS_SCANNED" =~ ^[0-9]+$ ]]; then
+              echo "::error::sfw scan gave no alert count."
+              exit 1
+            fi
             echo "alert-count=${ALERT_COUNT}" >> "$GITHUB_OUTPUT"
-            DEPS_SCANNED=$(echo "$OUTPUT" | jq -r '.dependencies_scanned // 0')
             echo "deps-scanned=${DEPS_SCANNED}" >> "$GITHUB_OUTPUT"
-            
-            if [[ "${INPUT_FAIL_ON_ALERT:-true}" == "true" ]] && [[ "$ALERT_COUNT" -gt 0 ]]; then
+
+            if [[ "$FAIL_ON_ALERT" == "true" ]] && [[ "$ALERT_COUNT" -gt 0 ]]; then
               EXIT_CODE=1
             fi
             ;;
@@ -472,52 +656,26 @@ runs:
                 *)          export OPENAI_API_KEY="$SFW_API_KEY" ;;
               esac
             fi
-            readonly WORKTREE_DIR="${PREP_WORKTREE_DIR:-.sfw_base_worktree}"
-            readonly DIFF_STREAM_FILE=".sfw_diff_stream.bin"
-            
-            if [[ "${PREP_HAS_GO_FILES:-false}" != "true" ]]; then
-              echo "audit-verdict=PASS" >> "$GITHUB_OUTPUT"
-              OUTPUT="Audit Passed. (No Go files changed)"
-            else
-              AUDIT_FAILS=0
-              AUDIT_PASS=0
-
-              if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            AUDIT_FAILS=0
+            AUDIT_PASS=0
+            if [[ $PAIR_COUNT -gt 0 ]]; then
+              if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" || "${GITHUB_EVENT_NAME:-}" == "pull_request_target" ]]; then
                  COMMIT_MSG="${PR_TITLE:-Untitled PR}
             ${PR_BODY:-No description provided}"
               else
                  COMMIT_MSG=$(git log -1 --pretty=%B 2>/dev/null || echo "No commit message")
               fi
 
-              while IFS= read -r -d '' status; do
-                case "$status" in
-                  R*|C*)
-                     IFS= read -r -d '' old_rel_path
-                     IFS= read -r -d '' new_rel_path
-                     ;;
-                  D)
-                     IFS= read -r -d '' _deleted_path
-                     continue
-                     ;;
-                  *)
-                     IFS= read -r -d '' path
-                     old_rel_path="$path"
-                     new_rel_path="$path"
-                     ;;
-                esac
-
-                [[ "$new_rel_path" != *.go ]] && continue
-                [[ "$new_rel_path" == *_test.go ]] && continue
-                [[ "$new_rel_path" == *_generated.go ]] && continue
-                [[ "$new_rel_path" == vendor/* ]] && continue
-                [[ ! -f "$new_rel_path" ]] && continue
-
-                NEW_FILE="$new_rel_path"
-                OLD_FILE="$WORKTREE_DIR/$old_rel_path"
-                
-                if [[ ! -f "$OLD_FILE" ]]; then
+              # The pairs come in on fd 3, so nothing sfw does with stdin
+              # can eat them.
+              while IFS= read -r -d '' -u 3 OLD_FILE && IFS= read -r -d '' -u 3 NEW_FILE; do
+                # An absent side is an empty file: a deleted file's checks
+                # are gone too.
+                if [[ "$OLD_FILE" == /dev/null ]]; then
                    OLD_FILE=$(mktemp -p "$LOCAL_TEMP" "empty_XXXXXX.go")
-                   : > "$OLD_FILE"
+                fi
+                if [[ "$NEW_FILE" == /dev/null ]]; then
+                   NEW_FILE=$(mktemp -p "$LOCAL_TEMP" "empty_XXXXXX.go")
                 fi
 
                 # Flags must precede the positional arguments: Go's flag
@@ -533,7 +691,7 @@ runs:
                 CMD_EXIT=$?
                 set -e
                 
-                echo "$AUDIT_OUT"
+                printf '%s\n' "$AUDIT_OUT" | raw_log
 
                 if [[ $CMD_EXIT -ne 0 ]]; then
                    ((AUDIT_FAILS++)) || true
@@ -541,15 +699,24 @@ runs:
                 else
                    ((AUDIT_PASS++)) || true
                 fi
-              done < "$DIFF_STREAM_FILE"
+              done 3< "$PAIRS_FILE"
+            fi
 
-              if [[ $AUDIT_FAILS -eq 0 ]]; then
-                 echo "audit-verdict=PASS" >> "$GITHUB_OUTPUT"
-                 OUTPUT="Audit Passed. (${AUDIT_PASS} file(s) verified)"
-              else
-                 echo "audit-verdict=FAIL" >> "$GITHUB_OUTPUT"
-                 OUTPUT="Audit Failed. (${AUDIT_FAILS} deception(s) detected)"
-              fi
+            # The audit can't read a submodule's change, so it doesn't pass.
+            while IFS= read -r -d '' -u 3 g; do
+              echo "::error file=$(gh_prop "$g")::Submodule changed; the audit cannot read the code it brings in."
+            done 3< "$GITLINKS_FILE"
+            if [[ $GITLINK_COUNT -gt 0 ]]; then EXIT_CODE=1; fi
+
+            if [[ $PAIR_COUNT -eq 0 && $GITLINK_COUNT -eq 0 ]]; then
+              echo "audit-verdict=PASS" >> "$GITHUB_OUTPUT"
+              OUTPUT="Audit Passed. (No Go files changed)"
+            elif [[ $AUDIT_FAILS -eq 0 && $GITLINK_COUNT -eq 0 ]]; then
+              echo "audit-verdict=PASS" >> "$GITHUB_OUTPUT"
+              OUTPUT="Audit Passed. (${AUDIT_PASS} file(s) verified)"
+            else
+              echo "audit-verdict=FAIL" >> "$GITHUB_OUTPUT"
+              OUTPUT="Audit Failed. (${AUDIT_FAILS} deception(s) detected, ${GITLINK_COUNT} submodule change(s) not audited)"
             fi
             ;;
           *)
@@ -558,10 +725,17 @@ runs:
             ;;
         esac
 
+        # A line equal to the delimiter would end result early and could set
+        # other outputs after it.
+        DELIM="EOF_SFW_${TOKEN}"
+        if printf '%s\n' "$OUTPUT" | grep -qxF "$DELIM"; then
+          echo "::error::The result contains its own delimiter."
+          exit 1
+        fi
         {
-          echo "result<<EOF_SFW_RESULT"
-          echo "$OUTPUT"
-          echo "EOF_SFW_RESULT"
+          echo "result<<${DELIM}"
+          printf '%s\n' "$OUTPUT"
+          echo "${DELIM}"
         } >> "$GITHUB_OUTPUT"
 
         exit $EXIT_CODE
@@ -571,11 +745,13 @@ runs:
       shell: bash
       env:
         WORKTREE_DIR: ${{ steps.prep.outputs.worktree_dir }}
+        WORK_DIR: ${{ steps.prep.outputs.work_dir }}
       run: |
         set +e
         if [[ -n "${WORKTREE_DIR:-}" ]] && [[ -d "$WORKTREE_DIR" ]]; then
-          git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"
+          git worktree remove --force "$WORKTREE_DIR" 2>/dev/null
         fi
-        rm -f .sfw_diff_stream.bin 2>/dev/null
-        rm -rf .sfw_temp_* 2>/dev/null
+        if [[ -n "${WORK_DIR:-}" ]]; then
+          rm -rf "$WORK_DIR"
+        fi
         git worktree prune 2>/dev/null || true

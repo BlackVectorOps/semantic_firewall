@@ -1179,7 +1179,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          fetch-depth: 0        # diff and audit read HEAD~1
+          fetch-depth: 0        # diff, audit and deps read the base commit
       - id: sfw
         uses: BlackVectorOps/semantic_firewall@v7.3.0
         with:
@@ -1200,7 +1200,17 @@ The Action does the following before running `sfw`:
 - installs `runsc` release `20260126.0` and checks its SHA-512;
 - relaxes the AppArmor user-namespace restriction for it.
 
-`diff` and `audit` analyze every `.go` file changed between a base and `HEAD`, and ignore `path`. The base is `origin/<base branch>` for a pull request, the `before` commit for a push, and `HEAD~1` otherwise. `diff` mode passes all changed files (except `_test.go`, `_generated.go` and `vendor/` files) to one [`sfw diff --batch`](#batch-mode) run, and fails the job if any file could not be diffed.
+`diff`, `audit` and `deps` compare `HEAD` with a base commit chosen by the event. When the base cannot be resolved the job fails:
+- `pull_request` and `pull_request_target`: `HEAD` must contain the pull request's head commit. The base comes from the event's base commit, fetched by hash from `origin` or else from the repository the workflow runs in, never from a branch of `origin`, which can be a fork. With GitHub's merge commit checked out (what `actions/checkout` does for `pull_request`), whose parents are the event's base and head, the base is that base commit. Otherwise it is the single merge base of the base commit and `HEAD`, which needs the full history.
+- `merge_group`: the group's base commit, and `HEAD` must be the group's head commit.
+- `push`: the `before` commit. For a new branch, a tag, or a force push whose old commit is gone, it is the merge base of `HEAD` and the default branch, which needs the full history. The default branch is fetched, or taken from the checkout when the fetch fails (with `persist-credentials: false`, say). A new branch or tag whose `HEAD` is already on the default branch has nothing to compare and passes. A force push whose old commit is gone fails when the default branch already holds `HEAD`, since nothing then shows what the push changed.
+- any other event: `HEAD~1`.
+
+The base is checked out as a worktree under `RUNNER_TEMP`, outside the checkout, with the Action's other scratch files.
+
+`diff` and `audit` analyze every `.go` file changed between the base and `HEAD` except `_test.go` files, vendored and generated files included, and ignore `path`. git's status says which sides of a change exist, and an absent side is `/dev/null`: an added file is compared with nothing, and a deleted one too, so the checks it made count as removed. A rename stays one pair when both names are `.go` files in scope in the same directory. Otherwise the old name counts as deleted and the new one as added, so moving a file out of the build (to `foo_test.go`, `foo.go.bak`, `testdata/` or another package) reads as removing it. A copy counts as an added file. A `.go` symbolic link the two trees share is diffed whenever it exists, since its target can change while the link does not. A changed submodule cannot be read file by file: `diff` counts each one as a high-risk change, and `audit` fails. Text that comes from the change, such as file names and `sfw` or LLM output, is escaped in annotations and printed to the log with workflow commands stopped, so it cannot issue commands of its own. `diff` mode passes every pair to one [`sfw diff --batch`](#batch-mode) run, and fails the job if any file could not be diffed. With `fail-on-alert`, the default, it also fails when `high_risk_changes` summed over the files is above 0, and each high-risk change gets an error annotation on its file (a warning when `fail-on-alert` is `false`).
+
+A pull request runs the workflow as the pull request has it, so it can edit or remove the step that runs the Action. Make the check a required status check, and review changes to `.github/workflows/` with that in mind.
 
 `deps` mode runs [`sfw deps diff`](#sfw-deps-diff) on the base and `HEAD` versions of the module at `path`, which must contain `go.mod` in both. It runs only when a `go.mod`, `go.sum`, `go.work` or `go.work.sum` changed; otherwise `result` is `{}`. It first runs `go mod download` in both trees, each with the workspace that governs it. This fetches and verifies module zips against `go.sum` and runs no code. With `fail-on-alert`, the job fails when `high_risk_changes` is above 0.
 
@@ -1212,7 +1222,7 @@ The Action does the following before running `sfw`:
 | `signatures` | — | database path, required for `scan`; `.json` selects the JSON backend |
 | `threshold` | `0.75` | scan threshold |
 | `strict` | `false` | `check --strict` |
-| `fail-on-alert` | `true` | fail a `scan` with `total_alerts > 0`, or `deps` with `high_risk_changes > 0` |
+| `fail-on-alert` | `true` | fail a `scan` with `total_alerts > 0`, or `diff` or `deps` with `high_risk_changes > 0`; any value but `true` or `false` fails the job |
 | `scan-deps` | `false` | `scan --deps` |
 | `deps-depth` | `direct` | `scan --deps-depth` |
 | `api-key` | — | exported to the provider's variable according to `model` |
@@ -1220,12 +1230,12 @@ The Action does the following before running `sfw`:
 | `api-base` | — | `audit --api-base` |
 
 The outputs are:
-- `result`
+- `result`; in `diff` mode each `old_file` is the path in the repository, not in the base worktree
 - `alert-count`
 - `deps-scanned`
 - `semantic-match-pct`, the mean over changed files
 - `audit-verdict`, `PASS` or `FAIL`
-- `high-risk-changes`, from `deps` mode
+- `high-risk-changes`, from `diff` and `deps` modes
 
 ## Library usage
 

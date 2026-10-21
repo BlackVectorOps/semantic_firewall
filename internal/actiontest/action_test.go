@@ -109,7 +109,20 @@ type actionRun struct {
 
 // runAction runs the prep and run-sfw steps in repo for one mode, the way
 // the composite action wires them, and returns the exit code of run-sfw.
+// The event is a push whose before commit is HEAD~1, unless inputs says
+// otherwise.
 func runAction(t *testing.T, repo string, inputs map[string]string) actionRun {
+	t.Helper()
+	res, prepOK := runSteps(t, repo, inputs)
+	if !prepOK {
+		t.Fatalf("prep step failed (%d):\n%s", res.exitCode, res.log)
+	}
+	return res
+}
+
+// runSteps is runAction, except that a failing prep step is returned (with
+// prepOK false) rather than fatal.
+func runSteps(t *testing.T, repo string, inputs map[string]string) (res actionRun, prepOK bool) {
 	t.Helper()
 	bin := sfwOnPath(t)
 	outFile := filepath.Join(t.TempDir(), "github_output")
@@ -118,13 +131,18 @@ func runAction(t *testing.T, repo string, inputs map[string]string) actionRun {
 	}
 	var env []string
 	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "GITHUB_") && !strings.HasPrefix(e, "INPUT_") && !strings.HasPrefix(e, "PATH=") {
+		if !strings.HasPrefix(e, "GITHUB_") && !strings.HasPrefix(e, "INPUT_") && !strings.HasPrefix(e, "PATH=") && !strings.HasPrefix(e, "RUNNER_") {
 			env = append(env, e)
 		}
 	}
+	before := ""
+	if out, err := exec.Command("git", "-C", repo, "rev-parse", "-q", "--verify", "HEAD~1^{commit}").Output(); err == nil {
+		before = strings.TrimSpace(string(out))
+	}
 	env = append(env,
 		"PATH="+bin+string(os.PathListSeparator)+filepath.Join(runtime.GOROOT(), "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"GITHUB_OUTPUT="+outFile, "GITHUB_EVENT_NAME=push", "GITHUB_EVENT_BEFORE=", "GITHUB_BASE_REF=")
+		"GITHUB_OUTPUT="+outFile, "GITHUB_EVENT_NAME=push", "GITHUB_EVENT_BEFORE="+before, "GITHUB_BASE_REF=",
+		"RUNNER_TEMP="+t.TempDir(), "PR_BASE_SHA=", "PR_HEAD_SHA=", "MG_BASE_SHA=", "MG_HEAD_SHA=", "DEFAULT_BRANCH=", "GITHUB_SERVER_URL=", "GITHUB_REPOSITORY=")
 	for k, v := range inputs {
 		env = append(env, k+"="+v)
 	}
@@ -143,25 +161,34 @@ func runAction(t *testing.T, repo string, inputs map[string]string) actionRun {
 		return code, string(out)
 	}
 
+	// A shell error inside a step can leave the outputs looking right (a
+	// failed [[ ]] test reads as false); none is acceptable.
+	checkShell := func(log string) {
+		for _, bad := range []string{"syntax error", "command not found", "unbound variable", "bad substitution"} {
+			if strings.Contains(log, bad) {
+				t.Fatalf("shell error (%q) while running the Action:\n%s", bad, log)
+			}
+		}
+	}
+
 	code, log := run(stepScript(t, "prep"), env)
+	checkShell(log)
 	if code != 0 {
-		t.Fatalf("prep step failed (%d):\n%s", code, log)
+		return actionRun{exitCode: code, log: log, outputs: parseOutputs(t, outFile)}, false
 	}
 	prep := parseOutputs(t, outFile)
 	env = append(env,
+		"PREP_BASE_SHA="+prep["base_sha"],
 		"PREP_WORKTREE_DIR="+prep["worktree_dir"],
-		"PREP_HAS_GO_FILES="+prep["has_go_files"],
+		"PREP_PAIRS_FILE="+prep["pairs_file"],
+		"PREP_PAIR_COUNT="+prep["pair_count"],
+		"PREP_GITLINKS_FILE="+prep["gitlinks_file"],
+		"PREP_GITLINK_COUNT="+prep["gitlink_count"],
 		"PREP_HAS_MOD_CHANGES="+prep["has_mod_changes"])
 	code, runLog := run(stepScript(t, "run-sfw"), env)
 	all := log + runLog
-	// A shell error inside a step can leave the outputs looking right (a
-	// failed [[ ]] test reads as false); none is acceptable.
-	for _, bad := range []string{"syntax error", "command not found", "unbound variable", "bad substitution"} {
-		if strings.Contains(all, bad) {
-			t.Fatalf("shell error (%q) while running the Action:\n%s", bad, all)
-		}
-	}
-	return actionRun{exitCode: code, log: all, outputs: parseOutputs(t, outFile)}
+	checkShell(all)
+	return actionRun{exitCode: code, log: all, outputs: parseOutputs(t, outFile)}, true
 }
 
 // parseOutputs reads a GITHUB_OUTPUT file: name=value lines and
@@ -287,7 +314,7 @@ func TestActionDiffMode(t *testing.T) {
 		"vendor/v/v.go":    str("package v\n\nfunc V() {}\n"),
 		"p/z_generated.go": str("package p\n\nfunc Gen() int { return 2 }\n"),
 	})
-	res := runAction(t, repo, map[string]string{"INPUT_MODE": "diff", "INPUT_PATH": "."})
+	res := runAction(t, repo, map[string]string{"INPUT_MODE": "diff", "INPUT_PATH": ".", "INPUT_FAIL_ON_ALERT": "false"})
 	if res.exitCode != 0 {
 		t.Fatalf("diff mode exit %d:\n%s", res.exitCode, res.log)
 	}
@@ -295,12 +322,17 @@ func TestActionDiffMode(t *testing.T) {
 	if err := json.Unmarshal([]byte(res.outputs["result"]), &entries); err != nil {
 		t.Fatalf("result is not a JSON array: %v\n%s", err, res.outputs["result"])
 	}
-	// Deleted, test, generated, vendored and non-Go files are not diffed.
+	// Test and non-Go files are not diffed. A deleted file is diffed
+	// against /dev/null, and listed here as "-" and its old path.
 	got := map[string]diffEntry{}
 	for _, e := range entries {
-		got[e.NewFile] = e
+		name := e.NewFile
+		if name == "/dev/null" {
+			name = "-" + e.OldFile
+		}
+		got[name] = e
 	}
-	want := []string{"p/a.go", "p/new.go", "p/new_name.go", "q/q.go"}
+	want := []string{"p/a.go", "p/new.go", "p/new_name.go", "q/q.go", "vendor/v/v.go", "p/z_generated.go", "-p/del.go"}
 	if len(entries) != len(want) {
 		t.Fatalf("diffed %d files; want %v:\n%s", len(entries), want, res.outputs["result"])
 	}
@@ -316,7 +348,7 @@ func TestActionDiffMode(t *testing.T) {
 	if e := got["p/new.go"]; e.OldFile != "/dev/null" {
 		t.Errorf("added file's old side = %q; want /dev/null", e.OldFile)
 	}
-	if e := got["p/new_name.go"]; !strings.HasSuffix(e.OldFile, "p/old_name.go") {
+	if e := got["p/new_name.go"]; e.OldFile != "p/old_name.go" {
 		t.Errorf("renamed file's old side = %q; want p/old_name.go", e.OldFile)
 	}
 	if pct := res.outputs["semantic-match-pct"]; pct == "" || pct == "100.0" {

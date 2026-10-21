@@ -31,213 +31,54 @@ jobs:
           cache: true
 
       - name: Build SFW
-        # Building strictly from source to ensure binary integrity before execution.
+        # Built from this commit's source, outside the checkout, and put on
+        # PATH, where the Action below takes it instead of installing a
+        # release.
         run: |
-          mkdir -p bin
-          CGO_ENABLED=0 go build -o bin/sfw ./cmd/sfw
-          chmod +x bin/sfw
-          # Verify binary works
-          ./bin/sfw version
+          mkdir -p "$RUNNER_TEMP/sfw-bin"
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/sfw-bin/sfw" ./cmd/sfw
+          "$RUNNER_TEMP/sfw-bin/sfw" version
+          echo "$RUNNER_TEMP/sfw-bin" >> "$GITHUB_PATH"
 
-      - name: Determine Mode
-        id: mode
+      # The repository's own Action, in diff mode: it picks the base, pairs
+      # every changed file (deleted and moved ones included) and annotates
+      # high-risk changes. sfw's own changes add exec and sandbox calls on
+      # purpose, so high-risk changes are reported, not failed on.
+      - name: Run Semantic Firewall
+        id: sfw
+        uses: ./
+        with:
+          mode: diff
+          go-version: '1.27'
+          fail-on-alert: 'false'
+
+      # A pull request labeled 'semantic-safe' claims to preserve behavior:
+      # any function not preserved, or any unanalyzed change, fails it.
+      - name: Enforce semantic-safe
+        if: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'semantic-safe') }}
         env:
-          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-        run: |
-          # BLOCKER fails the build on ANY semantic change, so it is opt-in: it
-          # applies only to PRs labeled 'semantic-safe' (claimed behavior-preserving
-          # refactors). Every other PR runs in 'check' mode, which reports the
-          # semantic diff without failing on intentional logic changes.
-          if [[ "${{ github.event_name }}" == "pull_request" ]] && [[ ",${PR_LABELS}," == *",semantic-safe,"* ]]; then
-             echo "mode=BLOCKER" >> "$GITHUB_OUTPUT"
-          else
-             echo "mode=check" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Prepare Analysis Environment
-        id: prep
-        run: |
-          # 1. Determine Refs
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            PR_BASE="${{ github.event.pull_request.base.ref }}"
-            if [[ -n "$PR_BASE" ]]; then
-              BASE_REF="origin/$PR_BASE"
-            else
-              # Fallback for local testing with act (PR context not fully populated)
-              echo "::warning::PR base ref not available. Falling back to HEAD~1."
-              BASE_REF="HEAD~1"
-            fi
-            HEAD_REF="HEAD"
-          else
-            git fetch origin main --depth=100 2>/dev/null || true
-            BASE_REF=$(git merge-base origin/main HEAD 2>/dev/null || echo "HEAD~1")
-            HEAD_REF="HEAD"
-          fi
-          
-          echo "::notice::Base ref: $BASE_REF, Head ref: $HEAD_REF"
-
-          # 2. Setup Base Worktree
-          # We create the worktree in the workspace so it is mounted into the sandbox.
-          WORKTREE_DIR=".sfw_base"
-          # Clean up previous run if exists
-          rm -rf "$WORKTREE_DIR"
-          git worktree add --detach "$WORKTREE_DIR" "$BASE_REF"
-
-          echo "worktree_dir=$WORKTREE_DIR" >> $GITHUB_OUTPUT
-
-          # 3. Pre-calculate Diff (CRITICAL HARDENING)
-          # We run git on the host (where it works) and save the status to a file.
-          # The sandbox will simply read this file, avoiding "dubious ownership" errors.
-          git diff -z --name-status "$BASE_REF" "$HEAD_REF" > diff_stream.bin
-
-          # Check for Go files to fail fast if none exist
-          if git diff --name-only "$BASE_REF" "$HEAD_REF" | grep -q '\.go$'; then
-             echo "has_go_files=true" >> $GITHUB_OUTPUT
-          else
-             echo "has_go_files=false" >> $GITHUB_OUTPUT
-          fi
-
-      # Install dependencies for sfw's internal sandbox (AppArmor bypass via aa-exec)
-      - name: Install Sandbox Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y apparmor-utils
-
-      - name: Run Semantic Analysis
-        env:
-          MODE: ${{ steps.mode.outputs.mode }}
-          WORKTREE_DIR: ${{ steps.prep.outputs.worktree_dir }}
-          HAS_GO: ${{ steps.prep.outputs.has_go_files }}
-          GOPROXY: "off"
+          RESULT: ${{ steps.sfw.outputs.result }}
         run: |
           set -euo pipefail
-
-          REPORT_FILE="scan_report.md"
-
-          echo "## Semantic Analysis Report ($MODE)" >> "$REPORT_FILE"
-          echo "| File | Status | Match % |" >> "$REPORT_FILE"
-          echo "| :--- | :--- | :--- |" >> "$REPORT_FILE"
-
-          if [ "$HAS_GO" != "true" ]; then
-              echo "No Go files changed." >> "$REPORT_FILE"
-              exit 0
-          fi
-
-          ERROR_COUNT=0
-          LOGIC_FAIL=0
-
-          # Process the pre-calculated diff stream
-          while IFS= read -r -d '' status; do
-            case "$status" in
-              R*|C*)
-                 IFS= read -r -d '' old_path
-                 IFS= read -r -d '' new_path
-                 OLD_FILE_REF="$old_path"
-                 NEW_FILE_REF="$new_path"
-                 ;;
-              *)
-                 IFS= read -r -d '' path
-                 OLD_FILE_REF="$path"
-                 NEW_FILE_REF="$path"
-                 ;;
-            esac
-
-            if [[ "$NEW_FILE_REF" != *.go ]] && [[ "$OLD_FILE_REF" != *.go ]]; then continue; fi
-
-            # Skip test files. sfw's single-file loader can't form a package from a
-            # _test.go in isolation (it fails with "input packages list is empty"),
-            # and test changes don't alter the production semantics this check guards.
-            if [[ "$NEW_FILE_REF" == *_test.go ]] || [[ "$OLD_FILE_REF" == *_test.go ]]; then continue; fi
-
-            if [ -f "$NEW_FILE_REF" ]; then
-                NEW_FILE="$NEW_FILE_REF"
-            else
-                NEW_FILE=""
-            fi
-
-            OLD_FILE="$WORKTREE_DIR/$OLD_FILE_REF"
-            if [ ! -f "$OLD_FILE" ]; then
-                OLD_FILE=""
-            fi
-
-            if [[ -z "$NEW_FILE" ]] && [[ -z "$OLD_FILE" ]]; then continue; fi
-
-            if [[ -z "$OLD_FILE" ]]; then
-                echo "| \`$NEW_FILE_REF\` | New File | N/A |" >> "$REPORT_FILE"
-                continue
-            fi
-
-            if [[ -z "$NEW_FILE" ]]; then
-                echo "| \`$OLD_FILE_REF\` | Deleted | N/A |" >> "$REPORT_FILE"
-                continue
-            fi
-
-            # Execute SFW diff (sfw handles its own sandboxing internally).
-            # Capture STDOUT (the JSON report) only -- sfw writes warnings/errors
-            # to stderr (e.g. the "runsc not found, falling back" notice), and
-            # merging them with 2>&1 corrupts the JSON parsed below.
-            if ! OUTPUT=$(./bin/sfw diff "$OLD_FILE" "$NEW_FILE" 2>sfw_stderr.log); then
-                echo "::error::sfw failed to process $NEW_FILE_REF"
-                # Surface the tool's actual error instead of swallowing it.
-                sed 's/^/  [sfw] /' sfw_stderr.log
-                ERROR_COUNT=$((ERROR_COUNT + 1))
-                continue
-            fi
-
-            # Validate JSON
-            if ! echo "$OUTPUT" | jq -e . >/dev/null 2>&1; then
-                echo "::error::Invalid JSON output for $NEW_FILE_REF"
-                printf '%s\n' "$OUTPUT" | sed 's/^/  [out] /'
-                sed 's/^/  [sfw] /' sfw_stderr.log
-                ERROR_COUNT=$((ERROR_COUNT + 1))
-                continue
-            fi
-
-            PCT=$(echo "$OUTPUT" | jq -r '.summary.semantic_match_pct // 0')
-            MODIFIED=$(echo "$OUTPUT" | jq -r '.summary.modified // 0')
-            IS_BELOW_100=$(echo "$OUTPUT" | jq -r 'if (.summary.semantic_match_pct // 0) < 100 then "true" else "false" end')
-
-            if [ "$IS_BELOW_100" = "true" ]; then
-                STATUS_ICON="Modified ($MODIFIED)"
-                echo "| \`$NEW_FILE_REF\` | $STATUS_ICON | **$PCT%** |" >> "$REPORT_FILE"
-
-                if [ "$MODE" == "BLOCKER" ]; then
-                    echo "::error file=$NEW_FILE_REF::Logic change detected in safe refactor! ($PCT%)"
-                    LOGIC_FAIL=1
-                fi
-            else
-                STATUS_ICON="Preserved"
-                echo "| \`$NEW_FILE_REF\` | $STATUS_ICON | **$PCT%** |" >> "$REPORT_FILE"
-            fi
-
-          done < diff_stream.bin
-
-          if [ $ERROR_COUNT -gt 0 ]; then
-              echo "" >> "$REPORT_FILE"
-              echo "**CI FAILED**: Tool execution failures detected." >> "$REPORT_FILE"
-              exit 1
-          fi
-
-          if [ $LOGIC_FAIL -eq 1 ]; then
-              echo "" >> "$REPORT_FILE"
-              echo "**CI FAILED**: Logic changed in 'semantic-safe' PR." >> "$REPORT_FILE"
-              exit 1
+          if ! printf '%s' "$RESULT" | jq -e 'all(.[]; ((.functions // []) | all(.status == "preserved")) and ((.unanalyzed // []) | length == 0))' >/dev/null; then
+            echo "::error::Logic changed in a pull request labeled 'semantic-safe'."
+            exit 1
           fi
 
       - name: Publish Analysis Report
         if: always()
-        # This runs on the host, so it has access to GITHUB_STEP_SUMMARY.
-        # It reads the artifact produced by the sandbox.
-        run: |
-          if [ -f "scan_report.md" ]; then
-             cat scan_report.md >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Cleanup Worktree
-        if: always()
         env:
-          WORKTREE_DIR: ${{ steps.prep.outputs.worktree_dir }}
+          RESULT: ${{ steps.sfw.outputs.result }}
+          MATCH_PCT: ${{ steps.sfw.outputs.semantic-match-pct }}
+          HIGH_RISK: ${{ steps.sfw.outputs.high-risk-changes }}
         run: |
-          if [ -d "$WORKTREE_DIR" ]; then
-             git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"
-          fi
+          {
+            echo "## Semantic Analysis Report"
+            echo "Semantic match: ${MATCH_PCT:-n/a}%. High-risk changes: ${HIGH_RISK:-n/a}."
+            echo
+            echo "| File | Preserved | Modified | Added | Removed |"
+            echo "| :--- | :--- | :--- | :--- | :--- |"
+            # Names come from the change: keep them from breaking the table.
+            printf '%s' "${RESULT:-[]}" | jq -r '.[]? | (if .new_file == "/dev/null" then .old_file else .new_file end | gsub("[|`\r\n]"; "_")) as $f
+              | "| `\($f)` | \(.summary.preserved // 0) | \(.summary.modified // 0) | \(.summary.added // 0) | \(.summary.removed // 0) |"' || true
+          } >> "$GITHUB_STEP_SUMMARY"
