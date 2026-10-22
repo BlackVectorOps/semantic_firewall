@@ -47,7 +47,7 @@ func compileForBenchmark(b *testing.B, src, funcName string) *ssa.Function {
 		b.Fatal("compilation errors in test source")
 	}
 
-	prog, _, err := ir.BuildSSAFromPackages(pkgs)
+	prog, err := ir.BuildProgram(pkgs)
 	if err != nil {
 		b.Fatalf("BuildSSA: %v", err)
 	}

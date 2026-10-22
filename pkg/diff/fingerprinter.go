@@ -684,7 +684,7 @@ func FingerprintPackagesWhere(initialPkgs []*packages.Package, policy ir.Literal
 		return nil, fmt.Errorf("input packages list is empty")
 	}
 
-	prog, _, err := ir.BuildSSAFromPackages(initialPkgs)
+	prog, err := ir.BuildProgram(initialPkgs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build SSA: %w", err)
 	}
