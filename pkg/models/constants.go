@@ -9,7 +9,8 @@ const (
 	MaxSourceFileSize = 10 * 1024 * 1024 // 10 MB
 	// limits the buffer size for LLM responses to mitigate potential DoS from upstream providers.
 	MaxAPIResponseSize = 5 * 1024 * 1024 // 5 MB
-	// controls the verbosity of the diff output to keep CLI reports readable.
+	// caps the added operations listed per function in the evidence an audit
+	// sends to the LLM.
 	MaxDiffOpsDisplay = 10
 	// caps the length of the LLM "evidence" summary. A response longer than a
 	// short plain-text rationale indicates the model strayed from the output
@@ -60,7 +61,8 @@ const (
 	StatusAdded = "added"
 	// indicates logic that has been purged from the source.
 	StatusRemoved = "removed"
-	//  symbol name change where the underlying AST structure remains identical.
+	//  a function paired, under a different name, by topology similarity of at
+	//  least DefaultTopologyMatchThreshold; its code may differ.
 	StatusRenamed = "renamed"
 
 	//  the analysis engine could not determine the structural change type.
@@ -76,11 +78,13 @@ const (
 	//  indicates the introduction of unhandled error states.
 	TopoDeltaPanic = "AddedPanic"
 
-	//  confirms the LLM and AST analysis are in agreement.
+	//  the commit message accounts for every flagged change, in kind and scope.
 	VerdictMatch = "MATCH"
-	//  suggests that the LLM analysis found logic the AST delta did not anticipate.
+	//  the message is too vague to confirm, or the change is out of proportion
+	//  to its stated purpose.
 	VerdictSuspicious = "SUSPICIOUS"
-	//  indicates a high confidence that the LLM response is hallucinating or being deceptive.
+	//  the message claims something the code contradicts, or the code gains a
+	//  capability the message does not account for.
 	VerdictLie = "LIE"
 	//  indicates a failure in the analysis pipeline itself.
 	VerdictError = "ERROR"
@@ -103,8 +107,8 @@ const (
 	// frontier OpenAI reasoning models.
 	ModelGPT5_2 = "gpt-5.2"
 
-	//  portable, human readable storage format for scan results.
+	//  the signature database as one JSON file.
 	BackendJSON = "json"
-	//  high performance, LSM tree based storage for large scale analysis history.
+	//  the signature database in PebbleDB, indexed by topology and entropy.
 	BackendPebbleDB = "pebbledb"
 )
