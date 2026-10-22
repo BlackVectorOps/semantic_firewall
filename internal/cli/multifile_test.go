@@ -106,10 +106,7 @@ func TestMultiFilePackage_EachFunctionOnce(t *testing.T) {
 			if err := js.LoadDatabase(dbPath); err != nil {
 				t.Fatal(err)
 			}
-			alerts, scanned, err := RunScanParallel(RealFileSystem{}, files, js, false)
-			if err != nil {
-				t.Fatal(err)
-			}
+			alerts, scanned := RunScanParallel(RealFileSystem{}, files, js, false)
 			if scanned != 4 {
 				t.Errorf("scan: %d functions scanned; want 4 (F1-F3 and init)", scanned)
 			}
@@ -290,10 +287,7 @@ func testDecoyInitializer(t *testing.T, pad int) {
 		return false
 	}
 
-	alerts, _, err := RunScanParallel(RealFileSystem{}, files, js, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	alerts, _ := RunScanParallel(RealFileSystem{}, files, js, false)
 	if !payloadAlert(alerts) {
 		t.Errorf("scan with the decoy listed first: %+v; want the payload initializer at confidence 1", alerts)
 	}
@@ -360,10 +354,7 @@ func TestMultiFilePackage_PlatformTypesKeepBothInitializers(t *testing.T) {
 		}
 		return false
 	}
-	alerts, _, err := RunScanParallel(RealFileSystem{}, paths, js, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	alerts, _ := RunScanParallel(RealFileSystem{}, paths, js, false)
 	if !windowsAlert(alerts) {
 		t.Errorf("scan of the package: %+v; want the windows initializer at confidence 1", alerts)
 	}
@@ -396,8 +387,8 @@ func TestMultiFilePackage_InitializerTopologyPanic(t *testing.T) {
 	}
 
 	scanner := &recordingScanner{}
-	if _, n, err := RunScanParallel(RealFileSystem{}, files, scanner, false); err != nil || n != 3 {
-		t.Errorf("scan: %d functions, %v; want 3", n, err)
+	if _, n := RunScanParallel(RealFileSystem{}, files, scanner, false); n != 3 {
+		t.Errorf("scan: %d functions; want 3", n)
 	}
 	// The initializer's scan meets the same panic, so it never reaches the
 	// scanner.
