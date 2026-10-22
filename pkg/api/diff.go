@@ -64,7 +64,7 @@ func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, e
 // parts merge into one result that carries a "build" change in Unanalyzed.
 // The synthesized package initializer, which runs the package's other
 // files' initializers too, is left out of the removed part, and out of the
-// added part unless the file was in no build before.
+// added part when some build compiles both versions, whose part compares it.
 func diffSides(oldPath, newPath string, oldSide, newSide FileFingerprints) *models.DiffOutput {
 	if oldSide.absent || newSide.absent {
 		return diffResults(oldPath, newPath, oldSide, newSide, riskProfile{})
