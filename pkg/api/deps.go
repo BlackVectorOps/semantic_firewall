@@ -458,9 +458,11 @@ func sortedEntryNames(m map[string]*ssa.Function) []string {
 
 // reach returns the capability call targets (key -> class) reachable from
 // fn through static calls, closures and function values. It descends into
-// every function with a body; standard-library functions have none, as
+// every function with a body. Standard-library functions have none, as
 // only third-party packages are built, so the walk stops at them and they
-// are classified at the call. Interface and dynamic calls are not followed,
+// are classified at the call; instances of standard-library generic
+// functions (slices.SortFunc[[]int, int]) are built where they are used,
+// so the walk descends into them. Interface and dynamic calls are not followed,
 // and neither are calls to other packages' initializers: each package's
 // initializer is an entry point of its own, and importing a package that
 // was already built runs nothing new.
