@@ -477,7 +477,7 @@ func validateOutput(res models.LLMResult) error {
 		}
 	}
 
-	// Normalize before matching so spacing/case tricks do not defeat the check.
+	// Normalize case and whitespace before matching.
 	// This is a defense-in-depth backstop, not the primary control: collapse
 	// runs of whitespace and lowercase, then scan for known injection markers.
 	lowerEv := collapseWhitespace(strings.ToLower(res.Evidence))
@@ -506,10 +506,9 @@ func validateOutput(res models.LLMResult) error {
 	return nil
 }
 
-// collapseWhitespace lowercases nothing (caller does that) but reduces every
-// run of Unicode whitespace to a single ASCII space, defeating the common
-// "i g n o r e" / "ignore\u00a0previous" spacing evasions against the phrase
-// denylist above.
+// collapseWhitespace reduces every run of Unicode whitespace to a single
+// ASCII space, so "ignore\u00a0previous" or "ignore\n  previous" still matches
+// the phrase denylist above. Letter spacing ("i g n o r e") is not caught.
 func collapseWhitespace(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
