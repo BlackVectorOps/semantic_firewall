@@ -61,6 +61,8 @@ type PebbleScanner struct {
 
 // PebbleScannerOptions configures the PebbleScanner initialization.
 type PebbleScannerOptions struct {
+	// MatchThreshold is the minimum confidence a scan reports. 0 means the
+	// default, 0.75; set a threshold of 0 with SetMatchThreshold.
 	MatchThreshold   float64
 	EntropyTolerance float64
 	ReadOnly         bool
@@ -97,7 +99,7 @@ func NewPebbleScanner(dbPath string, opts PebbleScannerOptions) (*PebbleScanner,
 		opts.MatchThreshold = 0.75
 	}
 	// NaN would fail every comparison and suppress every alert.
-	if math.IsNaN(opts.MatchThreshold) || opts.MatchThreshold < 0 || opts.MatchThreshold > 1 {
+	if !validThreshold(opts.MatchThreshold) {
 		return nil, fmt.Errorf("match threshold must be between 0.0 and 1.0, got: %v", opts.MatchThreshold)
 	}
 	if opts.EntropyTolerance == 0 {
@@ -192,10 +194,30 @@ func (s *PebbleScanner) Close() error {
 	return nil
 }
 
-func (s *PebbleScanner) SetThreshold(threshold float64) {
+// SetMatchThreshold sets the minimum confidence a scan reports, 0 included.
+// A value outside [0, 1], or NaN, is refused: NaN fails every comparison
+// and would suppress every alert.
+func (s *PebbleScanner) SetMatchThreshold(threshold float64) error {
+	if !validThreshold(threshold) {
+		return fmt.Errorf("match threshold must be between 0.0 and 1.0, got: %v", threshold)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.matchThreshold = threshold
+	return nil
+}
+
+// SetThreshold is SetMatchThreshold, except that invalid values are
+// ignored: the previous threshold stays.
+//
+// Deprecated: Use SetMatchThreshold, which reports an invalid value.
+func (s *PebbleScanner) SetThreshold(threshold float64) {
+	_ = s.SetMatchThreshold(threshold)
+}
+
+// validThreshold is written so NaN, which fails every comparison, fails it.
+func validThreshold(t float64) bool {
+	return t >= 0 && t <= 1
 }
 
 func (s *PebbleScanner) settings() (threshold, tolerance float64) {

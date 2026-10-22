@@ -26,6 +26,7 @@ type Sandboxer interface {
 type SignatureScanner interface {
 	ScanTopology(topo *topology.FunctionTopology, funcName string) ([]detection.ScanResult, error)
 	ScanTopologyExact(topo *topology.FunctionTopology, funcName string) (*detection.ScanResult, error)
+	SetMatchThreshold(threshold float64) error
 	Close() error
 }
 

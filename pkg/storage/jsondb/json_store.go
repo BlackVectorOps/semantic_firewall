@@ -89,6 +89,11 @@ func (s *Scanner) LoadDatabase(path string) error {
 	return nil
 }
 
+// SetMatchThreshold is SetThreshold, under the name PebbleScanner uses.
+func (s *Scanner) SetMatchThreshold(threshold float64) error {
+	return s.SetThreshold(threshold)
+}
+
 // SetThreshold sets the minimum confidence ScanTopology reports. NaN, an
 // infinity, or a value outside [0, 1] is refused: NaN in particular would
 // fail every comparison and silently suppress all alerts.

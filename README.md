@@ -814,7 +814,7 @@ sfw stats --db signatures.db
 scanner, err := pebbledb.NewPebbleScanner("signatures.db", pebbledb.DefaultPebbleScannerOptions())
 ```
 
-`DefaultPebbleScannerOptions()` returns `MatchThreshold: 0.75`, `EntropyTolerance: 0.5`, `ReadOnly: false` and `CacheSize: 8 << 20`. A zero field is replaced by its default.
+`DefaultPebbleScannerOptions()` returns `MatchThreshold: 0.75`, `EntropyTolerance: 0.5`, `ReadOnly: false` and `CacheSize: 8 << 20`. A zero field is replaced by its default. A threshold of 0 is set on the open scanner with `SetMatchThreshold`, which refuses a value outside [0, 1] or NaN; `sfw scan --threshold` does that, so `--threshold 0` reports every candidate. `jsondb.Scanner` has the same method.
 
 | Method | Behavior |
 |--------|----------|

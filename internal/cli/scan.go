@@ -104,7 +104,6 @@ func RunScanLogic(fsys FileSystem, pkgLoader PackageLoader, target string, opts 
 		defer cleanup()
 
 		scanOpts := pebbledb.DefaultPebbleScannerOptions()
-		scanOpts.MatchThreshold = opts.Threshold
 		scanOpts.ReadOnly = true
 
 		ps, err := pebbledb.NewPebbleScanner(safeDBPath, scanOpts)
@@ -119,8 +118,12 @@ func RunScanLogic(fsys FileSystem, pkgLoader PackageLoader, target string, opts 
 		if err := js.LoadDatabase(opts.DBPath); err != nil {
 			return fmt.Errorf("failed to load json db: %w", err)
 		}
-		js.SetThreshold(opts.Threshold)
 		scanner = js
+	}
+	// Set on the open scanner: NewPebbleScanner reads a threshold of 0 as
+	// its default.
+	if err := scanner.SetMatchThreshold(opts.Threshold); err != nil {
+		return err
 	}
 
 	allAlerts, totalFunctions, err = RunScanParallel(fsys, files, scanner, opts.ExactOnly)
