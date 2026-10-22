@@ -346,7 +346,11 @@ runs:
         GVISOR_VERSION="20260126.0"
         ARCH=$(uname -m)
         URL="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_VERSION}/${ARCH}"
-        EXPECTED_SHA="cce974fa832c50d26c6ccc08ce50b4972921cd0818ebe8007587211d360cbc828ceea4ec8296703200afa208b679437d24f27a6dca31887b3c0fc6ee8be5eb05"
+        case "${ARCH}" in
+          x86_64) EXPECTED_SHA="cce974fa832c50d26c6ccc08ce50b4972921cd0818ebe8007587211d360cbc828ceea4ec8296703200afa208b679437d24f27a6dca31887b3c0fc6ee8be5eb05" ;;
+          aarch64) EXPECTED_SHA="c1b42f5789c09a68eb006964048448c058776440477fac83c7fd9cef879cec40878fb2f5f2450315ca0e7f568889f0b52c842b84929784a57023961f6eb77d04" ;;
+          *) echo "::error::no pinned runsc checksum for ${ARCH}"; exit 1 ;;
+        esac
         
         wget -q -O runsc "${URL}/runsc"
         echo "${EXPECTED_SHA} runsc" | sha512sum -c -
