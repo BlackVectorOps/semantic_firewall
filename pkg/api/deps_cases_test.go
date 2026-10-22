@@ -4,11 +4,11 @@ import (
 	"archive/zip"
 	"bytes"
 	"fmt"
+	"go/build"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -69,7 +69,7 @@ func moduleProxy(t *testing.T, modules map[string]map[string]string) string {
 // and go.sum.
 func tidy(t *testing.T, dir, proxy string) {
 	t.Helper()
-	cmd := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "mod", "tidy")
+	cmd := exec.Command(filepath.Join(build.Default.GOROOT, "bin", "go"), "mod", "tidy")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GOPROXY="+proxy, "GOSUMDB=off", "GOFLAGS=-mod=mod", "GOTOOLCHAIN=local", "GOWORK=off", "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {

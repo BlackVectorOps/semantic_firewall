@@ -7,13 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
 	"go/types"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -527,7 +527,7 @@ func pinnedModules(t *testing.T, root string, modules map[string]map[string]stri
 	}
 }
 
-func goTool() string { return filepath.Join(runtime.GOROOT(), "bin", "go") }
+func goTool() string { return filepath.Join(build.Default.GOROOT, "bin", "go") }
 
 // A dependency whose own files are the same under two build tags still
 // changes when a package it imports does: api re-exports a constant from
@@ -593,7 +593,7 @@ func TestLoadSource_OverlaidDependencyIsNotCached(t *testing.T) {
 		"go.mod":    "module example.com/m\n\ngo 1.22\n",
 		"root/r.go": "package root\n\nimport (\n\t\"net\"\n\t\"unicode/utf8\"\n)\n\nfunc R(a string) {\n\tif utf8.UTFMax == 5 {\n\t\tnet.Dial(\"tcp\", a)\n\t}\n}\n",
 	})
-	utf8File := filepath.Join(runtime.GOROOT(), "src", "unicode", "utf8", "utf8.go")
+	utf8File := filepath.Join(build.Default.GOROOT, "src", "unicode", "utf8", "utf8.go")
 	orig, err := os.ReadFile(utf8File)
 	if err != nil {
 		t.Fatal(err)

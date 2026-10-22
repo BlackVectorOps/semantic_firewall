@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"fmt"
+	"go/build"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,7 +49,7 @@ func TestDepsDiff_Vendored(t *testing.T) {
 			"main.go": "package main\n\nimport \"example.com/dep/d\"\n\nfunc main() { println(d.Decode(\"x\")) }\n",
 		})
 		tidy(t, dir, proxy)
-		cmd := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "mod", "vendor")
+		cmd := exec.Command(filepath.Join(build.Default.GOROOT, "bin", "go"), "mod", "vendor")
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), "GOPROXY="+proxy, "GOSUMDB=off", "GOFLAGS=-mod=mod", "GOTOOLCHAIN=local", "GOWORK=off")
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -640,7 +641,7 @@ func TestDepsDiff_Workspace(t *testing.T) {
 	t.Run("a vendored workspace", func(t *testing.T) {
 		vendored := func() string {
 			dir := tree(map[string]string{"go.work": "go 1.22\n\nuse ./app\n"})
-			cmd := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "work", "vendor")
+			cmd := exec.Command(filepath.Join(build.Default.GOROOT, "bin", "go"), "work", "vendor")
 			cmd.Dir = filepath.Dir(dir)
 			cmd.Env = append(os.Environ(), "GOPROXY="+proxy, "GOSUMDB=off", "GOFLAGS=-mod=mod", "GOTOOLCHAIN=local", "GOWORK="+filepath.Join(filepath.Dir(dir), "go.work"))
 			if out, err := cmd.CombinedOutput(); err != nil {
