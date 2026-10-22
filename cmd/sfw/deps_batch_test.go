@@ -2,10 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"go/build"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -116,7 +116,7 @@ func TestMainBinaryDepsAndBatch(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 	bin := filepath.Join(t.TempDir(), "sfw")
-	build := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", bin, ".")
+	build := exec.Command(filepath.Join(build.Default.GOROOT, "bin", "go"), "build", "-o", bin, ".")
 	build.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)

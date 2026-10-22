@@ -8,10 +8,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"go/build"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -60,7 +60,7 @@ func sfwOnPath(t *testing.T) string {
 	return binDir
 }
 
-func goBin() string { return filepath.Join(runtime.GOROOT(), "bin", "go") }
+func goBin() string { return filepath.Join(build.Default.GOROOT, "bin", "go") }
 
 // stepScript returns the `run` block of the action.yml step with this id.
 func stepScript(t *testing.T, id string) string {
@@ -140,7 +140,7 @@ func runSteps(t *testing.T, repo string, inputs map[string]string) (res actionRu
 		before = strings.TrimSpace(string(out))
 	}
 	env = append(env,
-		"PATH="+bin+string(os.PathListSeparator)+filepath.Join(runtime.GOROOT(), "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"PATH="+bin+string(os.PathListSeparator)+filepath.Join(build.Default.GOROOT, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"GITHUB_OUTPUT="+outFile, "GITHUB_EVENT_NAME=push", "GITHUB_EVENT_BEFORE="+before, "GITHUB_BASE_REF=",
 		"RUNNER_TEMP="+t.TempDir(), "PR_BASE_SHA=", "PR_HEAD_SHA=", "MG_BASE_SHA=", "MG_HEAD_SHA=", "DEFAULT_BRANCH=", "GITHUB_SERVER_URL=", "GITHUB_REPOSITORY=")
 	for k, v := range inputs {
@@ -568,7 +568,7 @@ func goSum(t *testing.T, goMod, mainGo string, env []string) string {
 			t.Fatal(err)
 		}
 	}
-	cmd := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "mod", "tidy")
+	cmd := exec.Command(filepath.Join(build.Default.GOROOT, "bin", "go"), "mod", "tidy")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), env...)
 	if out, err := cmd.CombinedOutput(); err != nil {
