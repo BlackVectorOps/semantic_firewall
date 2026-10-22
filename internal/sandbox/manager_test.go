@@ -3,14 +3,18 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // TestGenerateSpec verifies that the OCI spec is generated correctly with valid inputs
@@ -48,7 +52,7 @@ func TestGenerateSpec(t *testing.T) {
 	}
 
 	// Execute with context
-	spec, err := generateSpec(context.Background(), cfg, selfExe)
+	spec, err := generateSpec(context.Background(), cfg, selfExe, DefaultLimits)
 	if err != nil {
 		t.Fatalf("generateSpec failed: %v", err)
 	}
@@ -145,7 +149,7 @@ func TestGenerateSpec_MountSorting(t *testing.T) {
 	lookPathFunc = func(file string) (string, error) { return "/bin/true", nil }
 	defer func() { lookPathFunc = origLookPath }()
 
-	spec, err := generateSpec(context.Background(), cfg, "/bin/mock")
+	spec, err := generateSpec(context.Background(), cfg, "/bin/mock", DefaultLimits)
 	if err != nil {
 		t.Fatalf("generateSpec failed: %v", err)
 	}
@@ -194,7 +198,7 @@ func TestGenerateSpec_SecurityOptions(t *testing.T) {
 	})
 	defer restoreExec()
 
-	spec, err := generateSpec(ctx, cfg, selfExe)
+	spec, err := generateSpec(ctx, cfg, selfExe, DefaultLimits)
 	if err != nil {
 		t.Fatalf("generateSpec failed: %v", err)
 	}
@@ -388,13 +392,154 @@ func TestGenerateSpec_RootlessIDMapping(t *testing.T) {
 	})
 	defer restoreExec()
 
-	spec, err := generateSpec(context.Background(), Config{WorkDir: "/tmp"}, "/bin/mock_sfw")
+	spec, err := generateSpec(context.Background(), Config{WorkDir: "/tmp"}, "/bin/mock_sfw", DefaultLimits)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []IDMapping{{ContainerID: 0, HostID: 0, Size: 1}}
 	if !slices.Equal(spec.Linux.UIDMappings, want) || !slices.Equal(spec.Linux.GIDMappings, want) {
 		t.Errorf("mappings uid %v gid %v; want %v", spec.Linux.UIDMappings, spec.Linux.GIDMappings, want)
+	}
+}
+
+// The spec bounds each process with rlimits the sentry enforces and caps
+// /tmp, and carries no cgroup resources, which --ignore-cgroups would drop.
+func TestGenerateSpec_Limits(t *testing.T) {
+	restoreExec := replaceExecFunc(func(ctx context.Context, cmd string, args ...string) *exec.Cmd {
+		return mockHelperCommand(ctx, "true")
+	})
+	defer restoreExec()
+
+	l := Limits{Timeout: time.Minute, MemoryMiB: 4096, TmpMiB: 512}
+	spec, err := generateSpec(context.Background(), Config{WorkDir: "/tmp"}, "/bin/mock_sfw", l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]Rlimit{}
+	for _, r := range spec.Process.Rlimits {
+		got[r.Type] = r
+	}
+	for typ, want := range map[string]uint64{
+		"RLIMIT_AS":    4096 << 20,
+		"RLIMIT_FSIZE": 512 << 20,
+		"RLIMIT_CPU":   61 * uint64(runtime.NumCPU()),
+	} {
+		if r := got[typ]; r.Soft != want || r.Hard != want {
+			t.Errorf("%s = %d/%d; want %d/%d", typ, r.Soft, r.Hard, want, want)
+		}
+	}
+	for _, m := range spec.Mounts {
+		if m.Destination == "/tmp" && !slices.Contains(m.Options, "size=512m") {
+			t.Errorf("/tmp options %v; want size=512m", m.Options)
+		}
+	}
+	data, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"resources"`) {
+		t.Error("spec carries cgroup resources")
+	}
+}
+
+// The default address space is three quarters of the host's memory.
+func TestDefaultMemoryMiB(t *testing.T) {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		t.Skip("no /proc/meminfo")
+	}
+	var kib uint64
+	fmt.Sscanf(strings.SplitN(string(data), "\n", 2)[0], "MemTotal: %d kB", &kib)
+	if want := max(kib/1024*3/4, minMemoryMiB); kib == 0 || DefaultLimits.MemoryMiB != want {
+		t.Errorf("default memory %d MiB; want %d (MemTotal %d kB)", DefaultLimits.MemoryMiB, want, kib)
+	}
+}
+
+func TestLimitsFromEnv(t *testing.T) {
+	for _, c := range []struct {
+		env  map[string]string
+		want Limits
+		bad  bool
+	}{
+		{env: nil, want: DefaultLimits},
+		{env: map[string]string{EnvTimeout: "90s", EnvMemoryMiB: "1024", EnvTmpMiB: "64"}, want: Limits{Timeout: 90 * time.Second, MemoryMiB: 1024, TmpMiB: 64}},
+		{env: map[string]string{EnvMemoryMiB: "512"}, bad: true},
+		{env: map[string]string{EnvTimeout: "ten"}, bad: true},
+		{env: map[string]string{EnvTimeout: "0s"}, bad: true},
+		{env: map[string]string{EnvMemoryMiB: "0"}, bad: true},
+		{env: map[string]string{EnvTmpMiB: "-1"}, bad: true},
+	} {
+		for _, k := range []string{EnvTimeout, EnvMemoryMiB, EnvTmpMiB} {
+			t.Setenv(k, c.env[k])
+		}
+		got, err := LimitsFromEnv()
+		if (err != nil) != c.bad || (!c.bad && got != c.want) {
+			t.Errorf("LimitsFromEnv(%v) = %+v, %v; want %+v, error %v", c.env, got, err, c.want, c.bad)
+		}
+	}
+}
+
+// A run past its timeout fails, and its container is killed and deleted
+// through the run's own state root, so no sandbox or gofer outlives it.
+func TestRun_TimeoutKillsAndDeletes(t *testing.T) {
+	origLookPath := lookPathFunc
+	lookPathFunc = func(string) (string, error) { return "/usr/bin/runsc", nil }
+	defer func() { lookPathFunc = origLookPath }()
+
+	var mu sync.Mutex
+	var calls [][]string
+	restoreExec := replaceExecFunc(func(ctx context.Context, cmd string, args ...string) *exec.Cmd {
+		if cmd == "go" {
+			return mockHelperCommand(ctx, "echo", "")
+		}
+		mu.Lock()
+		calls = append(calls, args)
+		mu.Unlock()
+		if slices.Contains(args, "run") {
+			return mockHelperCommand(ctx, "sleep")
+		}
+		return mockHelperCommand(ctx, "true")
+	})
+	defer restoreExec()
+	t.Setenv(EnvTimeout, "200ms")
+
+	start := time.Now()
+	err := Run(context.Background(), Config{Args: []string{"worker"}, WorkDir: t.TempDir()}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "timed out after 200ms") {
+		t.Fatalf("Run = %v; want a timeout error", err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("Run took %v after a 200ms timeout", d)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var root, id string
+	seen := map[string]bool{}
+	for _, args := range calls {
+		r := args[0]
+		if !strings.HasPrefix(r, "--root=") {
+			t.Fatalf("runsc %v: want --root first", args)
+		}
+		if root == "" {
+			root = r
+		} else if r != root {
+			t.Errorf("runsc %v: root %s; want %s for every call", args, r, root)
+		}
+		switch {
+		case slices.Contains(args, "run"):
+			id = args[len(args)-1]
+			seen["run"] = true
+		case slices.Equal(args[len(args)-2:], []string{id, "KILL"}):
+			seen["kill"] = true
+		case slices.Equal(args[len(args)-3:], []string{"delete", "-force", id}):
+			seen["delete"] = true
+		}
+	}
+	for _, step := range []string{"run", "kill", "delete"} {
+		if !seen[step] {
+			t.Errorf("no runsc %s among %v", step, calls)
+		}
 	}
 }
 
@@ -469,6 +614,8 @@ func TestHelperProcess(t *testing.T) {
 		os.Exit(0)
 	case "false":
 		os.Exit(1)
+	case "sleep":
+		time.Sleep(time.Minute)
 	default:
 		fmt.Fprintf(os.Stderr, "TestHelperProcess: unknown command %q\n", cmd)
 		os.Exit(2)
@@ -496,7 +643,7 @@ func TestGenerateSpec_TypeCache(t *testing.T) {
 		"rw:relative":                        false,
 	} {
 		t.Setenv(EnvTypeCache, setting)
-		spec, err := generateSpec(context.Background(), Config{Args: []string{"diff"}, WorkDir: "/tmp"}, "/bin/mock_sfw")
+		spec, err := generateSpec(context.Background(), Config{Args: []string{"diff"}, WorkDir: "/tmp"}, "/bin/mock_sfw", DefaultLimits)
 		if err != nil {
 			t.Fatalf("%q: %v", setting, err)
 		}
@@ -521,7 +668,7 @@ func TestGenerateSpec_TypeCache(t *testing.T) {
 	}
 
 	t.Setenv(EnvTypeCache, "rw:"+dir)
-	if _, err := generateSpec(context.Background(), Config{Mounts: []string{typeCacheMount}, WorkDir: "/tmp"}, "/bin/mock_sfw"); err == nil || !strings.Contains(err.Error(), "reserved sandbox path") {
+	if _, err := generateSpec(context.Background(), Config{Mounts: []string{typeCacheMount}, WorkDir: "/tmp"}, "/bin/mock_sfw", DefaultLimits); err == nil || !strings.Contains(err.Error(), "reserved sandbox path") {
 		t.Errorf("an input mounted at %s: %v; want it refused as reserved", typeCacheMount, err)
 	}
 }
