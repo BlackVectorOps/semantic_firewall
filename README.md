@@ -1232,6 +1232,8 @@ A pull request runs the workflow as the pull request has it, so it can edit or r
 | `api-key` | — | exported to the provider's variable according to `model` |
 | `model` | `claude-opus-5-5` | `audit --model` |
 | `api-base` | — | `audit --api-base` |
+| `sandbox-timeout` | `20m` | `SFW_SANDBOX_TIMEOUT` (see [Sandbox](#sandbox)) |
+| `sandbox-memory-mib` | — | `SFW_SANDBOX_MEMORY_MIB`; empty is three quarters of the runner's memory |
 
 The outputs are:
 - `result`; in `diff` mode each `old_file` is the path in the repository, not in the base worktree
