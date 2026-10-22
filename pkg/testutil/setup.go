@@ -4,7 +4,6 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/ir"
@@ -70,11 +69,8 @@ func CompileAndGetFunction(t *testing.T, src, funcName string) *ssa.Function {
 			continue
 		}
 		for _, member := range ssaPkg.Members {
-			if fn, ok := member.(*ssa.Function); ok {
-				// Match simple name or package-qualified name
-				if fn.Name() == funcName || strings.HasSuffix(fn.Name(), "."+funcName) {
-					return fn
-				}
+			if fn, ok := member.(*ssa.Function); ok && fn.Name() == funcName {
+				return fn
 			}
 		}
 	}
