@@ -85,7 +85,7 @@ func TestMultiFilePackage_EachFunctionOnce(t *testing.T) {
 			}
 
 			dbPath := filepath.Join(t.TempDir(), "db.json")
-			sigs, _, err := RunIndexJSON(files[0], fingerprintFiles(RealFileSystem{}, files), "S", "HIGH", "malware", dbPath)
+			sigs, _, err := RunIndexJSON(fingerprintFiles(RealFileSystem{}, files), "S", "HIGH", "malware", dbPath)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -258,7 +258,7 @@ func testDecoyInitializer(t *testing.T, pad int) {
 	}
 
 	dbPath := filepath.Join(t.TempDir(), "db.json")
-	sigs, _, err := RunIndexJSON(payload, fingerprintFiles(RealFileSystem{}, []string{payload}), "P", "HIGH", "malware", dbPath)
+	sigs, _, err := RunIndexJSON(fingerprintFiles(RealFileSystem{}, []string{payload}), "P", "HIGH", "malware", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestMultiFilePackage_PlatformTypesKeepBothInitializers(t *testing.T) {
 	windows := paths[2]
 
 	dbPath := filepath.Join(t.TempDir(), "db.json")
-	sigs, _, err := RunIndexJSON(windows, fingerprintFiles(RealFileSystem{}, []string{windows}), "W", "HIGH", "malware", dbPath)
+	sigs, _, err := RunIndexJSON(fingerprintFiles(RealFileSystem{}, []string{windows}), "W", "HIGH", "malware", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

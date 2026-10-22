@@ -300,7 +300,7 @@ func TestRunIndex_SkipsImportOnlyInit(t *testing.T) {
 			t.Fatal(err)
 		}
 		results := fingerprintFiles(RealFileSystem{}, []string{path})
-		sigs, _, err := RunIndexJSON(path, results, "S", "HIGH", "malware", filepath.Join(t.TempDir(), "db.json"))
+		sigs, _, err := RunIndexJSON(results, "S", "HIGH", "malware", filepath.Join(t.TempDir(), "db.json"))
 		if err != nil {
 			t.Fatalf("RunIndexJSON: %v", err)
 		}

@@ -38,9 +38,9 @@ func RunIndex(target, name, severity, category, dbPath string) error {
 	isJSON := IsJSON(dbPath)
 
 	if !isJSON {
-		indexed, totalSigs, err = RunIndexPebble(target, results, name, severity, category, dbPath)
+		indexed, totalSigs, err = RunIndexPebble(results, name, severity, category, dbPath)
 	} else {
-		indexed, totalSigs, err = RunIndexJSON(target, results, name, severity, category, dbPath)
+		indexed, totalSigs, err = RunIndexJSON(results, name, severity, category, dbPath)
 	}
 	if err != nil {
 		return err
@@ -65,7 +65,7 @@ func RunIndex(target, name, severity, category, dbPath string) error {
 	return encoder.Encode(output)
 }
 
-func RunIndexPebble(target string, results []diff.FingerprintResult, name, severity, category, dbPath string) ([]detection.Signature, int, error) {
+func RunIndexPebble(results []diff.FingerprintResult, name, severity, category, dbPath string) ([]detection.Signature, int, error) {
 	scanner, err := pebbledb.NewPebbleScanner(dbPath, pebbledb.DefaultPebbleScannerOptions())
 	if err != nil {
 		return nil, 0, err
@@ -124,7 +124,7 @@ func RunIndexPebble(target string, results []diff.FingerprintResult, name, sever
 	return sigs, finalCount, nil
 }
 
-func RunIndexJSON(target string, results []diff.FingerprintResult, name, severity, category, dbPath string) ([]detection.Signature, int, error) {
+func RunIndexJSON(results []diff.FingerprintResult, name, severity, category, dbPath string) ([]detection.Signature, int, error) {
 	scanner := jsondb.NewScanner()
 	if _, err := os.Stat(dbPath); err == nil {
 		if err := scanner.LoadDatabase(dbPath); err != nil {
