@@ -1,0 +1,69 @@
+name: Lint
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Static checks and dead code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+          cache: true
+
+      # Tools run at fixed versions; the checksum database keeps a module
+      # version's content from changing.
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+
+      - name: Unused parameters and results
+        # internal/ and cmd/ only: pkg/ is public API, where a parameter or
+        # result sfw doesn't use can still be someone else's.
+        run: go run mvdan.cc/unparam@v0.0.0-20261011093844-7a2c2c0b7aa6 -exported ./internal/... ./cmd/...
+
+      - name: Unreachable functions
+        # deadcode exits 0 either way. Scoped like unparam: every pkg/ export
+        # is reachable only from callers outside this module.
+        run: |
+          out=$(go run golang.org/x/tools/cmd/deadcode@v0.52.0 -test \
+            -filter '^github.com/BlackVectorOps/semantic_firewall/v7/(cmd|internal)/' ./...)
+          if [[ -n "$out" ]]; then
+            printf '%s\n' "$out"
+            exit 1
+          fi
+
+  api:
+    name: API compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+          cache: true
+
+      - name: gorelease
+        # Compares the exported API with the latest v7 release and fails on
+        # an incompatible change. A deliberate break waits for v8.
+        run: go run golang.org/x/exp/cmd/gorelease@v0.0.0-20261014143641-f0251eb4aa3e
