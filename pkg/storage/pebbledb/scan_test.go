@@ -149,3 +149,49 @@ func TestNewPebbleScanner_RefusesInvalidThreshold(t *testing.T) {
 		}
 	}
 }
+
+// SetMatchThreshold takes 0 and refuses what isn't in [0, 1]; the
+// deprecated SetThreshold ignores those, keeping the previous threshold.
+func TestPebbleScanner_SetMatchThreshold(t *testing.T) {
+	topo := topology.ExtractTopology(testutil.CompileAndGetFunction(t, scanSrc, "beacon"))
+	ps, err := pebbledb.NewPebbleScanner(t.TempDir(), pebbledb.DefaultPebbleScannerOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ps.Close()
+	sig := detection.IndexFunction(topo, "sig_beacon", "", "HIGH", "malware")
+	if err := ps.AddSignature(&sig); err != nil {
+		t.Fatal(err)
+	}
+	// Same shape, required calls gone: a candidate far below 0.75.
+	near := *topo
+	near.CallSignatures = map[string]int{}
+	if c := detection.NewMatcher(&near, "beacon").Match(sig, 0.5).Confidence; c >= 0.75 {
+		t.Fatalf("near-match confidence %v; the test needs one below 0.75", c)
+	}
+	scan := func() int {
+		res, err := ps.ScanTopology(&near, "beacon")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(res)
+	}
+	if n := scan(); n != 0 {
+		t.Fatalf("%d results at the default threshold; want 0", n)
+	}
+	if err := ps.SetMatchThreshold(0); err != nil {
+		t.Fatal(err)
+	}
+	if n := scan(); n != 1 {
+		t.Fatalf("%d results at threshold 0; want 1", n)
+	}
+	for _, bad := range []float64{math.NaN(), math.Inf(1), -0.1, 1.5} {
+		if err := ps.SetMatchThreshold(bad); err == nil {
+			t.Errorf("SetMatchThreshold(%v) accepted", bad)
+		}
+		ps.SetThreshold(bad)
+		if n := scan(); n != 1 {
+			t.Errorf("after threshold %v: %d results; want the threshold of 0 kept", bad, n)
+		}
+	}
+}

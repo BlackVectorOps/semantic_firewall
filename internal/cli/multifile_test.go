@@ -167,6 +167,8 @@ func (r *recordingScanner) ScanTopologyExact(topo *topology.FunctionTopology, na
 
 func (r *recordingScanner) Close() error { return nil }
 
+func (r *recordingScanner) SetMatchThreshold(float64) error { return nil }
+
 // panickingScanner panics scanning F1 and records every other scan.
 type panickingScanner struct{ recordingScanner }
 

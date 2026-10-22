@@ -2,6 +2,7 @@ package jsondb
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -183,5 +184,16 @@ func TestScanTopologyExact_IgnoresThreshold(t *testing.T) {
 	}
 	if res, err := s.ScanTopologyExact(&near, "beacon"); err != nil || res != nil {
 		t.Errorf("near match: %+v, %v; want none", res, err)
+	}
+}
+
+// SetMatchThreshold is SetThreshold under PebbleScanner's name.
+func TestSetMatchThreshold(t *testing.T) {
+	s := NewScanner()
+	if err := s.SetMatchThreshold(0); err != nil || s.matchThreshold != 0 {
+		t.Errorf("SetMatchThreshold(0) = %v, threshold %v", err, s.matchThreshold)
+	}
+	if err := s.SetMatchThreshold(math.NaN()); err == nil || s.matchThreshold != 0 {
+		t.Errorf("SetMatchThreshold(NaN) = %v, threshold %v", err, s.matchThreshold)
 	}
 }

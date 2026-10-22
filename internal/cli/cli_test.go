@@ -168,6 +168,8 @@ func (c *countingScanner) ScanTopologyExact(*topology.FunctionTopology, string) 
 
 func (c *countingScanner) Close() error { return nil }
 
+func (c *countingScanner) SetMatchThreshold(float64) error { return nil }
+
 // TestRunScanDeps_ScansDependencyFunctions loads this repository's pkg/api,
 // whose only third-party imports arrive through other packages of this module
 // (pkg/diff imports golang.org/x/tools). Direct mode used to load those
@@ -458,5 +460,57 @@ func TestRunScanLogic_RefusesInvalidThreshold(t *testing.T) {
 		if err := RunScanLogic(RealFileSystem{}, RealPackageLoader{}, dir, opts); err == nil {
 			t.Errorf("threshold %v accepted", th)
 		}
+	}
+}
+
+// --threshold 0 reaches a PebbleDB scanner as 0, which its options would
+// read as the default: a match at confidence 0 is reported at threshold 0
+// and not at the default.
+func TestRunScanLogic_PebbleThresholdZero(t *testing.T) {
+	write := func(dir, src string) {
+		if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module m\n\ngo 1.22\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "m.go"), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const body = "\nfunc Beacon(addr string) {\n\tfor {\n\t\tc, err := %s(\"tcp\", addr)\n\t\tif err == nil {\n\t\t\tc.Close()\n\t\t}\n\t\ttime.Sleep(time.Second)\n\t}\n}\n"
+	indexed, scanned := t.TempDir(), t.TempDir()
+	write(indexed, "package m\n\nimport (\n\t\"net\"\n\t\"time\"\n)\n"+fmt.Sprintf(body, "net.Dial"))
+	write(scanned, "package m\n\nimport (\n\t\"net\"\n\t\"time\"\n)\n\nfunc dial(n, a string) (net.Conn, error) { return net.Dial(n, a) }\n"+fmt.Sprintf(body, "dial"))
+	db := filepath.Join(t.TempDir(), "sigs.db")
+	stdout := os.Stdout
+	t.Cleanup(func() { os.Stdout = stdout })
+	run := func(f func() error) []byte {
+		out, err := os.CreateTemp(t.TempDir(), "out")
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.Stdout = out
+		err = f()
+		os.Stdout = stdout
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := os.ReadFile(out.Name())
+		return data
+	}
+	run(func() error { return RunIndex(indexed, "beacon", "HIGH", "malware", db) })
+	alerts := func(threshold float64) int {
+		var res struct{ Alerts []detection.ScanResult }
+		data := run(func() error {
+			return RunScanLogic(RealFileSystem{}, RealPackageLoader{}, scanned, models.ScanOptions{DBPath: db, Threshold: threshold})
+		})
+		if err := json.Unmarshal(data, &res); err != nil {
+			t.Fatalf("scan output: %v: %s", err, data)
+		}
+		return len(res.Alerts)
+	}
+	if n := alerts(models.DefaultScanThreshold); n != 0 {
+		t.Errorf("%d alerts at the default threshold; want 0", n)
+	}
+	if n := alerts(0); n == 0 {
+		t.Error("no alert at threshold 0")
 	}
 }
