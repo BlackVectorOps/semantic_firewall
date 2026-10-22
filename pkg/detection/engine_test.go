@@ -1,6 +1,7 @@
 package detection_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/topology"
@@ -62,5 +63,16 @@ func TestMatchSignature(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ExtractStringPatterns keeps literals as their values: they are already
+// unquoted, so quote characters in them are content.
+func TestExtractStringPatterns_KeepsQuotes(t *testing.T) {
+	t.Parallel()
+	got := detection.ExtractStringPatterns([]string{`"id"`, "'abc'", "`x`", "ab", "plain"})
+	want := []string{"\"id\"", "'abc'", "`x`", "plain"}
+	if !slices.Equal(got, want) {
+		t.Errorf("ExtractStringPatterns = %q; want %q", got, want)
 	}
 }
