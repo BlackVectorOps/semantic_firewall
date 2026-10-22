@@ -115,11 +115,6 @@ func computeVirtualControlFlow(fn *ssa.Function) *virtualControlFlowState {
 
 const MaxFunctionBlocks = 5000
 
-// rangeFuncYield is the Synthetic tag x/tools gives the closure holding the
-// body of a range-over-func loop. Unlike other synthetic functions, it is
-// user code.
-const rangeFuncYield = "range-over-func yield"
-
 // oversizedFingerprint hashes the raw SSA of a function too large to
 // canonicalize. It is deterministic but not canonical: a rename can change it.
 // A constant placeholder would instead make every change to such a function
@@ -689,36 +684,20 @@ func FingerprintPackagesWhere(initialPkgs []*packages.Package, policy ir.Literal
 		return nil, fmt.Errorf("failed to build SSA: %w", err)
 	}
 
+	// keep judges each closure on its own: a //line directive can place one
+	// in another file than its parent.
 	var results []FingerprintResult
-	visited := make(map[*ssa.Function]bool)
-	accept := func(fn *ssa.Function) bool {
-		file, _ := functionPosition(fn)
-		return keep == nil || file == "" || keep(file)
-	}
-
 	for _, pkg := range initialPkgs {
 		if pkg.Types == nil {
 			continue
 		}
-
 		ssaPkg := prog.Package(pkg.Types)
 		if ssaPkg == nil {
 			continue
 		}
-
-		for _, member := range ssaPkg.Members {
-			switch mem := member.(type) {
-			case *ssa.Function:
-				processFunctionAndAnons(mem, policy, strictMode, &results, visited, accept)
-			case *ssa.Type:
-				if named, ok := mem.Type().(*types.Named); ok {
-					for i := 0; i < named.NumMethods(); i++ {
-						m := named.Method(i)
-						if fn := prog.FuncValue(m); fn != nil {
-							processFunctionAndAnons(fn, policy, strictMode, &results, visited, accept)
-						}
-					}
-				}
+		for _, fn := range PackageFunctions(prog, ssaPkg) {
+			if file, _ := functionPosition(fn); keep == nil || file == "" || keep(file) {
+				results = append(results, GenerateFingerprint(fn, policy, strictMode))
 			}
 		}
 	}
@@ -728,27 +707,4 @@ func FingerprintPackagesWhere(initialPkgs []*packages.Package, policy ir.Literal
 	})
 
 	return results, nil
-}
-
-// processFunctionAndAnons fingerprints fn, when accept accepts it, and its
-// anonymous functions, which accept judges on their own: a //line
-// directive can place a closure in another file than its parent.
-func processFunctionAndAnons(fn *ssa.Function, policy ir.LiteralPolicy, strictMode bool, results *[]FingerprintResult, visited map[*ssa.Function]bool, accept func(*ssa.Function) bool) {
-	if visited[fn] {
-		return
-	}
-	visited[fn] = true
-
-	if fn.Synthetic != "" && fn.Name() != "init" && fn.Synthetic != rangeFuncYield {
-		return
-	}
-
-	if len(fn.Blocks) > 0 && accept(fn) {
-		result := GenerateFingerprint(fn, policy, strictMode)
-		*results = append(*results, result)
-	}
-
-	for _, anon := range fn.AnonFuncs {
-		processFunctionAndAnons(anon, policy, strictMode, results, visited, accept)
-	}
 }
