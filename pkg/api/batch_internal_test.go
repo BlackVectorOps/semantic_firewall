@@ -199,6 +199,29 @@ func TestDiffBatch_SingleFilePanic(t *testing.T) {
 	}
 }
 
+// TestDiff_FingerprintPanic checks that Diff, like DiffBatch, reports a
+// panic while fingerprinting as the file's error instead of crashing.
+func TestDiff_FingerprintPanic(t *testing.T) {
+	dir := t.TempDir()
+	loose := filepath.Join(dir, "loose.go")
+	if err := os.WriteFile(loose, []byte("package p\n\nfunc F() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := fingerprintSource
+	t.Cleanup(func() { fingerprintSource = orig })
+	fingerprintSource = func(string, string, ir.LiteralPolicy, bool, func(string) bool) ([]diff.FingerprintResult, error) {
+		panic("boom")
+	}
+	_, err := Diff(loose, loose)
+	if want := "failed to process old file: panic while fingerprinting " + loose + ": boom"; err == nil || err.Error() != want {
+		t.Errorf("error %v; want %q", err, want)
+	}
+	_, err = DiffWithFS(panicFS{panicOn: loose}, loose, loose)
+	if want := "failed to process old file: panic while reading " + loose + ": synthetic"; err == nil || err.Error() != want {
+		t.Errorf("FileSystem panic: error %v; want %q", err, want)
+	}
+}
+
 // inFile keeps the functions of the file at path, matched cleaned and
 // through symbolic links either way, and the functions without a file.
 // Each distinct path is resolved once: a later change to a link does not
