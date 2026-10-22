@@ -80,7 +80,7 @@ func CallLLM(commitMsg string, evidence []models.AuditEvidence, apiKey, model, a
 		}, fmt.Errorf("missing api key")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), models.GlobalScanTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), models.LLMCallTimeout)
 	defer cancel()
 
 	withTools := audit != nil && isClaude(model)

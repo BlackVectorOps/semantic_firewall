@@ -32,8 +32,15 @@ const (
 	BaseRetryDelay = 500 * time.Millisecond
 	// prevents backoff times from growing indefinitely and stalling the execution pipeline.
 	MaxRetryDelay = 5 * time.Second
-	// acts as a circuit breaker for the entire operation to ensure the tool exits within a predictable window.
-	GlobalScanTimeout = 300 * time.Second
+	// bounds one audit's LLM verification: every request and retry in it.
+	LLMCallTimeout = 300 * time.Second
+	// GlobalScanTimeout is LLMCallTimeout under its old name.
+	//
+	// Deprecated: Use LLMCallTimeout. It bounds an audit's LLM calls, not a
+	// scan.
+	//
+	//go:fix inline
+	GlobalScanTimeout = LLMCallTimeout
 
 	// is the minimum confidence score required to suggest a structural match.
 	DefaultTopologyMatchThreshold = 0.6
