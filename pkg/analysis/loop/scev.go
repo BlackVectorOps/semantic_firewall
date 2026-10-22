@@ -563,14 +563,13 @@ func deriveTripCount(loop *Loop) {
 
 	if isNEQ {
 		// NEQ only valid for step 1 or -1
-		stepVal := iv.Step.EvaluateAt(nil, nil)
-		if stepVal == nil {
+		if stepC == nil {
 			return
 		}
 		var rawCount SCEV
-		if stepVal.Cmp(big.NewInt(1)) == 0 {
+		if stepC.Cmp(big.NewInt(1)) == 0 {
 			rawCount = &SCEVGenericExpr{Op: token.SUB, X: limitSCEV, Y: iv.Start}
-		} else if stepVal.Cmp(big.NewInt(-1)) == 0 {
+		} else if stepC.Cmp(big.NewInt(-1)) == 0 {
 			rawCount = &SCEVGenericExpr{Op: token.SUB, X: iv.Start, Y: limitSCEV}
 		} else {
 			return
