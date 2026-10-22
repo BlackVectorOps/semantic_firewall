@@ -226,6 +226,31 @@ func TestAnalyzeObfuscation_CorroborationMonotonic(t *testing.T) {
 	}
 }
 
+// TestAnalyzeObfuscation_DecoderNeedsCycle checks that the decoder signal
+// fires on code in a cycle of the CFG, including one goto makes irreducible
+// (no block dominates the rest), and not on an if/else, whose else block
+// go/ssa numbers after the join.
+func TestAnalyzeObfuscation_DecoderNeedsCycle(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, src string
+		loop      bool
+	}{
+		{"if/else", "func f(b []byte, k byte) byte {\n\tvar x byte\n\tif k > 1 { x = b[0] ^ k } else { x = b[1] + k }\n\treturn x }", false},
+		{"for", "func f(b []byte, k byte) {\n\tfor i := range b { b[i] ^= k } }", true},
+		{"irreducible goto", "func f(b []byte, k byte, c bool) {\n\ti := 0\n\tif c { goto B }\nA:\n\tb[i] ^= k\n\ti++\nB:\n\tif i < len(b) { goto A } }", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := analyze(t, "package main\n"+tc.src, "f")
+			if got := p.DecoderLoopLikelihood > 0; got != tc.loop {
+				t.Errorf("DecoderLoopLikelihood=%.3f, want > 0: %v", p.DecoderLoopLikelihood, tc.loop)
+			}
+		})
+	}
+}
+
 // TestAnalyzeObfuscation_PackageLevelPayloadInvisible documents the known scope
 // limit: package-level payload globals lower their constants into package init,
 // not the consuming function, so per-function analysis cannot see them. If a
