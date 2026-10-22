@@ -31,14 +31,11 @@ func RunScan(target string, opts models.ScanOptions, noSandbox bool) error {
 
 	cleanTarget := filepath.Clean(target)
 
-	// Resolve database path BEFORE entering the sandbox.
-	if opts.DBPath == "" {
-		opts.DBPath = ResolveDBPath("")
-	}
-	if opts.DBPath != "" {
-		if abs, err := filepath.Abs(opts.DBPath); err == nil {
-			opts.DBPath = abs
-		}
+	// Resolve the database path before entering the sandbox. ResolveDBPath
+	// never returns "".
+	opts.DBPath = ResolveDBPath(opts.DBPath)
+	if abs, err := filepath.Abs(opts.DBPath); err == nil {
+		opts.DBPath = abs
 	}
 
 	if !noSandbox && !sb.IsSandboxed() {
@@ -53,13 +50,8 @@ func RunScan(target string, opts models.ScanOptions, noSandbox bool) error {
 			args = append(args, "--deps")
 		}
 
-		var inputs []string
-		inputs = append(inputs, cleanTarget)
-
-		if opts.DBPath != "" {
-			args = append(args, "--db", opts.DBPath)
-			inputs = append(inputs, opts.DBPath)
-		}
+		args = append(args, "--db", opts.DBPath)
+		inputs := []string{cleanTarget, opts.DBPath}
 
 		return SandboxExec(sb, os.Stdout, os.Stderr, "scan", args, inputs...)
 	}
