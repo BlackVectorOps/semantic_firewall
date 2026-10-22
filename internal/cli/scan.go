@@ -4,6 +4,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -69,6 +70,10 @@ func RunScan(target string, opts models.ScanOptions, noSandbox bool) error {
 // -- Core Logic --
 
 func RunScanLogic(fsys FileSystem, pkgLoader PackageLoader, target string, opts models.ScanOptions) error {
+	// NaN would fail every comparison and suppress every alert.
+	if math.IsNaN(opts.Threshold) || opts.Threshold < 0 || opts.Threshold > 1 {
+		return fmt.Errorf("threshold must be between 0.0 and 1.0, got: %v", opts.Threshold)
+	}
 	files, err := CollectFiles(fsys, target)
 	if err != nil {
 		return fmt.Errorf("collect files failed: %w", err)

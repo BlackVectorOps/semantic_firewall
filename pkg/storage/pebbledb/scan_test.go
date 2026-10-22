@@ -1,6 +1,7 @@
 package pebbledb_test
 
 import (
+	"math"
 	"testing"
 
 	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/topology"
@@ -133,5 +134,18 @@ func TestPebbleScanner_ScanRejectsDistantEntropy(t *testing.T) {
 	}
 	if got, err := ps.ScanTopologyExact(topo, "run"); err != nil || got != nil {
 		t.Errorf("ScanTopologyExact = %+v, %v; want no match", got, err)
+	}
+}
+
+// An invalid threshold is refused: NaN fails every comparison and would
+// suppress every alert.
+func TestNewPebbleScanner_RefusesInvalidThreshold(t *testing.T) {
+	for _, th := range []float64{math.NaN(), math.Inf(1), -0.1, 1.5} {
+		opts := pebbledb.DefaultPebbleScannerOptions()
+		opts.MatchThreshold = th
+		if ps, err := pebbledb.NewPebbleScanner(t.TempDir(), opts); err == nil {
+			ps.Close()
+			t.Errorf("threshold %v accepted", th)
+		}
 	}
 }

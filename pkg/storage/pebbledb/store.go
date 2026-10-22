@@ -96,6 +96,10 @@ func NewPebbleScanner(dbPath string, opts PebbleScannerOptions) (*PebbleScanner,
 	if opts.MatchThreshold == 0 {
 		opts.MatchThreshold = 0.75
 	}
+	// NaN would fail every comparison and suppress every alert.
+	if math.IsNaN(opts.MatchThreshold) || opts.MatchThreshold < 0 || opts.MatchThreshold > 1 {
+		return nil, fmt.Errorf("match threshold must be between 0.0 and 1.0, got: %v", opts.MatchThreshold)
+	}
 	if opts.EntropyTolerance == 0 {
 		opts.EntropyTolerance = 0.5
 	}
