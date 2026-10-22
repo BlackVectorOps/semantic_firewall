@@ -170,16 +170,15 @@ func kvmUsable(path string) bool {
 	return true
 }
 
-// Ensures that the destination paths for all mounts exist in the rootfs.
-// Added strict escape validation to prevent path traversal via mount points.
+// Ensures that the destination paths for all mounts exist in the rootfs,
+// refusing any that resolves outside it.
 func prepareMountPoints(rootfs string, mounts []Mount) error {
 	for _, m := range mounts {
 		dest := filepath.Join(rootfs, m.Destination)
 
-		// Path Traversal Check
-		// Ensure resolved destination is strictly within rootfs.
+		// filepath.Rel returns a relative path, so only ".." can escape.
 		rel, err := filepath.Rel(rootfs, dest)
-		if err != nil || strings.HasPrefix(rel, "..") || strings.HasPrefix(rel, "/") {
+		if err != nil || strings.HasPrefix(rel, "..") {
 			return fmt.Errorf("security violation: mount point '%s' attempts to escape rootfs", m.Destination)
 		}
 
@@ -241,9 +240,8 @@ func generateSpec(ctx context.Context, cfg Config, selfExe string, limits Limits
 	}
 
 	mounts := []Mount{
-		// Removed "noexec" from /proc options.
-		// "noexec" prevents the process from re-executing itself via /proc/self/exe,
-		// which is required for Go binaries and the gVisor rootless shim.
+		// Not noexec: Go binaries and gVisor's rootless mode re-execute
+		// themselves through /proc/self/exe.
 		{Destination: "/proc", Type: "proc", Source: "proc", Options: []string{"nosuid", "nodev"}},
 		{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
 		// Not noexec, to allow execution of build artifacts and scripts.
@@ -389,23 +387,13 @@ func generateSpec(ctx context.Context, cfg Config, selfExe string, limits Limits
 
 // runDirect executes the logic directly when sandbox is unavailable.
 func runDirect(ctx context.Context, cfg Config, stdout, stderr io.Writer) error {
-	// Re-construct the command to call self with the same arguments
-	// but without the sandbox wrapper logic (which is handled by the caller checking IsSandboxed)
-	// Actually, the 'worker' logic needs to be invoked.
-	// Since 'Run' is called to WRAP the execution, we need to run the underlying logic.
-	// However, the current architecture likely calls 'Run' which spawns 'sfw' again inside the sandbox.
-	// So we can just spawn 'sfw' again with the same arguments, but ensure we don't loop.
-	// The worker logic is triggered when the command is run.
-
 	selfExe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to locate self executable: %w", err)
 	}
 
-	// We need to set EnvSandboxID to prevent infinite recursion if the called process tries to sandbox itself again.
-	// But wait, IsSandboxed() checks this env var.
-	// If we set it, the child process will think it's already sandboxed and proceed with logic.
-
+	// The worker runs as it would in the sandbox; EnvSandboxID makes it run
+	// the command itself instead of sandboxing it again.
 	cmd := execCmdFunc(ctx, selfExe, cfg.Args...)
 	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env, fmt.Sprintf("%s=1", EnvSandboxID))
