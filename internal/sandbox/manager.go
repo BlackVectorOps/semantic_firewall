@@ -240,9 +240,8 @@ func generateSpec(ctx context.Context, cfg Config, selfExe string, limits Limits
 	}
 
 	mounts := []Mount{
-		// Removed "noexec" from /proc options.
-		// "noexec" prevents the process from re-executing itself via /proc/self/exe,
-		// which is required for Go binaries and the gVisor rootless shim.
+		// Not noexec: Go binaries and gVisor's rootless mode re-execute
+		// themselves through /proc/self/exe.
 		{Destination: "/proc", Type: "proc", Source: "proc", Options: []string{"nosuid", "nodev"}},
 		{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
 		// Not noexec, to allow execution of build artifacts and scripts.
