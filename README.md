@@ -1031,7 +1031,7 @@ Two instructions are equivalent when all of the following hold:
 | `HasDefer`, `HasPanic`, `HasGo`, `HasSelect` | control-flow flags |
 | `HasRange` | true only for `range` over a map or string |
 | `HasInfiniteLoop` | a `for` statement without a condition in the function's own body (closures excluded) |
-| `HasRecover` | true only when the function itself defers and calls `recover` directly |
+| `HasRecover` | the function defers a call of a function or closure whose own body calls `recover` (`defer func() { recover() }()`, `defer handler()`); a deferred `recover()` itself, or calls through interfaces and function values, don't count |
 | `StringLiterals` | see [Entropy](#entropy) |
 | `EntropyScore`, `EntropyProfile` | see [Entropy](#entropy) |
 | `Obfuscation` | see [Obfuscation profile](#obfuscation-profile) |

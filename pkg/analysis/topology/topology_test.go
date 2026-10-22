@@ -345,3 +345,47 @@ func main() {}
 		t.Errorf("Outer$1: HasInfiniteLoop = false; want true")
 	}
 }
+
+// HasRecover is set when the function defers a call whose own body calls
+// recover: only a recover a deferred function calls directly stops a panic.
+func TestExtractTopology_HasRecover(t *testing.T) {
+	t.Parallel()
+	const src = `package main
+
+func handler() {
+	if r := recover(); r != nil {
+		println(r)
+	}
+}
+
+func closure() {
+	defer func() { recover() }()
+}
+
+func named() {
+	defer handler()
+}
+
+func ownBody() {
+	defer println()
+	recover()
+}
+
+func builtin() {
+	defer recover()
+}
+
+func nested() {
+	defer func() { go func() { recover() }() }()
+}
+`
+	for name, want := range map[string]bool{
+		"closure": true, "named": true,
+		"handler": false, "ownBody": false, "builtin": false, "nested": false,
+	} {
+		topo := topology.ExtractTopology(testutil.CompileAndGetFunction(t, src, name))
+		if topo.HasRecover != want {
+			t.Errorf("%s: HasRecover = %v; want %v", name, topo.HasRecover, want)
+		}
+	}
+}
