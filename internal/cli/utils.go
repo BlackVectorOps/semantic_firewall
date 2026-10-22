@@ -154,7 +154,7 @@ func CollectFiles(fsys FileSystem, target string) ([]string, error) {
 			}
 			return nil
 		}
-		if !d.IsDir() && strings.HasSuffix(path, ".go") && !isTestFile(path) {
+		if strings.HasSuffix(path, ".go") && !isTestFile(path) {
 			files = append(files, path)
 		}
 		return nil
