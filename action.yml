@@ -369,9 +369,7 @@ runs:
         EOF
            sudo apparmor_parser -r /etc/apparmor.d/usr.local.bin.runsc || true
         fi
-        if [[ "$(uname -s)" == "Linux" ]]; then
-           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-        fi
+        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
         
         runsc --version
 
