@@ -14,7 +14,11 @@ type LoopInfo struct {
 }
 
 type Loop struct {
-	Header     *ssa.BasicBlock
+	Header *ssa.BasicBlock
+	// Latch is the source of the loop's first back edge in block order,
+	// which can be the header itself. A loop with several back edges (a
+	// continue in a for without a post statement) has more latches; Blocks
+	// holds the body of all of them.
 	Latch      *ssa.BasicBlock
 	Blocks     map[*ssa.BasicBlock]bool
 	Exits      []*ssa.BasicBlock
@@ -45,7 +49,6 @@ const (
 )
 
 func DetectLoops(fn *ssa.Function) *LoopInfo {
-	_ = fn.DomPreorder()
 	info := &LoopInfo{
 		Function: fn,
 		LoopMap:  make(map[*ssa.BasicBlock]*Loop),

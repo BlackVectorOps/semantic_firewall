@@ -563,14 +563,13 @@ func deriveTripCount(loop *Loop) {
 
 	if isNEQ {
 		// NEQ only valid for step 1 or -1
-		stepVal := iv.Step.EvaluateAt(nil, nil)
-		if stepVal == nil {
+		if stepC == nil {
 			return
 		}
 		var rawCount SCEV
-		if stepVal.Cmp(big.NewInt(1)) == 0 {
+		if stepC.Cmp(big.NewInt(1)) == 0 {
 			rawCount = &SCEVGenericExpr{Op: token.SUB, X: limitSCEV, Y: iv.Start}
-		} else if stepVal.Cmp(big.NewInt(-1)) == 0 {
+		} else if stepC.Cmp(big.NewInt(-1)) == 0 {
 			rawCount = &SCEVGenericExpr{Op: token.SUB, X: iv.Start, Y: limitSCEV}
 		} else {
 			return
@@ -595,21 +594,19 @@ func deriveTripCount(loop *Loop) {
 		return
 	}
 
-	if !isUpCounting {
-		diff := &SCEVGenericExpr{Op: token.SUB, X: iv.Start, Y: limitSCEV}
-		negOne := &SCEVConstant{Value: big.NewInt(-1)}
-		absStep := &SCEVGenericExpr{Op: token.MUL, X: iv.Step, Y: negOne}
-		var numer SCEV
-		if isInclusive {
-			numer = &SCEVGenericExpr{Op: token.ADD, X: diff, Y: absStep}
-		} else {
-			one := &SCEVConstant{Value: big.NewInt(1)}
-			term1 := &SCEVGenericExpr{Op: token.ADD, X: diff, Y: absStep}
-			numer = &SCEVGenericExpr{Op: token.SUB, X: term1, Y: one}
-		}
-		quotient := &SCEVGenericExpr{Op: token.QUO, X: numer, Y: absStep}
-		loop.TripCount = &SCEVMax{X: zero, Y: quotient}
+	diff := &SCEVGenericExpr{Op: token.SUB, X: iv.Start, Y: limitSCEV}
+	negOne := &SCEVConstant{Value: big.NewInt(-1)}
+	absStep := &SCEVGenericExpr{Op: token.MUL, X: iv.Step, Y: negOne}
+	var numer SCEV
+	if isInclusive {
+		numer = &SCEVGenericExpr{Op: token.ADD, X: diff, Y: absStep}
+	} else {
+		one := &SCEVConstant{Value: big.NewInt(1)}
+		term1 := &SCEVGenericExpr{Op: token.ADD, X: diff, Y: absStep}
+		numer = &SCEVGenericExpr{Op: token.SUB, X: term1, Y: one}
 	}
+	quotient := &SCEVGenericExpr{Op: token.QUO, X: numer, Y: absStep}
+	loop.TripCount = &SCEVMax{X: zero, Y: quotient}
 }
 
 func ToSCEV(v ssa.Value, loop *Loop) SCEV {
