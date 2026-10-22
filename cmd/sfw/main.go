@@ -269,7 +269,8 @@ Examples:
 		}
 	case "version":
 		fmt.Println("Semantic Firewall CLI")
-		// Automatically pulls "v2.4.1" from the build tag, or "(devel)" if running locally
+		// The module version from the build info ("v7.4.0" from go install
+		// ...@v7.4.0), or "(devel)" when it has none
 		fmt.Printf("Build: %s\n", version.EngineVersion())
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
