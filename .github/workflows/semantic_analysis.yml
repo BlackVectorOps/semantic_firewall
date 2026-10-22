@@ -34,23 +34,10 @@ jobs:
       - name: Build SFW
         # Built from this commit's source, outside the checkout, and put on
         # PATH, where the Action below takes it instead of installing a
-        # release. The wrapper adds --no-sandbox: gVisor's rootless run fails
-        # on GitHub-hosted runners ("gofer: fork/exec /proc/self/exe:
-        # operation not permitted"), and before this workflow ran the Action,
-        # sfw fell back to running unsandboxed here anyway, for lack of runsc.
+        # release.
         run: |
           mkdir -p "$RUNNER_TEMP/sfw-bin"
-          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/sfw-bin/sfw-real" ./cmd/sfw
-          cat > "$RUNNER_TEMP/sfw-bin/sfw" <<EOF
-          #!/bin/bash
-          cmd=\$1; shift
-          case "\$cmd" in
-            deps) sub=\$1; shift; exec "$RUNNER_TEMP/sfw-bin/sfw-real" deps "\$sub" --no-sandbox "\$@" ;;
-            check|diff|scan|audit) exec "$RUNNER_TEMP/sfw-bin/sfw-real" "\$cmd" --no-sandbox "\$@" ;;
-            *) exec "$RUNNER_TEMP/sfw-bin/sfw-real" "\$cmd" "\$@" ;;
-          esac
-          EOF
-          chmod +x "$RUNNER_TEMP/sfw-bin/sfw"
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/sfw-bin/sfw" ./cmd/sfw
           "$RUNNER_TEMP/sfw-bin/sfw" version
           echo "$RUNNER_TEMP/sfw-bin" >> "$GITHUB_PATH"
 

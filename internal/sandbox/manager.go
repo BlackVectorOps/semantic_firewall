@@ -96,7 +96,7 @@ func Run(ctx context.Context, cfg Config, stdout, stderr io.Writer) error {
 	}
 
 	platform := "ptrace"
-	if _, err := os.Stat("/dev/kvm"); err == nil {
+	if kvmUsable("/dev/kvm") {
 		platform = "kvm"
 	} else {
 		if stderr != nil {
@@ -104,8 +104,11 @@ func Run(ctx context.Context, cfg Config, stdout, stderr io.Writer) error {
 		}
 	}
 
-	// Added --ignore-cgroups to improve stability in nested CI environments
+	// Added --ignore-cgroups to improve stability in nested CI environments.
+	// The state root is in the bundle: rootless runsc otherwise keeps it in
+	// $XDG_RUNTIME_DIR, or /var/run, which an unprivileged user can't write.
 	cmd := execCmdFunc(ctx, runscPath,
+		"--root="+filepath.Join(bundleDir, "state"),
 		"--rootless",
 		"--ignore-cgroups",
 		"--network=none",
@@ -125,6 +128,18 @@ func Run(ctx context.Context, cfg Config, stdout, stderr io.Writer) error {
 		return fmt.Errorf("failed to run sandboxed process: %w", err)
 	}
 	return nil
+}
+
+// kvmUsable reports whether this user can open the KVM device at path. It
+// can exist without that: GitHub-hosted runners have a /dev/kvm only the
+// kvm group may open.
+func kvmUsable(path string) bool {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	f.Close()
+	return true
 }
 
 // Ensures that the destination paths for all mounts exist in the rootfs.
@@ -330,11 +345,16 @@ func generateSpec(ctx context.Context, cfg Config, selfExe string) (*Spec, error
 				{Type: "mount"},
 				{Type: "user"},
 			},
+			// --rootless already runs runsc as root in a user namespace of
+			// its own, so the IDs here are of that namespace: the host's
+			// own UID does not exist there, and mapping it failed every
+			// unprivileged run with "gofer: fork/exec /proc/self/exe:
+			// operation not permitted".
 			UIDMappings: []IDMapping{
-				{ContainerID: 0, HostID: os.Getuid(), Size: 1},
+				{ContainerID: 0, HostID: 0, Size: 1},
 			},
 			GIDMappings: []IDMapping{
-				{ContainerID: 0, HostID: os.Getgid(), Size: 1},
+				{ContainerID: 0, HostID: 0, Size: 1},
 			},
 			Resources: &Resources{
 				Memory: &Memory{Limit: MemLimitBytes},

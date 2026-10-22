@@ -258,6 +258,9 @@ func TestRun_Orchestration(t *testing.T) {
 			if !strings.Contains(argsStr, "--network=none") {
 				t.Error("Missing --network=none flag in runtime args")
 			}
+			if !strings.HasPrefix(args[0], "--root=") || !strings.HasSuffix(args[0], "/state") {
+				t.Errorf("runtime args %v; want --root=<bundle>/state first", args)
+			}
 			return mockHelperCommand(ctx, "true") // Return exit code 0
 		}
 		return mockHelperCommand(ctx, "false")
@@ -374,6 +377,45 @@ func TestIsSandboxed(t *testing.T) {
 	os.Setenv(EnvSandboxID, "1")
 	if !IsSandboxed() {
 		t.Error("IsSandboxed() = false, want true when env var is set")
+	}
+}
+
+// Under --rootless the spec's IDs are of runsc's own user namespace, where
+// the caller is root: the host UID does not exist there.
+func TestGenerateSpec_RootlessIDMapping(t *testing.T) {
+	restoreExec := replaceExecFunc(func(ctx context.Context, cmd string, args ...string) *exec.Cmd {
+		return mockHelperCommand(ctx, "true")
+	})
+	defer restoreExec()
+
+	spec, err := generateSpec(context.Background(), Config{WorkDir: "/tmp"}, "/bin/mock_sfw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []IDMapping{{ContainerID: 0, HostID: 0, Size: 1}}
+	if !slices.Equal(spec.Linux.UIDMappings, want) || !slices.Equal(spec.Linux.GIDMappings, want) {
+		t.Errorf("mappings uid %v gid %v; want %v", spec.Linux.UIDMappings, spec.Linux.GIDMappings, want)
+	}
+}
+
+// A KVM device the user may not open is not used.
+func TestKVMUsable(t *testing.T) {
+	dir := t.TempDir()
+	open, closed := filepath.Join(dir, "open"), filepath.Join(dir, "closed")
+	if err := os.WriteFile(open, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(closed, nil, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if !kvmUsable(open) {
+		t.Error("kvmUsable(rw device) = false")
+	}
+	if os.Getuid() != 0 && kvmUsable(closed) {
+		t.Error("kvmUsable(device without access) = true")
+	}
+	if kvmUsable(filepath.Join(dir, "missing")) {
+		t.Error("kvmUsable(missing) = true")
 	}
 }
 
