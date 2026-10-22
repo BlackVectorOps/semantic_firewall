@@ -377,6 +377,24 @@ func TestIsSandboxed(t *testing.T) {
 	}
 }
 
+// Under --rootless the spec's IDs are of runsc's own user namespace, where
+// the caller is root: the host UID does not exist there.
+func TestGenerateSpec_RootlessIDMapping(t *testing.T) {
+	restoreExec := replaceExecFunc(func(ctx context.Context, cmd string, args ...string) *exec.Cmd {
+		return mockHelperCommand(ctx, "true")
+	})
+	defer restoreExec()
+
+	spec, err := generateSpec(context.Background(), Config{WorkDir: "/tmp"}, "/bin/mock_sfw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []IDMapping{{ContainerID: 0, HostID: 0, Size: 1}}
+	if !slices.Equal(spec.Linux.UIDMappings, want) || !slices.Equal(spec.Linux.GIDMappings, want) {
+		t.Errorf("mappings uid %v gid %v; want %v", spec.Linux.UIDMappings, spec.Linux.GIDMappings, want)
+	}
+}
+
 // -- Test Helpers --
 
 // replaceExecFunc swaps the internal execCmdFunc with a mock and returns a teardown function.

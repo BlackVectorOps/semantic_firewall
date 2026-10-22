@@ -330,11 +330,16 @@ func generateSpec(ctx context.Context, cfg Config, selfExe string) (*Spec, error
 				{Type: "mount"},
 				{Type: "user"},
 			},
+			// --rootless already runs runsc as root in a user namespace of
+			// its own, so the IDs here are of that namespace: the host's
+			// own UID does not exist there, and mapping it failed every
+			// unprivileged run with "gofer: fork/exec /proc/self/exe:
+			// operation not permitted".
 			UIDMappings: []IDMapping{
-				{ContainerID: 0, HostID: os.Getuid(), Size: 1},
+				{ContainerID: 0, HostID: 0, Size: 1},
 			},
 			GIDMappings: []IDMapping{
-				{ContainerID: 0, HostID: os.Getgid(), Size: 1},
+				{ContainerID: 0, HostID: 0, Size: 1},
 			},
 			Resources: &Resources{
 				Memory: &Memory{Limit: MemLimitBytes},
