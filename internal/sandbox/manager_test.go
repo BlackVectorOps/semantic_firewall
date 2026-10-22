@@ -398,6 +398,27 @@ func TestGenerateSpec_RootlessIDMapping(t *testing.T) {
 	}
 }
 
+// A KVM device the user may not open is not used.
+func TestKVMUsable(t *testing.T) {
+	dir := t.TempDir()
+	open, closed := filepath.Join(dir, "open"), filepath.Join(dir, "closed")
+	if err := os.WriteFile(open, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(closed, nil, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if !kvmUsable(open) {
+		t.Error("kvmUsable(rw device) = false")
+	}
+	if os.Getuid() != 0 && kvmUsable(closed) {
+		t.Error("kvmUsable(device without access) = true")
+	}
+	if kvmUsable(filepath.Join(dir, "missing")) {
+		t.Error("kvmUsable(missing) = true")
+	}
+}
+
 // -- Test Helpers --
 
 // replaceExecFunc swaps the internal execCmdFunc with a mock and returns a teardown function.

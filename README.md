@@ -1146,7 +1146,7 @@ The invocation (`internal/sandbox/manager.go`) is:
 runsc --root=<dir>/state --rootless --ignore-cgroups --network=none --platform=<kvm|ptrace> run --bundle <dir> <id>
 ```
 
-`kvm` is used when `/dev/kvm` exists, otherwise `ptrace`.
+`kvm` is used when this user can open `/dev/kvm` read-write, otherwise `ptrace`.
 
 The OCI spec sets:
 
