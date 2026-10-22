@@ -166,8 +166,7 @@ func kvmUsable(path string) bool {
 	if err != nil {
 		return false
 	}
-	f.Close()
-	return true
+	return f.Close() == nil
 }
 
 // Ensures that the destination paths for all mounts exist in the rootfs,
