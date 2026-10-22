@@ -5,13 +5,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
+	"time"
 )
 
 // -- Internal Hooks for Testing --
@@ -28,11 +31,7 @@ type Config struct {
 }
 
 const (
-	// Security Directives
-	MemLimitBytes = 512 * 1024 * 1024 // 512MB
-	CPUShares     = 1024
-	PidsMax       = 64
-	EnvSandboxID  = "SFW_SANDBOX_ID"
+	EnvSandboxID = "SFW_SANDBOX_ID"
 	// EnvTypeCache is diff.TypeCacheEnvVar: "rw:DIR" or "ro:DIR" names the
 	// persistent type cache.
 	EnvTypeCache = "SFW_TYPE_CACHE"
@@ -46,15 +45,30 @@ func IsSandboxed() bool {
 	return os.Getenv(EnvSandboxID) != ""
 }
 
-// Run executes the current binary (self) inside a gVisor sandbox.
+// Run executes the current binary (self) inside a gVisor sandbox, within
+// the Limits the environment sets (see LimitsFromEnv). A run that times out
+// fails.
 func Run(ctx context.Context, cfg Config, stdout, stderr io.Writer) error {
+	limits, err := LimitsFromEnv()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, limits.Timeout)
+	defer cancel()
+	timedOut := func(err error) error {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("sandboxed process timed out after %v (%s)", limits.Timeout, EnvTimeout)
+		}
+		return err
+	}
+
 	runscPath, err := lookPathFunc(RuntimeBinary)
 	if err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "::warning::[Security] '%s' not found. Falling back to direct execution.\n", RuntimeBinary)
 		}
 		// Fallback: Execute directly without sandbox
-		return runDirect(ctx, cfg, stdout, stderr)
+		return timedOut(runDirect(ctx, cfg, stdout, stderr))
 	}
 
 	bundleDir, err := os.MkdirTemp("", "sfw-sandbox-*")
@@ -78,7 +92,7 @@ func Run(ctx context.Context, cfg Config, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	spec, err := generateSpec(ctx, cfg, selfExe)
+	spec, err := generateSpec(ctx, cfg, selfExe, limits)
 	if err != nil {
 		return fmt.Errorf("failed to generate OCI spec: %w", err)
 	}
@@ -104,28 +118,42 @@ func Run(ctx context.Context, cfg Config, stdout, stderr io.Writer) error {
 		}
 	}
 
-	// Added --ignore-cgroups to improve stability in nested CI environments.
-	// The state root is in the bundle: rootless runsc otherwise keeps it in
-	// $XDG_RUNTIME_DIR, or /var/run, which an unprivileged user can't write.
-	cmd := execCmdFunc(ctx, runscPath,
-		"--root="+filepath.Join(bundleDir, "state"),
+	// The container's state lives in the bundle, under an ID no other run
+	// uses, so kill and delete reach this run's sandbox and gofer only.
+	// Rootless runsc would otherwise keep it in $XDG_RUNTIME_DIR, or
+	// /var/run, which an unprivileged user can't write.
+	id := filepath.Base(bundleDir)
+	global := []string{
+		"--root=" + filepath.Join(bundleDir, "state"),
 		"--rootless",
+		// cgroups are unstable in nested CI; the spec's rlimits bound the
+		// processes instead.
 		"--ignore-cgroups",
 		"--network=none",
-		"--platform="+platform,
-		"run",
-		"--bundle", bundleDir,
-		filepath.Base(bundleDir),
-	)
+		// The root is read-only and every writable mount is a size-capped
+		// tmpfs: no overlay may hold writes in host memory beyond them.
+		"--overlay2=none",
+		"--platform=" + platform,
+	}
+	runsc := func(args ...string) error {
+		return execCmdFunc(context.Background(), runscPath, append(slices.Clone(global), args...)...).Run()
+	}
+	// Ending runsc run alone can leave the sandbox and gofer running.
+	defer func() { _ = runsc("delete", "-force", id) }()
 
+	cmd := execCmdFunc(ctx, runscPath, append(slices.Clone(global), "run", "--bundle", bundleDir, id)...)
+	cmd.Cancel = func() error {
+		_ = runsc("kill", id, "KILL")
+		return cmd.Process.Kill()
+	}
+	cmd.WaitDelay = 10 * time.Second
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
-	// Removed os.Exit.
-	// Returning the error allows the caller (e.g., Audit) to handle failures gracefully
-	// rather than crashing the entire tool when one file fails.
+	// The error is returned, not exited on, so a caller handling several
+	// files can fail the one.
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to run sandboxed process: %w", err)
+		return timedOut(fmt.Errorf("failed to run sandboxed process: %w", err))
 	}
 	return nil
 }
@@ -199,7 +227,7 @@ func resolveGoToolchain(ctx context.Context) (goroot, gomodcache string) {
 	return getEnv("GOROOT"), getEnv("GOMODCACHE")
 }
 
-func generateSpec(ctx context.Context, cfg Config, selfExe string) (*Spec, error) {
+func generateSpec(ctx context.Context, cfg Config, selfExe string, limits Limits) (*Spec, error) {
 	libPaths := []string{"/lib", "/usr/lib", "/lib64", "/bin", "/usr/bin", "/usr/include", "/usr/local/include"}
 
 	// Detect Toolchain Paths
@@ -218,8 +246,9 @@ func generateSpec(ctx context.Context, cfg Config, selfExe string) (*Spec, error
 		// which is required for Go binaries and the gVisor rootless shim.
 		{Destination: "/proc", Type: "proc", Source: "proc", Options: []string{"nosuid", "nodev"}},
 		{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
-		// Removed "noexec" from /tmp to allow execution of build artifacts/scripts
-		{Destination: "/tmp", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "nodev", "mode=1777"}},
+		// Not noexec, to allow execution of build artifacts and scripts.
+		// Sized, since tmpfs pages count toward no rlimit.
+		{Destination: "/tmp", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "nodev", "mode=1777", fmt.Sprintf("size=%dm", limits.TmpMiB)}},
 		{Destination: "/app/sfw", Type: "bind", Source: selfExe, Options: []string{"ro", "bind"}},
 	}
 
@@ -330,9 +359,7 @@ func generateSpec(ctx context.Context, cfg Config, selfExe string) (*Spec, error
 				Bounding:  []string{},
 				Effective: []string{},
 			},
-			Rlimits: []Rlimit{
-				{Type: "RLIMIT_NOFILE", Hard: 1024, Soft: 1024},
-			},
+			Rlimits:         limits.rlimits(),
 			NoNewPrivileges: true,
 		},
 		Mounts: mounts,
@@ -355,11 +382,6 @@ func generateSpec(ctx context.Context, cfg Config, selfExe string) (*Spec, error
 			},
 			GIDMappings: []IDMapping{
 				{ContainerID: 0, HostID: 0, Size: 1},
-			},
-			Resources: &Resources{
-				Memory: &Memory{Limit: MemLimitBytes},
-				CPU:    &CPU{Shares: CPUShares},
-				Pids:   &Pids{Limit: PidsMax},
 			},
 		},
 	}, nil

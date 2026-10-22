@@ -1143,10 +1143,10 @@ Step 4 keeps a single corroborating signal, such as a higher-order function that
 The invocation (`internal/sandbox/manager.go`) is:
 
 ```
-runsc --root=<dir>/state --rootless --ignore-cgroups --network=none --platform=<kvm|ptrace> run --bundle <dir> <id>
+runsc --root=<dir>/state --rootless --ignore-cgroups --network=none --overlay2=none --platform=<kvm|ptrace> run --bundle <dir> <id>
 ```
 
-`kvm` is used when this user can open `/dev/kvm` read-write, otherwise `ptrace`.
+`kvm` is used when this user can open `/dev/kvm` read-write, otherwise `ptrace`. Under `ptrace` a run takes several times as long as `--no-sandbox` (a helm v4 `deps diff`: 47 s unsandboxed, 184 s sandboxed on an arm64 host).
 
 The OCI spec sets:
 
@@ -1156,14 +1156,18 @@ The OCI spec sets:
 | Process capabilities | empty bounding and effective sets |
 | `NoNewPrivileges` | set |
 | `RLIMIT_NOFILE` | 1024 |
-| Namespaces | pid, network, ipc, uts, mount, user |
-| Resources | memory 512 MiB, CPU shares 1024, pids 64 |
+| `RLIMIT_AS` | `SFW_SANDBOX_MEMORY_MIB`, default three quarters of the host's `MemTotal`, at least 1024 MiB (Go reserves about 600 MiB of address space at start) |
+| `RLIMIT_CPU` | the timeout in seconds times the host's CPU count, soft and hard alike: a backstop for a sandbox the timeout failed to end |
+| `RLIMIT_FSIZE` | `SFW_SANDBOX_TMP_MIB`, default 2048 MiB |
+| Namespaces | pid, network, ipc, uts, mount, user (IDs of `runsc`'s own rootless namespace: 0 maps to 0) |
 | Environment | `GOPROXY=off`, `GOPATH=/tmp/gopath`, `HOME=/tmp`, `GOCACHE=/tmp/gocache`, `GOMODCACHE=/gomodcache` |
 | Read-only mounts | the `sfw` binary, system library directories, `GOROOT`, the host module cache at `/gomodcache`, the working directory, the inputs, each input's `go.mod`/`.git` root and the module root the go command uses (the nearest `go.mod`, past a `.git`), and the governing `go.work`'s directory. A batch mounts each input's root once, and an input itself only when it has no root or is a link out of it; a missing input is an absent side and is not mounted |
-| Writable mounts | `/tmp` and `/dev` (tmpfs) |
+| Writable mounts | `/tmp` (tmpfs of `SFW_SANDBOX_TMP_MIB`, which also holds a copied PebbleDB) and `/dev` (tmpfs, 64 MiB) |
+
+The sentry enforces the rlimits itself, without cgroups. A run also ends after `SFW_SANDBOX_TIMEOUT` (a Go duration, default `20m`): `sfw` then sends the container `KILL` and deletes it, so no sandbox or gofer process outlives it. A run over its address space (Go's `fatal error: out of memory`), its CPU time or its timeout fails, and `sfw` exits non-zero. An invalid or too small limit is an error, not the default.
 
 Limitations:
-- **Resource limits are not enforced.** `runsc` runs with `--ignore-cgroups`, so the limits in the spec are not applied as cgroups.
+- **The limits are per process.** The worker and each `go list` it starts get the full address space, and the sentry's own memory counts toward none. Only the host bounds the sandbox as a whole. On a self-hosted runner, run `sfw` in a scope: `systemd-run --user --scope -p MemoryMax=12G -p TasksMax=512 sfw diff ...`.
 - **No seccomp profile.** The spec sets none.
 - **Fail-open.** If `runsc` is not on `PATH`, `sfw` prints `::warning::[Security] 'runsc' not found. Falling back to direct execution.` and runs unsandboxed.
 

@@ -57,7 +57,6 @@ type Linux struct {
 	Namespaces  []Namespace `json:"namespaces"`
 	UIDMappings []IDMapping `json:"uidMappings"`
 	GIDMappings []IDMapping `json:"gidMappings"`
-	Resources   *Resources  `json:"resources"`
 }
 
 type Namespace struct {
@@ -68,22 +67,4 @@ type IDMapping struct {
 	ContainerID int `json:"containerID"`
 	HostID      int `json:"hostID"`
 	Size        int `json:"size"`
-}
-
-type Resources struct {
-	Memory *Memory `json:"memory"`
-	CPU    *CPU    `json:"cpu"`
-	Pids   *Pids   `json:"pids"`
-}
-
-type Memory struct {
-	Limit int64 `json:"limit"`
-}
-
-type CPU struct {
-	Shares uint64 `json:"shares"`
-}
-
-type Pids struct {
-	Limit int64 `json:"limit"`
 }
