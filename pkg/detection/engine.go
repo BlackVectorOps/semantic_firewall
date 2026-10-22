@@ -290,12 +290,8 @@ func GenerateTopologyHash(topo *topology.FunctionTopology) string {
 func ExtractStringPatterns(literals []string) []string {
 	patterns := make(map[string]bool)
 	for _, lit := range literals {
-		if len(lit) < 3 {
-			continue
-		}
-		clean := strings.Trim(lit, "\"'`")
-		if len(clean) >= 3 {
-			patterns[clean] = true
+		if len(lit) >= 3 {
+			patterns[lit] = true
 		}
 	}
 	var result []string
