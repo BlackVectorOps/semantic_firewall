@@ -486,9 +486,9 @@ func packagesContain(pkgs []*packages.Package, absPath string) bool {
 	return false
 }
 
-// knownPlatforms are GOOS/GOARCH pairs tried, after the host's own, when a
-// file's build constraints exclude it from the host build. All are valid
-// `go tool dist list` targets.
+// knownPlatforms are the GOOS/GOARCH pairs tried first, after the host's
+// own, when a file's build constraints exclude it from the host build; the
+// rest of distPlatforms follow.
 var knownPlatforms = [][2]string{
 	{"linux", "amd64"}, {"linux", "arm64"}, {"linux", "386"}, {"linux", "arm"},
 	{"linux", "ppc64le"}, {"linux", "s390x"}, {"linux", "riscv64"}, {"linux", "loong64"},
@@ -602,6 +602,11 @@ func buildConfigFor(absFilename, src string) (goos, goarch string, tags []string
 		custom = custom[:maxCustomTags]
 	}
 	platforms := append([][2]string{{build.Default.GOOS, build.Default.GOARCH}}, knownPlatforms...)
+	for _, p := range distPlatforms {
+		if !slices.Contains(platforms, p) {
+			platforms = append(platforms, p)
+		}
+	}
 	dir, name := filepath.Dir(absFilename), filepath.Base(absFilename)
 	for _, p := range platforms {
 		for mask := 0; mask < 1<<len(custom); mask++ {
@@ -627,7 +632,7 @@ func buildConfigFor(absFilename, src string) (goos, goarch string, tags []string
 // with it set fails everywhere.
 func customBuildTags(src string) []string {
 	platform := map[string]bool{"unix": true, "cgo": true, "gc": true, "gccgo": true, "ignore": true}
-	for _, p := range knownPlatforms {
+	for _, p := range distPlatforms {
 		platform[p[0]], platform[p[1]] = true, true
 	}
 	seen := make(map[string]bool)
