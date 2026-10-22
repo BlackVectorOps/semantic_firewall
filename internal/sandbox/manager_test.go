@@ -258,6 +258,9 @@ func TestRun_Orchestration(t *testing.T) {
 			if !strings.Contains(argsStr, "--network=none") {
 				t.Error("Missing --network=none flag in runtime args")
 			}
+			if !strings.HasPrefix(args[0], "--root=") || !strings.HasSuffix(args[0], "/state") {
+				t.Errorf("runtime args %v; want --root=<bundle>/state first", args)
+			}
 			return mockHelperCommand(ctx, "true") // Return exit code 0
 		}
 		return mockHelperCommand(ctx, "false")

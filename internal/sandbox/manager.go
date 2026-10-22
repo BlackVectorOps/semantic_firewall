@@ -104,8 +104,11 @@ func Run(ctx context.Context, cfg Config, stdout, stderr io.Writer) error {
 		}
 	}
 
-	// Added --ignore-cgroups to improve stability in nested CI environments
+	// Added --ignore-cgroups to improve stability in nested CI environments.
+	// The state root is in the bundle: rootless runsc otherwise keeps it in
+	// $XDG_RUNTIME_DIR, or /var/run, which an unprivileged user can't write.
 	cmd := execCmdFunc(ctx, runscPath,
+		"--root="+filepath.Join(bundleDir, "state"),
 		"--rootless",
 		"--ignore-cgroups",
 		"--network=none",

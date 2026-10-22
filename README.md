@@ -1143,7 +1143,7 @@ Step 4 keeps a single corroborating signal, such as a higher-order function that
 The invocation (`internal/sandbox/manager.go`) is:
 
 ```
-runsc --rootless --ignore-cgroups --network=none --platform=<kvm|ptrace> run --bundle <dir> <id>
+runsc --root=<dir>/state --rootless --ignore-cgroups --network=none --platform=<kvm|ptrace> run --bundle <dir> <id>
 ```
 
 `kvm` is used when `/dev/kvm` exists, otherwise `ptrace`.
