@@ -31,14 +31,11 @@ func RunScan(target string, opts models.ScanOptions, noSandbox bool) error {
 
 	cleanTarget := filepath.Clean(target)
 
-	// Resolve database path BEFORE entering the sandbox.
-	if opts.DBPath == "" {
-		opts.DBPath = ResolveDBPath("")
-	}
-	if opts.DBPath != "" {
-		if abs, err := filepath.Abs(opts.DBPath); err == nil {
-			opts.DBPath = abs
-		}
+	// Resolve the database path before entering the sandbox. ResolveDBPath
+	// never returns "".
+	opts.DBPath = ResolveDBPath(opts.DBPath)
+	if abs, err := filepath.Abs(opts.DBPath); err == nil {
+		opts.DBPath = abs
 	}
 
 	if !noSandbox && !sb.IsSandboxed() {
@@ -53,13 +50,8 @@ func RunScan(target string, opts models.ScanOptions, noSandbox bool) error {
 			args = append(args, "--deps")
 		}
 
-		var inputs []string
-		inputs = append(inputs, cleanTarget)
-
-		if opts.DBPath != "" {
-			args = append(args, "--db", opts.DBPath)
-			inputs = append(inputs, opts.DBPath)
-		}
+		args = append(args, "--db", opts.DBPath)
+		inputs := []string{cleanTarget, opts.DBPath}
 
 		return SandboxExec(sb, os.Stdout, os.Stderr, "scan", args, inputs...)
 	}
@@ -126,10 +118,7 @@ func RunScanLogic(fsys FileSystem, pkgLoader PackageLoader, target string, opts 
 		return err
 	}
 
-	allAlerts, totalFunctions, err = RunScanParallel(fsys, files, scanner, opts.ExactOnly)
-	if err != nil {
-		return err
-	}
+	allAlerts, totalFunctions = RunScanParallel(fsys, files, scanner, opts.ExactOnly)
 
 	if opts.ScanDeps {
 		depAlerts, depFuncs, deps, depErr := RunScanDeps(pkgLoader, target, opts, scanner)
@@ -184,7 +173,7 @@ func RunScanLogic(fsys FileSystem, pkgLoader PackageLoader, target string, opts 
 
 // RunScanParallel scans every function of files once, GOMAXPROCS at a
 // time, and returns the alerts and the number of functions scanned.
-func RunScanParallel(fsys FileSystem, files []string, scanner SignatureScanner, exactOnly bool) ([]detection.ScanResult, int, error) {
+func RunScanParallel(fsys FileSystem, files []string, scanner SignatureScanner, exactOnly bool) ([]detection.ScanResult, int) {
 	results := fingerprintFiles(fsys, files)
 	alerts := make([][]detection.ScanResult, len(results))
 
@@ -207,7 +196,7 @@ func RunScanParallel(fsys FileSystem, files []string, scanner SignatureScanner, 
 	for _, a := range alerts {
 		all = append(all, a...)
 	}
-	return all, len(results), nil
+	return all, len(results)
 }
 
 func RunScanDeps(pkgLoader PackageLoader, target string, opts models.ScanOptions, scanner SignatureScanner) ([]detection.ScanResult, int, []string, error) {
