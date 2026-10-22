@@ -679,7 +679,7 @@ For each function in the target, the PebbleDB backend (`PebbleScanner.ScanTopolo
 3. Loads the `sig:` record from the same snapshot and scores it with `detection.MatchSignature`.
 4. Keeps the matches with confidence ≥ threshold (default 0.75), sorted by confidence.
 
-`--exact` (`ScanTopologyExact`) uses only the `topo:` bucket and returns the single best match. On the JSON backend, `ScanTopology` scores every signature without index or entropy pre-filtering. With a JSON database, `--exact` sets the threshold to 1.0.
+`--exact` (`ScanTopologyExact`) uses only the `topo:` bucket and returns the single best match. On the JSON backend, `ScanTopology` scores every signature without index or entropy pre-filtering, and `--exact` returns the first signature matched with confidence ≥ 0.99, whatever `--threshold` is.
 
 `MatchSignature` confidence is the plain mean of these parts:
 
