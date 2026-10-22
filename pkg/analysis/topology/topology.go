@@ -91,7 +91,9 @@ type FunctionTopology struct {
 	ReturnTypes []string
 
 	// Control flow features
-	HasDefer   bool
+	HasDefer bool
+	// HasRecover is set when the function defers a function or closure whose
+	// own body calls recover (see deferredRecovers).
 	HasRecover bool
 	HasPanic   bool
 	HasGo      bool
@@ -220,7 +222,6 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 
 	currentStringBytes := 0
 	edgeCount := 0
-	callsRecover := false
 	var ops []*ssa.Value
 
 	for _, block := range fn.Blocks {
@@ -240,15 +241,13 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 			case *ssa.Call:
 				sig := extractCallSignature(i)
 				t.CallSignatures[sig]++
-				if b, ok := i.Call.Value.(*ssa.Builtin); ok && b.Name() == "recover" {
-					callsRecover = true
-				}
 			case *ssa.Go:
 				t.HasGo = true
 				sig := extractGoSignature(i)
 				t.CallSignatures["go:"+sig]++
 			case *ssa.Defer:
 				t.HasDefer = true
+				t.HasRecover = t.HasRecover || deferredRecovers(i.Call.Value)
 				sig := extractDeferSignature(i)
 				t.CallSignatures["defer:"+sig]++
 			case *ssa.Panic:
@@ -298,8 +297,6 @@ func ExtractTopology(fn *ssa.Function) *FunctionTopology {
 	// Calculate Cyclomatic Complexity: M = E - N + 2P
 	// For a single function, P (connected components) is usually 1.
 	t.CyclomaticComplexity = edgeCount - t.BlockCount + 2
-
-	t.HasRecover = t.HasDefer && callsRecover
 
 	sort.Strings(t.StringLiterals)
 
@@ -355,6 +352,34 @@ func normalizeTypeName(t types.Type) string {
 		return s
 	}
 	return typePathCleaner.ReplaceAllString(s, "")
+}
+
+// deferredRecovers reports whether a deferred call of v recovers a panic:
+// whether v is a function, or closure, whose own body calls recover. Only
+// a recover a deferred function calls directly stops a panic, so neither a
+// deferred recover() nor one in a closure the deferred function starts
+// counts. Calls through interfaces and function values are not resolved.
+func deferredRecovers(v ssa.Value) bool {
+	var fn *ssa.Function
+	switch v := v.(type) {
+	case *ssa.Function:
+		fn = v
+	case *ssa.MakeClosure:
+		fn, _ = v.Fn.(*ssa.Function)
+	}
+	if fn == nil {
+		return false
+	}
+	for _, b := range fn.Blocks {
+		for _, instr := range b.Instrs {
+			if c, ok := instr.(*ssa.Call); ok {
+				if bi, ok := c.Call.Value.(*ssa.Builtin); ok && bi.Name() == "recover" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func extractCallSignature(call *ssa.Call) string {
