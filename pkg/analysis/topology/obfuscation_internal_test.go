@@ -58,26 +58,6 @@ func TestTotalStringLen(t *testing.T) {
 	}
 }
 
-func TestHasPrefix(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		s, prefix string
-		want      bool
-	}{
-		{"dynamic:x", "dynamic:", true},
-		{"foo", "dynamic:", false},
-		{"", "x", false},
-		{"x", "", true},
-		{"ab", "abc", false},
-		{"abc", "abc", true},
-	}
-	for _, tc := range tests {
-		if got := hasPrefix(tc.s, tc.prefix); got != tc.want {
-			t.Errorf("hasPrefix(%q,%q)=%v want %v", tc.s, tc.prefix, got, tc.want)
-		}
-	}
-}
-
 func TestIsIndirectCallSig(t *testing.T) {
 	t.Parallel()
 	indirect := []string{

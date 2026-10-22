@@ -4,10 +4,9 @@ import (
 	"math"
 )
 
-// Returns the Shannon entropy of a byte slice.
-// Result ranges from 0.0 (completely uniform/predictable) to 8.0 (maximum randomness).
-// High entropy (>7.0) often indicates packed/encrypted code.
-// Normal code typically has entropy between 4.5 and 6.5.
+// Returns the Shannon entropy of a byte slice, in bits per byte: 0.0 when
+// every byte is the same, 8.0 when all 256 values are equally frequent.
+// Encrypted or compressed data is close to 8.
 func CalculateEntropy(data []byte) float64 {
 	if len(data) == 0 {
 		return 0
@@ -35,7 +34,9 @@ func CalculateEntropy(data []byte) float64 {
 
 // Captures entropy characteristics for malware analysis.
 type EntropyProfile struct {
-	// Overall entropy of the function body
+	// Overall is the entropy of the bytes the profile was built from.
+	// ExtractTopology builds it from the function's string literals,
+	// concatenated, so it equals FunctionTopology.EntropyScore.
 	Overall float64
 
 	// Entropy of string literals within the function
@@ -49,10 +50,10 @@ type EntropyProfile struct {
 type EntropyClass int
 
 const (
-	EntropyLow    EntropyClass = iota // < 4.0: Simple/sparse code
-	EntropyNormal                     // 4.0-6.5: Typical compiled code
-	EntropyHigh                       // 6.5-7.5: Potentially obfuscated
-	EntropyPacked                     // > 7.5: Likely packed/encrypted
+	EntropyLow    EntropyClass = iota // < 4.0: short or repetitive
+	EntropyNormal                     // 4.0-6.5: typical text
+	EntropyHigh                       // 6.5-7.5: dense, possibly encoded
+	EntropyPacked                     // > 7.5: likely encrypted or compressed
 )
 
 func (c EntropyClass) String() string {
@@ -84,9 +85,9 @@ func ClassifyEntropy(entropy float64) EntropyClass {
 	}
 }
 
-// Builds a complete entropy profile for analysis.
-func CalculateEntropyProfile(bodyBytes []byte, stringLiterals []string) EntropyProfile {
-	overall := CalculateEntropy(bodyBytes)
+// Builds an entropy profile of data and, separately, of each string literal.
+func CalculateEntropyProfile(data []byte, stringLiterals []string) EntropyProfile {
+	overall := CalculateEntropy(data)
 
 	// Calculate average entropy of string literals
 	var stringEntropy float64

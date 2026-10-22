@@ -3,6 +3,7 @@ package topology
 import (
 	"go/constant"
 	"math"
+	"strings"
 
 	"golang.org/x/tools/go/ssa"
 )
@@ -57,11 +58,11 @@ type ObfuscationProfile struct {
 
 	// ConstPoolEntropy is the Shannon entropy (0..8) of the *non-string*
 	// constant pool: integer and byte constants flowing into the function.
-	// This is the signal the old path was completely missing.
 	ConstPoolEntropy float64
 
-	// ByteArrayPayloadBytes is the total number of bytes contributed by
-	// small-integer constants (0..255) that look like an encoded payload.
+	// ByteArrayPayloadBytes is the length of the longest run of small-integer
+	// constants (0..255), ignoring index and slice-bound operands: the size
+	// of an inline byte payload.
 	ByteArrayPayloadBytes int
 
 	// IndirectCallRatio is dynamic+reflective calls over all calls. High values
@@ -89,8 +90,7 @@ type ObfuscationProfile struct {
 	Indicators []string
 }
 
-// obfuscation tuning constants. Exported-adjacent but kept unexported; callers
-// tune via the weights rather than these thresholds.
+// obfuscation tuning constants.
 const (
 	entropyWindowSize       = 256 // bytes per sliding window
 	entropyWindowStride     = 128 // 50% overlap so a blob can't straddle a gap
@@ -109,7 +109,8 @@ func AnalyzeObfuscation(t *FunctionTopology) ObfuscationProfile {
 
 	// 1. Gather the full constant byte pool: string literals AND numeric
 	//    constants. Numeric constants in the 0..255 range are the bytes of a
-	//    payload array; wider integers are length-delimited little-endian.
+	//    payload array; a wider integer adds its significant bytes,
+	//    little-endian.
 	pool := make([]byte, 0, 1024)
 	for _, s := range t.StringLiterals {
 		pool = append(pool, s...)
@@ -419,11 +420,11 @@ func structuralConstOperands(instr ssa.Instruction) map[*ssa.Value]bool {
 // are matched by name, not by a blanket "reflect." prefix (which would also
 // capture a user package named reflect).
 func isIndirectCallSig(sig string) bool {
-	return hasPrefix(sig, "dynamic:") ||
-		hasPrefix(sig, "reflect:") ||
-		hasPrefix(sig, "invoke:") ||
-		hasPrefix(sig, "go:dynamic:") ||
-		hasPrefix(sig, "defer:dynamic:") ||
+	return strings.HasPrefix(sig, "dynamic:") ||
+		strings.HasPrefix(sig, "reflect:") ||
+		strings.HasPrefix(sig, "invoke:") ||
+		strings.HasPrefix(sig, "go:dynamic:") ||
+		strings.HasPrefix(sig, "defer:dynamic:") ||
 		isReflectInvokeSig(sig)
 }
 
@@ -564,7 +565,7 @@ func cycles(fn *ssa.Function) []map[*ssa.BasicBlock]bool {
 	return comps
 }
 
-// --- small numeric helpers (kept local to avoid touching topology.go) ---
+// -- Small numeric helpers --
 
 func normCut(v, lo, hi float64) float64 {
 	if hi <= lo {
@@ -595,8 +596,4 @@ func totalStringLen(ss []string) int {
 		n += len(s)
 	}
 	return n
-}
-
-func hasPrefix(s, prefix string) bool {
-	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }

@@ -109,7 +109,8 @@ type FunctionTopology struct {
 	BinOpCounts map[string]int
 	UnOpCounts  map[string]int
 
-	// String literal hashes (for behavioral matching)
+	// String literals, sorted: each cut to MaxStringLiteralLen, and one that
+	// would take the total past MaxTotalStringBytes left out
 	StringLiterals []string
 
 	// Entropy analysis for obfuscation detection
@@ -128,7 +129,8 @@ type FunctionTopology struct {
 var (
 	// MaxStringLiteralLen and MaxTotalStringBytes bound the string
 	// literals one topology keeps, so a function with huge literals cannot
-	// exhaust memory. Set them with SetTopologyLimits; configMu guards them.
+	// exhaust memory. Set them with SetTopologyLimits, which holds configMu;
+	// a direct write races with extraction.
 	configMu            sync.RWMutex
 	MaxStringLiteralLen = 4096      // 4KB limit per string
 	MaxTotalStringBytes = 1024 * 64 // 64KB limit per function
