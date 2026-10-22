@@ -69,7 +69,7 @@ func (Config) InsecureIgnoreHostKey() HostKeyCallback { return nil }
 	if packages.PrintErrors(pkgs) > 0 {
 		t.Fatal("compilation errors in test sources")
 	}
-	prog, _, err := ir.BuildSSAFromPackages(pkgs)
+	prog, err := ir.BuildProgram(pkgs)
 	if err != nil {
 		t.Fatal(err)
 	}

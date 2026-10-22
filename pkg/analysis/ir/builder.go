@@ -9,14 +9,15 @@ import (
 	"golang.org/x/tools/go/ssa/ssautil"
 )
 
-// BuildSSAFromPackages constructs Static Single Assignment form from loaded Go packages.
-func BuildSSAFromPackages(initialPkgs []*packages.Package) (*ssa.Program, *ssa.Package, error) {
+// BuildProgram builds the SSA program of the loaded packages: their bodies,
+// and their dependencies' members without bodies. Package errors don't stop
+// it, since SSA skips ill-typed packages, but it fails when the first
+// package could not be built, with the packages' errors in the message.
+func BuildProgram(initialPkgs []*packages.Package) (*ssa.Program, error) {
 	if len(initialPkgs) == 0 {
-		return nil, nil, fmt.Errorf("input packages list is empty")
+		return nil, fmt.Errorf("input packages list is empty")
 	}
 
-	// Package errors do not stop the build: SSA skips ill-typed packages.
-	// They are reported only if the first package could not be built.
 	var errorMessages strings.Builder
 	packages.Visit(initialPkgs, nil, func(pkg *packages.Package) {
 		for _, e := range pkg.Errors {
@@ -24,37 +25,34 @@ func BuildSSAFromPackages(initialPkgs []*packages.Package) (*ssa.Program, *ssa.P
 		}
 	})
 
-	mode := ssa.InstantiateGenerics
-	prog, pkgs := ssautil.AllPackages(initialPkgs, mode)
-	if prog == nil {
-		return nil, nil, fmt.Errorf("failed to initialize SSA program builder")
-	}
-
-	// Build bodies only for the loaded packages; their dependencies' members
-	// exist, without bodies.
-	for _, p := range initialPkgs {
-		if ssaPkg := prog.Package(p.Types); ssaPkg != nil {
-			ssaPkg.Build()
+	// pkgs[i] is nil when initialPkgs[i] has no types or is ill-typed: SSA
+	// creates no package for it.
+	prog, pkgs := ssautil.AllPackages(initialPkgs, ssa.InstantiateGenerics)
+	for _, p := range pkgs {
+		if p != nil {
+			p.Build()
 		}
 	}
 
-	mainPkg := initialPkgs[0]
-	var ssaPkg *ssa.Package
-
-	if len(pkgs) > 0 && pkgs[0] != nil {
-		ssaPkg = pkgs[0]
-	}
-
-	if ssaPkg == nil && mainPkg.Types != nil {
-		ssaPkg = prog.Package(mainPkg.Types)
-	}
-
-	if ssaPkg == nil {
+	if pkgs[0] == nil {
+		mainPkg := initialPkgs[0]
 		if errorMessages.Len() > 0 {
-			return nil, nil, fmt.Errorf("could not find main SSA package for %s (packages contain errors: %s)", mainPkg.ID, strings.TrimSpace(errorMessages.String()))
+			return nil, fmt.Errorf("could not find main SSA package for %s (packages contain errors: %s)", mainPkg.ID, strings.TrimSpace(errorMessages.String()))
 		}
-		return nil, nil, fmt.Errorf("could not find main SSA package for %s", mainPkg.ID)
+		return nil, fmt.Errorf("could not find main SSA package for %s", mainPkg.ID)
 	}
+	return prog, nil
+}
 
-	return prog, ssaPkg, nil
+// BuildSSAFromPackages is BuildProgram that also returns the first
+// package's SSA package.
+//
+// Deprecated: Use BuildProgram, and prog.Package(initialPkgs[0].Types) for
+// the package.
+func BuildSSAFromPackages(initialPkgs []*packages.Package) (*ssa.Program, *ssa.Package, error) {
+	prog, err := BuildProgram(initialPkgs)
+	if err != nil {
+		return nil, nil, err
+	}
+	return prog, prog.Package(initialPkgs[0].Types), nil
 }

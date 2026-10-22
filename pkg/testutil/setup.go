@@ -58,7 +58,7 @@ func CompileAndGetFunction(t *testing.T, src, funcName string) *ssa.Function {
 	}
 
 	// Use the IR package builder to ensure consistent SSA construction
-	prog, _, err := ir.BuildSSAFromPackages(pkgs)
+	prog, err := ir.BuildProgram(pkgs)
 	if err != nil {
 		t.Fatalf("BuildSSA: %v", err)
 	}
