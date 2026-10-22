@@ -114,11 +114,7 @@ func RunScanLogic(fsys FileSystem, pkgLoader PackageLoader, target string, opts 
 		if err := js.LoadDatabase(opts.DBPath); err != nil {
 			return fmt.Errorf("failed to load json db: %w", err)
 		}
-		if opts.ExactOnly {
-			js.SetThreshold(1.0)
-		} else {
-			js.SetThreshold(opts.Threshold)
-		}
+		js.SetThreshold(opts.Threshold)
 		scanner = js
 	}
 

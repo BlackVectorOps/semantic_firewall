@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/topology"
 	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/detection"
 )
 
@@ -157,5 +158,30 @@ func TestAddSignature_WritesBackID(t *testing.T) {
 	}
 	if got, err := s.GetSignature(sig.ID); err != nil || got.Name != "S" {
 		t.Errorf("GetSignature(%q) = %+v, %v", sig.ID, got, err)
+	}
+}
+
+// ScanTopologyExact reports only matches of confidence 0.99 or more,
+// whatever the threshold ScanTopology uses.
+func TestScanTopologyExact_IgnoresThreshold(t *testing.T) {
+	indexed := &topology.FunctionTopology{BlockCount: 10, LoopCount: 1, EntropyScore: 5.0, CallSignatures: map[string]int{"net.Dial": 1}}
+	sig := detection.IndexFunction(indexed, "beacon", "", "HIGH", "test")
+	s := NewScanner()
+	if err := s.AddSignature(&sig); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetThreshold(0); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := s.ScanTopologyExact(indexed, "beacon"); err != nil || res == nil {
+		t.Fatalf("exact match: %v, %v; want a result", res, err)
+	}
+	near := *indexed
+	near.BlockCount = 12
+	if m := detection.NewMatcher(&near, "beacon").Match(sig, 0); m.Confidence < 0.5 || m.Confidence >= 0.99 {
+		t.Fatalf("near-match confidence %v; the test needs one in [0.5, 0.99)", m.Confidence)
+	}
+	if res, err := s.ScanTopologyExact(&near, "beacon"); err != nil || res != nil {
+		t.Errorf("near match: %+v, %v; want none", res, err)
 	}
 }
