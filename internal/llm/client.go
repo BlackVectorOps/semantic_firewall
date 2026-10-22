@@ -356,17 +356,10 @@ func executeGeminiRaw(ctx context.Context, sysPrompt, userMsg, apiKey, model, ap
 		}
 
 		cfg := &genai.ClientConfig{
-			APIKey:  apiKey,
-			Backend: genai.BackendGeminiAPI,
-		}
-
-		if apiBase != "" {
-			cfg.HTTPClient = &http.Client{
-				Transport: &testProxyTransport{BaseURL: apiBase, RealTransport: baseClient.Transport},
-				Timeout:   baseClient.Timeout,
-			}
-		} else {
-			cfg.HTTPClient = baseClient
+			APIKey:      apiKey,
+			Backend:     genai.BackendGeminiAPI,
+			HTTPClient:  baseClient,
+			HTTPOptions: genai.HTTPOptions{BaseURL: apiBase},
 		}
 
 		client, err := genai.NewClient(ctx, cfg)
@@ -562,23 +555,4 @@ func cleanJSONMarkdown(content string) string {
 	}
 
 	return content
-}
-
-type testProxyTransport struct {
-	BaseURL       string
-	RealTransport http.RoundTripper
-}
-
-func (t *testProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	targetURL, err := url.Parse(t.BaseURL)
-	if err != nil {
-		return nil, err
-	}
-	req.URL.Scheme = targetURL.Scheme
-	req.URL.Host = targetURL.Host
-	rt := t.RealTransport
-	if rt == nil {
-		rt = http.DefaultTransport
-	}
-	return rt.RoundTrip(req)
 }
