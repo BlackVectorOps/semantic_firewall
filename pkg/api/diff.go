@@ -26,16 +26,13 @@ func Diff(oldPath, newPath string) (*models.DiffOutput, error) {
 // identical to Diff otherwise.
 func DiffWithFS(fsys FileSystem, oldPath, newPath string) (*models.DiffOutput, error) {
 	processFile := func(path string) FileFingerprints {
-		content, absPath, err := readDiffInput(fsys, path)
+		content, abs, err := readSafely(readDiffInput, fsys, path)
 		if err != nil || content == nil {
 			return FileFingerprints{Results: []diff.FingerprintResult{}, Err: err, absent: err == nil}
 		}
-		paths := pathResolver{}
-		results, err := diff.FingerprintSourceWhere(absPath, string(content), ir.DefaultLiteralPolicy, false, paths.keepFiles(absPath))
-		if err != nil {
-			return FileFingerprints{Err: err}
-		}
-		return FileFingerprints{Results: inFile(results, absPath, paths), source: parseUnanalyzed(absPath, content)}
+		res := fingerprintOne(pendingFile{path: path, abs: abs, content: content}, false)
+		res.source = parseUnanalyzed(abs, content)
+		return res
 	}
 
 	// Load the two versions at the same time; report the old side's error
