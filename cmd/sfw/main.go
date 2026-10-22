@@ -1,3 +1,5 @@
+// Command sfw is the CLI for semantic fingerprinting and malware scanning
+// of Go source files.
 package main
 
 import (
@@ -10,8 +12,6 @@ import (
 	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/models"
 	version "github.com/BlackVectorOps/semantic_firewall/v7/pkg/version"
 )
-
-// Package main provides the sfw CLI tool for semantic fingerprinting and malware scanning of Go source files.
 
 // -- Main Entry Point --
 
@@ -130,7 +130,7 @@ Examples:
 	migrateTo := migrateCmd.String("to", "", "Destination PebbleDB database path")
 
 	statsCmd := flag.NewFlagSet("stats", flag.ExitOnError)
-	statsDB := statsCmd.String("db", "", "Path to PebbleDB database")
+	statsDB := statsCmd.String("db", "", "Path to signature database (PebbleDB, or .json)")
 
 	// -- Command Routing --
 
@@ -269,7 +269,8 @@ Examples:
 		}
 	case "version":
 		fmt.Println("Semantic Firewall CLI")
-		// Automatically pulls "v2.4.1" from the build tag, or "(devel)" if running locally
+		// The module version from the build info ("v7.4.0" from go install
+		// ...@v7.4.0), or "(devel)" when it has none
 		fmt.Printf("Build: %s\n", version.EngineVersion())
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
@@ -313,7 +314,7 @@ func runWorker(args []string) error {
 	case "diff":
 		// sfw internal-worker diff <old> <new>
 		if len(args) != 3 {
-			return fmt.Errorf("diff worker requires arguments (old <path> new <path>); got %d", len(args)-1)
+			return fmt.Errorf("diff worker requires arguments (<old> <new>); got %d", len(args)-1)
 		}
 		return cli.RunDiffLogic(fsys, os.Stdout, args[1], args[2])
 

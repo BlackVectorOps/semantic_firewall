@@ -101,10 +101,7 @@ func RunCheckLogic(fsys FileSystem, target string, strictMode bool, enableScan b
 		}
 	}
 
-	results, hasErrors, err := ProcessFilesParallel(fsys, files, strictMode, scanner)
-	if err != nil {
-		return err
-	}
+	results, hasErrors := ProcessFilesParallel(fsys, files, strictMode, scanner)
 
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
@@ -125,8 +122,8 @@ func RunCheckLogic(fsys FileSystem, target string, strictMode bool, enableScan b
 // with a scanner, scans each function once: a function listed under
 // several files (the package initializer) is scanned under the first. A
 // file whose load fails, or whose scan panics, gets an ErrorMessage and
-// sets hasErrors. The error is always nil.
-func ProcessFilesParallel(fsys FileSystem, files []string, strictMode bool, scanner SignatureScanner) ([]models.FileOutput, bool, error) {
+// sets hasErrors.
+func ProcessFilesParallel(fsys FileSystem, files []string, strictMode bool, scanner SignatureScanner) ([]models.FileOutput, bool) {
 	fingerprints := api.FingerprintFiles(fsys, files, strictMode)
 
 	var (
@@ -175,7 +172,7 @@ func ProcessFilesParallel(fsys FileSystem, files []string, strictMode bool, scan
 	}
 	_ = g.Wait()
 
-	return results, hasErrors.Load(), nil
+	return results, hasErrors.Load()
 }
 
 // fileOutput lists a file's fingerprinted functions and the alerts for the

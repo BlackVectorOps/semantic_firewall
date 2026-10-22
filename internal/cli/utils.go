@@ -89,7 +89,7 @@ func levenshtein(s1, s2 string) int {
 }
 
 func SuggestCommand(cmd string) string {
-	commands := []string{"check", "diff", "deps", "audit", "index", "scan", "migrate", "stats"}
+	commands := []string{"check", "diff", "deps", "audit", "index", "scan", "migrate", "stats", "version"}
 	bestMatch := ""
 	minDist := 100
 	cmdLower := strings.ToLower(cmd)
@@ -116,11 +116,8 @@ func HumanizeBytes(bytes int64) string {
 		div *= unit
 		exp++
 	}
-	suffixes := "KMGTPE"
-	if exp >= len(suffixes) {
-		exp = len(suffixes) - 1
-	}
-	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), suffixes[exp])
+	// An int64 reaches exp 5, "E", at most.
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 // Recursively finds Go files using the provided FileSystem.
@@ -154,7 +151,7 @@ func CollectFiles(fsys FileSystem, target string) ([]string, error) {
 			}
 			return nil
 		}
-		if !d.IsDir() && strings.HasSuffix(path, ".go") && !isTestFile(path) {
+		if strings.HasSuffix(path, ".go") && !isTestFile(path) {
 			files = append(files, path)
 		}
 		return nil

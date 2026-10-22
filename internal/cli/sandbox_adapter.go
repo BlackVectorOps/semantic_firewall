@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 
 	"github.com/BlackVectorOps/semantic_firewall/v7/internal/sandbox"
@@ -50,7 +49,7 @@ func moduleRootOf(path string) string {
 }
 
 // Walks up the directory tree to find the context root for a file.
-// It looks for go.mod, .git, or specific worktree patterns.
+// It looks for go.mod or .git.
 func findContextRoot(path string) string {
 	dir := path
 	if fi, err := os.Stat(dir); err == nil && !fi.IsDir() {
@@ -70,11 +69,6 @@ func findContextRoot(path string) string {
 		}
 		// Check for Git root/worktree (Critical for Git Tools)
 		if _, err := os.Stat(filepath.Join(current, ".git")); err == nil {
-			return current
-		}
-		// Check for SFW specific temporary worktrees
-		base := filepath.Base(current)
-		if strings.HasPrefix(base, ".sfw_worktree_") || strings.HasPrefix(base, ".sfw_temp_") {
 			return current
 		}
 

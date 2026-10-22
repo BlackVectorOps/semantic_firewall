@@ -100,11 +100,6 @@ func RunAudit(w io.Writer, oldFile, newFile, commitMsg, apiKey, model, apiBase s
 		},
 	}
 
-	output.Output = models.LLMResult{
-		Verdict:  models.VerdictError,
-		Evidence: "Analysis incomplete.",
-	}
-
 	if highRiskDetected && apiKey == "" && llm.RequiresAPIKey(model) {
 		// FAIL-CLOSED: escalations exist but nothing can verify the claim.
 		output.Output = models.LLMResult{
