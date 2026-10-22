@@ -170,16 +170,15 @@ func kvmUsable(path string) bool {
 	return true
 }
 
-// Ensures that the destination paths for all mounts exist in the rootfs.
-// Added strict escape validation to prevent path traversal via mount points.
+// Ensures that the destination paths for all mounts exist in the rootfs,
+// refusing any that resolves outside it.
 func prepareMountPoints(rootfs string, mounts []Mount) error {
 	for _, m := range mounts {
 		dest := filepath.Join(rootfs, m.Destination)
 
-		// Path Traversal Check
-		// Ensure resolved destination is strictly within rootfs.
+		// filepath.Rel returns a relative path, so only ".." can escape.
 		rel, err := filepath.Rel(rootfs, dest)
-		if err != nil || strings.HasPrefix(rel, "..") || strings.HasPrefix(rel, "/") {
+		if err != nil || strings.HasPrefix(rel, "..") {
 			return fmt.Errorf("security violation: mount point '%s' attempts to escape rootfs", m.Destination)
 		}
 
