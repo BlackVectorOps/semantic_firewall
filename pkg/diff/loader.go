@@ -616,7 +616,7 @@ func (l *sourceLoader) checkDeclarations(p *packages.Package, decls *parsedDecla
 
 // parsedDeclarations is a dependency's files parsed once, with their
 // function bodies purged, and the errors reading and parsing them gave.
-// It holds them from parseAhead until checkDeclarations takes them.
+// neededImports parses them, and checkDeclarations takes them.
 type parsedDeclarations struct {
 	once   sync.Once
 	syntax []*ast.File
@@ -787,8 +787,7 @@ type packageCache struct {
 }
 
 // cacheEntry is one key's package: the parse its computation starts from,
-// which parseAhead may begin early, its place in the persistent type
-// cache, and the computed value.
+// its place in the persistent type cache, and the computed value.
 type cacheEntry struct {
 	decls  parsedDeclarations
 	need   neededPaths
