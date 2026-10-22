@@ -1231,6 +1231,7 @@ A pull request runs the workflow as the pull request has it, so it can edit or r
 
 The outputs are:
 - `result`; in `diff` mode each `old_file` is the path in the repository, not in the base worktree
+- `result-file`, the path of a file holding `result`. Read a large result from it: an environment variable holds at most 128 KiB, and a step given more fails with "Argument list too long"
 - `alert-count`
 - `deps-scanned`
 - `semantic-match-pct`, the mean over the changed files that have functions (100.0 when none has)
