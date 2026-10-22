@@ -196,6 +196,30 @@ func TestRetryBackoff_StopsOnCancel(t *testing.T) {
 	}
 }
 
+// TestGeminiAPIBase_KeepsPath checks that a Gemini --api-base with a path
+// prefix, as a proxy might need, sends requests under that prefix.
+func TestGeminiAPIBase_KeepsPath(t *testing.T) {
+	var paths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`)
+	}))
+	defer ts.Close()
+
+	if _, err := executeGeminiRaw(context.Background(), "sys", "user", "k", models.ModelGeminiFlash, ts.URL+"/proxy/gemini"); err != nil {
+		t.Fatalf("executeGeminiRaw: %v", err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no request reached the server")
+	}
+	for _, p := range paths {
+		if !strings.HasPrefix(p, "/proxy/gemini/") {
+			t.Errorf("request path %q, want it under /proxy/gemini/", p)
+		}
+	}
+}
+
 func TestCallLLM_InjectionDefense(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Simulate a prompt injection detection by the Sentinel
