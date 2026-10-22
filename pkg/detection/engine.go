@@ -105,13 +105,12 @@ func (m Matcher) Match(sig Signature, entropyTolerance float64) ScanResult {
 		}
 	}
 
-	if len(scores) > 0 {
-		var total float64
-		for _, sc := range scores {
-			total += sc
-		}
-		result.Confidence = total / float64(len(scores))
+	// The entropy part is always scored, so scores is never empty.
+	var total float64
+	for _, sc := range scores {
+		total += sc
 	}
+	result.Confidence = total / float64(len(scores))
 
 	// Obfuscation floor: a heavily obfuscated function shouldn't be cleared
 	// against a signature it already partially resembles just because obfuscation
