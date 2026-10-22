@@ -116,11 +116,8 @@ func HumanizeBytes(bytes int64) string {
 		div *= unit
 		exp++
 	}
-	suffixes := "KMGTPE"
-	if exp >= len(suffixes) {
-		exp = len(suffixes) - 1
-	}
-	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), suffixes[exp])
+	// An int64 reaches exp 5, "E", at most.
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 // Recursively finds Go files using the provided FileSystem.
