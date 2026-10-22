@@ -337,6 +337,9 @@ func (z *Zipper) areEquivalent(a, b ssa.Instruction) bool {
 	return z.compareOperands(a, b)
 }
 
+// compareOps compares what a and b hold besides their operands. Their
+// value types are already equal (see areEquivalent), which is all a
+// conversion or make compares.
 func (z *Zipper) compareOps(a, b ssa.Instruction) bool {
 	switch iA := a.(type) {
 	case *ssa.BinOp:
@@ -369,36 +372,9 @@ func (z *Zipper) compareOps(a, b ssa.Instruction) bool {
 	case *ssa.Select:
 		iB := b.(*ssa.Select)
 		return iA.Blocking == iB.Blocking
-	case *ssa.ChangeType:
-		iB := b.(*ssa.ChangeType)
-		return z.sameType(iA.Type(), iB.Type())
-	case *ssa.Convert:
-		iB := b.(*ssa.Convert)
-		return z.sameType(iA.Type(), iB.Type())
-	case *ssa.MakeInterface:
-		iB := b.(*ssa.MakeInterface)
-		return z.sameType(iA.Type(), iB.Type())
 	case *ssa.TypeAssert:
 		iB := b.(*ssa.TypeAssert)
 		return z.sameType(iA.AssertedType, iB.AssertedType) && iA.CommaOk == iB.CommaOk
-	case *ssa.MakeSlice:
-		iB := b.(*ssa.MakeSlice)
-		return z.sameType(iA.Type(), iB.Type())
-	case *ssa.MakeMap:
-		iB := b.(*ssa.MakeMap)
-		return z.sameType(iA.Type(), iB.Type())
-	case *ssa.MakeChan:
-		iB := b.(*ssa.MakeChan)
-		return z.sameType(iA.Type(), iB.Type())
-	case *ssa.Slice:
-		iB := b.(*ssa.Slice)
-		return z.sameType(iA.Type(), iB.Type())
-	case *ssa.ChangeInterface:
-		iB := b.(*ssa.ChangeInterface)
-		return z.sameType(iA.Type(), iB.Type())
-	case *ssa.SliceToArrayPointer:
-		iB := b.(*ssa.SliceToArrayPointer)
-		return z.sameType(iA.Type(), iB.Type())
 	}
 	return true
 }
