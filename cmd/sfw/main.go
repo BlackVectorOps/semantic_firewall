@@ -130,7 +130,7 @@ Examples:
 	migrateTo := migrateCmd.String("to", "", "Destination PebbleDB database path")
 
 	statsCmd := flag.NewFlagSet("stats", flag.ExitOnError)
-	statsDB := statsCmd.String("db", "", "Path to PebbleDB database")
+	statsDB := statsCmd.String("db", "", "Path to signature database (PebbleDB, or .json)")
 
 	// -- Command Routing --
 
