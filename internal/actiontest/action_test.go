@@ -277,14 +277,9 @@ const gomod = "module example.com/m\n\ngo 1.22\n"
 
 // diffEntry is the part of one sfw diff result the tests read.
 type diffEntry struct {
-	OldFile   string `json:"old_file"`
-	NewFile   string `json:"new_file"`
-	Error     string `json:"error"`
-	Functions []struct {
-		Function string `json:"function"`
-		Status   string `json:"status"`
-		Risk     int    `json:"risk_score"`
-	} `json:"functions"`
+	OldFile string `json:"old_file"`
+	NewFile string `json:"new_file"`
+	Error   string `json:"error"`
 	Summary struct {
 		HighRisk int `json:"high_risk_changes"`
 	} `json:"summary"`
