@@ -314,7 +314,7 @@ func runWorker(args []string) error {
 	case "diff":
 		// sfw internal-worker diff <old> <new>
 		if len(args) != 3 {
-			return fmt.Errorf("diff worker requires arguments (old <path> new <path>); got %d", len(args)-1)
+			return fmt.Errorf("diff worker requires arguments (<old> <new>); got %d", len(args)-1)
 		}
 		return cli.RunDiffLogic(fsys, os.Stdout, args[1], args[2])
 
