@@ -89,7 +89,7 @@ func levenshtein(s1, s2 string) int {
 }
 
 func SuggestCommand(cmd string) string {
-	commands := []string{"check", "diff", "deps", "audit", "index", "scan", "migrate", "stats"}
+	commands := []string{"check", "diff", "deps", "audit", "index", "scan", "migrate", "stats", "version"}
 	bestMatch := ""
 	minDist := 100
 	cmdLower := strings.ToLower(cmd)
