@@ -933,7 +933,7 @@ func (c *Canonicalizer) writeSelect(w *bytes.Buffer, i *ssa.Select, context ssa.
 	// Use origIndex to track the original position for Extract instruction correlation,
 	// but sort by canonical form to produce stable fingerprints across case reordering.
 	type selectStateCanon struct {
-		origIndex   int    // Original index in States slice (for documentation/debugging)
+		origIndex   int    // Original index in States slice, for renumbering Extracts
 		dir         string // Direction: "->" (send), "<-" (recv), or "?" (unknown)
 		chanRepr    string // Canonical representation of channel operand
 		sendValRepr string // Canonical representation of sent value (for sends only)
@@ -987,12 +987,6 @@ func (c *Canonicalizer) writeSelect(w *bytes.Buffer, i *ssa.Select, context ssa.
 	// channels are ready (it's random at runtime). Therefore, reordering cases
 	// in source code is a semantically neutral refactor that should not change
 	// the fingerprint.
-	//
-	// Note: The Select instruction's return value includes an index indicating
-	// which case was chosen. Code that depends on this index (via Extract) will
-	// still work correctly because we're only canonicalizing the *representation*
-	// for fingerprinting, not modifying the actual SSA. The Extract indices
-	// remain bound to original positions.
 	sort.SliceStable(states, func(a, b int) bool {
 		return states[a].sortKey < states[b].sortKey
 	})
