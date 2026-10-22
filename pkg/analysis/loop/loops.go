@@ -45,7 +45,6 @@ const (
 )
 
 func DetectLoops(fn *ssa.Function) *LoopInfo {
-	_ = fn.DomPreorder()
 	info := &LoopInfo{
 		Function: fn,
 		LoopMap:  make(map[*ssa.BasicBlock]*Loop),
