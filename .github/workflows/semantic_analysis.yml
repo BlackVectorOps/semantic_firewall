@@ -71,10 +71,10 @@ jobs:
       - name: Enforce semantic-safe
         if: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'semantic-safe') }}
         env:
-          RESULT: ${{ steps.sfw.outputs.result }}
+          RESULT_FILE: ${{ steps.sfw.outputs.result-file }}
         run: |
           set -euo pipefail
-          if ! printf '%s' "$RESULT" | jq -e 'all(.[]; ((.functions // []) | all(.status == "preserved")) and ((.unanalyzed // []) | length == 0))' >/dev/null; then
+          if ! jq -e 'all(.[]; ((.functions // []) | all(.status == "preserved")) and ((.unanalyzed // []) | length == 0))' "$RESULT_FILE" >/dev/null; then
             echo "::error::Logic changed in a pull request labeled 'semantic-safe'."
             exit 1
           fi
@@ -82,7 +82,9 @@ jobs:
       - name: Publish Analysis Report
         if: always()
         env:
-          RESULT: ${{ steps.sfw.outputs.result }}
+          # The file, not the result itself: one environment variable holds
+          # at most 128 KiB.
+          RESULT_FILE: ${{ steps.sfw.outputs.result-file }}
           MATCH_PCT: ${{ steps.sfw.outputs.semantic-match-pct }}
           HIGH_RISK: ${{ steps.sfw.outputs.high-risk-changes }}
         run: |
@@ -93,6 +95,6 @@ jobs:
             echo "| File | Preserved | Modified | Added | Removed |"
             echo "| :--- | :--- | :--- | :--- | :--- |"
             # Names come from the change: keep them from breaking the table.
-            printf '%s' "${RESULT:-[]}" | jq -r '.[]? | (if .new_file == "/dev/null" then .old_file else .new_file end | gsub("[|`\r\n]"; "_")) as $f
+            { [[ -f "${RESULT_FILE:-}" ]] && cat "$RESULT_FILE" || echo '[]'; } | jq -r '.[]? | (if .new_file == "/dev/null" then .old_file else .new_file end | gsub("[|`\r\n]"; "_")) as $f
               | "| `\($f)` | \(.summary.preserved // 0) | \(.summary.modified // 0) | \(.summary.added // 0) | \(.summary.removed // 0) |"' || true
           } >> "$GITHUB_STEP_SUMMARY"

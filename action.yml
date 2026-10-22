@@ -59,6 +59,9 @@ outputs:
   result:
     description: 'JSON output from the selected mode'
     value: ${{ steps.run-sfw.outputs.result }}
+  result-file:
+    description: 'Path of a file holding the same JSON, for results too large to pass through an environment variable (128 KiB on Linux)'
+    value: ${{ steps.run-sfw.outputs.result-file }}
   alert-count:
     description: 'Number of malware alerts (scan mode)'
     value: ${{ steps.run-sfw.outputs.alert-count }}
@@ -782,6 +785,9 @@ runs:
           printf '%s\n' "$OUTPUT"
           echo "${DELIM}"
         } >> "$GITHUB_OUTPUT"
+        RESULT_FILE=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/sfw-result.XXXXXXXX")
+        printf '%s\n' "$OUTPUT" > "$RESULT_FILE"
+        echo "result-file=${RESULT_FILE}" >> "$GITHUB_OUTPUT"
 
         exit $EXIT_CODE
 
