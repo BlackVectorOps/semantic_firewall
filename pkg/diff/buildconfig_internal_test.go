@@ -4,7 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/ir"
 )
 
 // customBuildTags keeps only the tags a build must be given with -tags:
@@ -18,6 +21,38 @@ func TestCustomBuildTags(t *testing.T) {
 	// Constraints after the package clause are not build constraints.
 	if got := customBuildTags("package p\n\n//go:build late\n"); len(got) != 0 {
 		t.Errorf("customBuildTags after package = %v; want none", got)
+	}
+}
+
+// A GOARCH tag outside knownPlatforms is a platform tag, not a custom one:
+// given with -tags it would also select the standard library's own files
+// for that architecture beside the host's, and the load would fail.
+func TestBuildConfigFor_EveryDistArch(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"go.mod":    "module example.com/p\n\ngo 1.22\n",
+		"arch_a.go": "//go:build !mips\n\npackage p\n\nfunc Arch() int { return 1 }\n",
+		"arch_m.go": "//go:build linux && mips\n\npackage p\n\nfunc Arch() int { return 2 }\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := filepath.Join(root, "arch_m.go")
+	if goos, goarch, tags, ok := buildConfigFor(m, files["arch_m.go"]); !ok || goos != "linux" || goarch != "mips" || len(tags) != 0 {
+		t.Errorf("buildConfigFor = %s/%s tags %v ok %v; want linux/mips, no tags", goos, goarch, tags, ok)
+	}
+	res, err := FingerprintSource(m, files["arch_m.go"], ir.DefaultLiteralPolicy)
+	if err != nil {
+		t.Fatalf("FingerprintSource: %v", err)
+	}
+	found := false
+	for _, r := range res {
+		found = found || (r.Filename == m && strings.HasSuffix(r.FunctionName, ".Arch"))
+	}
+	if !found {
+		t.Errorf("Arch from arch_m.go not fingerprinted: %v", res)
 	}
 }
 
