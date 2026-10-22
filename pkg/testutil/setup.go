@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/analysis/ir"
+	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/diff"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 )
@@ -42,14 +43,11 @@ func CompileAndGetFunction(t *testing.T, src, funcName string) *ssa.Function {
 		t.Fatalf("write source: %v", err)
 	}
 
-	// Replicate the hardened environment used by the engine
-	env := append(os.Environ(), "GO111MODULE=on", "GOPROXY=off", "CGO_ENABLED=0")
-
 	cfg := &packages.Config{
 		Dir:  dir,
 		Mode: packages.LoadAllSyntax,
 		Fset: token.NewFileSet(),
-		Env:  env,
+		Env:  diff.HardenedEnvFor(dir),
 	}
 
 	pkgs, err := packages.Load(cfg, "file="+path)
