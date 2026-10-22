@@ -65,7 +65,7 @@ func (c *AuditContext) boundedSource(idx *SourceIndex, name string) string {
 	return note + idx.Lines(fn.Start, end) + cut
 }
 
-// auditToolDefinitions describes the tools, provider-neutrally: name,
+// auditToolDefinition describes one tool, provider-neutrally: name,
 // description and JSON Schema for the input.
 type auditToolDefinition struct {
 	Name, Description string
