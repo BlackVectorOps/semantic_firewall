@@ -701,7 +701,7 @@ func (s *PebbleScanner) ExportToJSON(jsonPath string) error {
 	}
 
 	export := detection.SignatureDatabase{
-		Version:     "2.1 (Pebble/Gob+PackedIdx)",
+		Version:     "1.0", // the JSON format's version, as jsondb writes it
 		Description: "Exported from PebbleDB at " + time.Now().UTC().Format(time.RFC3339),
 		Signatures:  sigs,
 	}
