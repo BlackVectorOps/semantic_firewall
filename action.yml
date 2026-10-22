@@ -54,6 +54,14 @@ inputs:
   api-base:
     description: 'Custom LLM API Base URL (audit mode only).'
     required: false
+  sandbox-timeout:
+    description: 'Wall-clock limit of each sandboxed sfw run, as a Go duration (20m, 1h). A run past it fails.'
+    required: false
+    default: '20m'
+  sandbox-memory-mib:
+    description: 'Address space of each sandboxed process in MiB, at least 1024. Empty: three quarters of the runner''s memory.'
+    required: false
+    default: ''
 
 outputs:
   result:
@@ -391,6 +399,8 @@ runs:
         SFW_API_KEY: ${{ inputs.api-key }}
         INPUT_MODEL: ${{ inputs.model }}
         INPUT_API_BASE: ${{ inputs.api-base }}
+        SFW_SANDBOX_TIMEOUT: ${{ inputs.sandbox-timeout }}
+        SFW_SANDBOX_MEMORY_MIB: ${{ inputs.sandbox-memory-mib }}
         PR_TITLE: ${{ github.event.pull_request.title }}
         PR_BODY: ${{ github.event.pull_request.body }}
         PREP_BASE_SHA: ${{ steps.prep.outputs.base_sha }}
