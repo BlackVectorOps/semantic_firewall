@@ -197,9 +197,11 @@ func AnalyzeObfuscation(t *FunctionTopology) ObfuscationProfile {
 	}
 
 	// 5. Structural signals from SSA shape.
+	var loops []map[*ssa.BasicBlock]bool
 	if t.fn != nil {
+		loops = cycles(t.fn)
 		p.FlatteningScore = flatteningScore(t.fn)
-		p.DecoderLoopLikelihood = decoderLoopLikelihood(t.fn)
+		p.DecoderLoopLikelihood = decoderLoopLikelihood(loops)
 	}
 
 	// 6. Aggregate. Each contributing signal is normalized to 0..1 and combined
@@ -235,7 +237,7 @@ func AnalyzeObfuscation(t *FunctionTopology) ObfuscationProfile {
 	//        false positive (func(f,g,h func()){f();g();h()}) without suppressing
 	//        genuinely packed lone-signal payloads.
 	hasFn := t.fn != nil
-	loopApplicable := hasFn && len(naturalLoops(t.fn)) > 0
+	loopApplicable := len(loops) > 0
 	flatApplicable := hasFn && len(t.fn.Blocks) >= 6
 
 	type weighted struct {
@@ -476,16 +478,12 @@ func flatteningScore(fn *ssa.Function) float64 {
 }
 
 // decoderLoopLikelihood looks for the structural fingerprint of an in-loop
-// byte decoder: a natural loop whose body performs bitwise/arithmetic BinOps
+// byte decoder: a loop whose body performs bitwise/arithmetic BinOps
 // (XOR/ADD/SUB/SHL/SHR/AND/OR) over an indexed buffer access. SSA splits a loop
 // body across several blocks (header, body, latch), so evidence is gathered
-// over the whole set of blocks belonging to each loop rather than a single
-// block.
-func decoderLoopLikelihood(fn *ssa.Function) float64 {
-	loops := naturalLoops(fn)
-	if len(loops) == 0 {
-		return 0
-	}
+// over the whole set of blocks belonging to each loop (see cycles) rather than
+// a single block.
+func decoderLoopLikelihood(loops []map[*ssa.BasicBlock]bool) float64 {
 	var best float64
 	for _, blocks := range loops {
 		hasIndexedAccess := false
@@ -513,38 +511,57 @@ func decoderLoopLikelihood(fn *ssa.Function) float64 {
 	return best
 }
 
-// naturalLoops returns, for each back edge, the set of blocks in that loop. A
-// back edge is an edge b->h where h's index is <= b's index (forward-numbered
-// CFG). The loop body is everything that can reach b without going through h,
-// computed by a reverse walk from the latch bounded by the header. This is a
-// standard natural-loop body computation and is independent of the loop package
-// to avoid an import cycle.
-func naturalLoops(fn *ssa.Function) []map[*ssa.BasicBlock]bool {
-	var loops []map[*ssa.BasicBlock]bool
-	for _, b := range fn.Blocks {
-		for _, h := range b.Succs {
-			if h.Index > b.Index {
-				continue // not a back edge
+// cycles returns the blocks of each strongly connected component of fn's CFG
+// that contains a cycle. Block indexes don't give back edges (go/ssa numbers
+// an if's else block after its join), and dominance misses loops goto makes
+// irreducible, where no block dominates the rest; every cycle lies in one of
+// these components. Nested loops share their outermost loop's component.
+func cycles(fn *ssa.Function) []map[*ssa.BasicBlock]bool {
+	n := len(fn.Blocks)
+	index, low := make([]int, n), make([]int, n)
+	onStack := make([]bool, n)
+	var stack []*ssa.BasicBlock
+	var comps []map[*ssa.BasicBlock]bool
+	next := 1
+	var visit func(b *ssa.BasicBlock)
+	visit = func(b *ssa.BasicBlock) {
+		index[b.Index], low[b.Index] = next, next
+		next++
+		stack = append(stack, b)
+		onStack[b.Index] = true
+		selfLoop := false
+		for _, s := range b.Succs {
+			selfLoop = selfLoop || s == b
+			if index[s.Index] == 0 {
+				visit(s)
+				low[b.Index] = min(low[b.Index], low[s.Index])
+			} else if onStack[s.Index] {
+				low[b.Index] = min(low[b.Index], index[s.Index])
 			}
-			body := map[*ssa.BasicBlock]bool{h: true, b: true}
-			stack := []*ssa.BasicBlock{b}
-			for len(stack) > 0 {
-				n := stack[len(stack)-1]
-				stack = stack[:len(stack)-1]
-				if n == h {
-					continue
-				}
-				for _, pr := range n.Preds {
-					if !body[pr] {
-						body[pr] = true
-						stack = append(stack, pr)
-					}
-				}
+		}
+		if low[b.Index] != index[b.Index] {
+			return
+		}
+		comp := make(map[*ssa.BasicBlock]bool)
+		for {
+			top := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			onStack[top.Index] = false
+			comp[top] = true
+			if top == b {
+				break
 			}
-			loops = append(loops, body)
+		}
+		if len(comp) > 1 || selfLoop {
+			comps = append(comps, comp)
 		}
 	}
-	return loops
+	for _, b := range fn.Blocks {
+		if index[b.Index] == 0 {
+			visit(b)
+		}
+	}
+	return comps
 }
 
 // --- small numeric helpers (kept local to avoid touching topology.go) ---

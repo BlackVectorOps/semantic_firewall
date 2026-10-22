@@ -1117,7 +1117,7 @@ Binary payloads in `[]byte` composite literals are not string constants; the obf
 | Longest run of integer constants in 0..255, ignoring index and slice-bound operands | dispositive | normCut(n, 16, 256) | 0.15 | run > 0 |
 | Indirect-call ratio (`dynamic:`, `invoke:`, `reflect` calls) | corroborating | raw | 0.15 | function makes calls |
 | Control-flow flattening: concentration of a block's fan-in (needs a block with ≥ 4 predecessors) | corroborating | clamp((maxPred/blocks − 0.25) / 0.5) | 0.10 | ≥ 6 blocks |
-| In-loop byte-decoder shape | corroborating | clamp(ops / 4) | 0.10 | ≥ 1 natural loop |
+| In-loop byte-decoder shape: XOR, AND, OR, shift, + or − with an indexed access in one loop (a CFG cycle, `goto` loops included) | corroborating | clamp(ops / 4) | 0.10 | ≥ 1 CFG cycle |
 
 The score is computed in five steps. A signal *fires* when its normalized value is ≥ 0.5.
 
