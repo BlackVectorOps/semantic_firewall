@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -437,6 +438,25 @@ func TestRunDepsDiff_EmptyDirectory(t *testing.T) {
 		var out strings.Builder
 		if err := RunDepsDiffLogic(&out, c.old, c.new); err == nil || err.Error() != want || out.Len() != 0 {
 			t.Errorf("RunDepsDiffLogic(%q, %q) = %v, wrote %q; want %q and no output", c.old, c.new, err, out.String(), want)
+		}
+	}
+}
+
+// A JSON database refuses an invalid threshold, as PebbleDB does, instead
+// of scanning at the default.
+func TestRunScanLogic_RefusesInvalidThreshold(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n\nfunc F() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db := filepath.Join(t.TempDir(), "sigs.json")
+	if err := os.WriteFile(db, []byte(`{"version":"1.0","signatures":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, th := range []float64{math.NaN(), 1.5} {
+		opts := models.ScanOptions{DBPath: db, Threshold: th}
+		if err := RunScanLogic(RealFileSystem{}, RealPackageLoader{}, dir, opts); err == nil {
+			t.Errorf("threshold %v accepted", th)
 		}
 	}
 }
