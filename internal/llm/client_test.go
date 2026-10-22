@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -137,9 +138,9 @@ func TestCallLLM_FullFlow(t *testing.T) {
 
 func TestCallLLM_RetryLogic(t *testing.T) {
 	// Eliminate test latency by mocking the sleep duration
-	origSleep := sleepFunc
-	sleepFunc = func(d time.Duration) {}
-	defer func() { sleepFunc = origSleep }()
+	origSleep := sleep
+	sleep = func(context.Context, time.Duration) error { return nil }
+	defer func() { sleep = origSleep }()
 
 	attempts := 0
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -159,6 +160,39 @@ func TestCallLLM_RetryLogic(t *testing.T) {
 	}
 	if attempts != 3 {
 		t.Errorf("Expected 3 attempts, got %d", attempts)
+	}
+}
+
+// TestRetryBackoff_StopsOnCancel checks that a context ending during a
+// retry's backoff ends the wait, not just the next attempt.
+func TestRetryBackoff_StopsOnCancel(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(429)
+	}))
+	defer ts.Close()
+
+	for name, run := range map[string]func(context.Context) (string, error){
+		"openai": func(ctx context.Context) (string, error) {
+			return executeOpenAIRaw(ctx, "sys", "user", "k", models.ModelGPT5_2, ts.URL)
+		},
+		"gemini": func(ctx context.Context) (string, error) {
+			return executeGeminiRaw(ctx, "sys", "user", "k", models.ModelGeminiFlash, ts.URL)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			start := time.Now()
+			_, err := run(ctx)
+			// The first backoff is 2*BaseRetryDelay; returning well before it
+			// ends means the wait was cut short.
+			if elapsed := time.Since(start); elapsed >= models.BaseRetryDelay {
+				t.Errorf("returned after %v, want < %v", elapsed, models.BaseRetryDelay)
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("err = %v, want context.DeadlineExceeded", err)
+			}
+		})
 	}
 }
 

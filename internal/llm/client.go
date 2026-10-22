@@ -28,8 +28,17 @@ import (
 // -- Test Hooks (Internal) --
 
 var (
-	// Decouples execution from the system clock for faster, reliable testing.
-	sleepFunc = time.Sleep
+	// sleep waits for d or until ctx is done; tests replace it.
+	sleep = func(ctx context.Context, d time.Duration) error {
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+			return nil
+		}
+	}
 	// Allows mock nonces to be injected to verify delimiter logic consistency.
 	generateNonceFunc = func(length int) (string, error) {
 		bytes := make([]byte, length)
@@ -237,12 +246,8 @@ func executeOpenAIRaw(ctx context.Context, sysPrompt, userMsg, apiKey, model, ap
 			if sleepDur > models.MaxRetryDelay {
 				sleepDur = models.MaxRetryDelay
 			}
-			select {
-			case <-ctx.Done():
-				return "", ctx.Err()
-			default:
-				// Prevents blocking the event loop during testing and allows time manipulation.
-				sleepFunc(sleepDur)
+			if err := sleep(ctx, sleepDur); err != nil {
+				return "", err
 			}
 		}
 
@@ -345,11 +350,8 @@ func executeGeminiRaw(ctx context.Context, sysPrompt, userMsg, apiKey, model, ap
 			if sleepDur > models.MaxRetryDelay {
 				sleepDur = models.MaxRetryDelay
 			}
-			select {
-			case <-ctx.Done():
-				return "", ctx.Err()
-			default:
-				sleepFunc(sleepDur)
+			if err := sleep(ctx, sleepDur); err != nil {
+				return "", err
 			}
 		}
 
