@@ -1,3 +1,5 @@
+// Command sfw is the CLI for semantic fingerprinting and malware scanning
+// of Go source files.
 package main
 
 import (
@@ -10,8 +12,6 @@ import (
 	"github.com/BlackVectorOps/semantic_firewall/v7/pkg/models"
 	version "github.com/BlackVectorOps/semantic_firewall/v7/pkg/version"
 )
-
-// Package main provides the sfw CLI tool for semantic fingerprinting and malware scanning of Go source files.
 
 // -- Main Entry Point --
 
