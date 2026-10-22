@@ -3,6 +3,7 @@ package topology
 import (
 	"go/constant"
 	"math"
+	"strings"
 
 	"golang.org/x/tools/go/ssa"
 )
@@ -419,11 +420,11 @@ func structuralConstOperands(instr ssa.Instruction) map[*ssa.Value]bool {
 // are matched by name, not by a blanket "reflect." prefix (which would also
 // capture a user package named reflect).
 func isIndirectCallSig(sig string) bool {
-	return hasPrefix(sig, "dynamic:") ||
-		hasPrefix(sig, "reflect:") ||
-		hasPrefix(sig, "invoke:") ||
-		hasPrefix(sig, "go:dynamic:") ||
-		hasPrefix(sig, "defer:dynamic:") ||
+	return strings.HasPrefix(sig, "dynamic:") ||
+		strings.HasPrefix(sig, "reflect:") ||
+		strings.HasPrefix(sig, "invoke:") ||
+		strings.HasPrefix(sig, "go:dynamic:") ||
+		strings.HasPrefix(sig, "defer:dynamic:") ||
 		isReflectInvokeSig(sig)
 }
 
@@ -564,7 +565,7 @@ func cycles(fn *ssa.Function) []map[*ssa.BasicBlock]bool {
 	return comps
 }
 
-// --- small numeric helpers (kept local to avoid touching topology.go) ---
+// -- Small numeric helpers --
 
 func normCut(v, lo, hi float64) float64 {
 	if hi <= lo {
@@ -595,8 +596,4 @@ func totalStringLen(ss []string) int {
 		n += len(s)
 	}
 	return n
-}
-
-func hasPrefix(s, prefix string) bool {
-	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
