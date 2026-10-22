@@ -349,11 +349,10 @@ runs:
         EXPECTED_SHA="cce974fa832c50d26c6ccc08ce50b4972921cd0818ebe8007587211d360cbc828ceea4ec8296703200afa208b679437d24f27a6dca31887b3c0fc6ee8be5eb05"
         
         wget -q -O runsc "${URL}/runsc"
-        wget -q -O containerd-shim-runsc-v1 "${URL}/containerd-shim-runsc-v1"
         echo "${EXPECTED_SHA} runsc" | sha512sum -c -
         
-        chmod a+rx runsc containerd-shim-runsc-v1
-        sudo mv runsc containerd-shim-runsc-v1 /usr/local/bin/
+        chmod a+rx runsc
+        sudo mv runsc /usr/local/bin/
         
         if [[ -d "/sys/kernel/security/apparmor" ]] && command -v apparmor_parser &> /dev/null; then
            cat <<EOF | sudo tee /etc/apparmor.d/usr.local.bin.runsc
