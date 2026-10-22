@@ -253,10 +253,7 @@ func TestProcessFilesParallel_PanicSurfacedAsError(t *testing.T) {
 		panicOn: "/app/boom.go",
 	}
 
-	results, hasErrors, err := ProcessFilesParallel(mockFS, []string{"/app/boom.go"}, true, nil)
-	if err != nil {
-		t.Fatalf("ProcessFilesParallel returned err: %v", err)
-	}
+	results, hasErrors := ProcessFilesParallel(mockFS, []string{"/app/boom.go"}, true, nil)
 	if !hasErrors {
 		t.Fatal("expected hasErrors=true after a recovered panic; got false")
 	}
@@ -282,7 +279,7 @@ func TestFileSizeGuard(t *testing.T) {
 		},
 	}
 
-	outputs, hasErrors, _ := ProcessFilesParallel(mockFS, []string{"/app/huge.go"}, false, nil)
+	outputs, hasErrors := ProcessFilesParallel(mockFS, []string{"/app/huge.go"}, false, nil)
 	expected := fmt.Sprintf("file /app/huge.go exceeds maximum analysis size of %d bytes", models.MaxSourceFileSize)
 	if !hasErrors || outputs[0].ErrorMessage != expected {
 		t.Errorf("ErrorMessage = %q (hasErrors %v); want %q", outputs[0].ErrorMessage, hasErrors, expected)

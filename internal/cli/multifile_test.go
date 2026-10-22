@@ -65,9 +65,9 @@ func TestMultiFilePackage_EachFunctionOnce(t *testing.T) {
 		t.Run(fmt.Sprintf("module=%v", module), func(t *testing.T) {
 			files := writeMultiFilePackage(t, 3, module)
 
-			outputs, hasErrors, err := ProcessFilesParallel(RealFileSystem{}, files, false, nil)
-			if err != nil || hasErrors {
-				t.Fatalf("ProcessFilesParallel: %v, hasErrors %v: %+v", err, hasErrors, outputs)
+			outputs, hasErrors := ProcessFilesParallel(RealFileSystem{}, files, false, nil)
+			if hasErrors {
+				t.Fatalf("ProcessFilesParallel: hasErrors: %+v", outputs)
 			}
 			for i, out := range outputs {
 				var own int
@@ -128,7 +128,7 @@ func TestMultiFilePackage_EachFunctionOnce(t *testing.T) {
 			}
 
 			counter := &recordingScanner{}
-			if _, hasErrors, _ := ProcessFilesParallel(RealFileSystem{}, files, false, counter); hasErrors {
+			if _, hasErrors := ProcessFilesParallel(RealFileSystem{}, files, false, counter); hasErrors {
 				t.Fatal("check --scan: hasErrors")
 			}
 			for name, n := range counter.scans {
@@ -183,7 +183,7 @@ func (p *panickingScanner) ScanTopology(topo *topology.FunctionTopology, name st
 func TestProcessFilesParallel_ScanPanicSurfacedAsError(t *testing.T) {
 	files := writeMultiFilePackage(t, 2, true)
 	scanner := &panickingScanner{}
-	outputs, hasErrors, _ := ProcessFilesParallel(RealFileSystem{}, files, false, scanner)
+	outputs, hasErrors := ProcessFilesParallel(RealFileSystem{}, files, false, scanner)
 	if !hasErrors || len(outputs) != 2 || outputs[0].File != files[0] {
 		t.Fatalf("outputs %+v, hasErrors %v; want a failed output for %s", outputs, hasErrors, files[0])
 	}
@@ -296,7 +296,7 @@ func testDecoyInitializer(t *testing.T, pad int) {
 		t.Errorf("scan with the decoy listed first: %+v; want the payload initializer at confidence 1", alerts)
 	}
 
-	outputs, _, _ := ProcessFilesParallel(RealFileSystem{}, files, false, js)
+	outputs, _ := ProcessFilesParallel(RealFileSystem{}, files, false, js)
 	var checkAlerts []detection.ScanResult
 	for _, out := range outputs {
 		checkAlerts = append(checkAlerts, out.ScanResults...)
@@ -365,7 +365,7 @@ func TestMultiFilePackage_PlatformTypesKeepBothInitializers(t *testing.T) {
 	if !windowsAlert(alerts) {
 		t.Errorf("scan of the package: %+v; want the windows initializer at confidence 1", alerts)
 	}
-	outputs, _, _ := ProcessFilesParallel(RealFileSystem{}, paths, false, js)
+	outputs, _ := ProcessFilesParallel(RealFileSystem{}, paths, false, js)
 	var checkAlerts []detection.ScanResult
 	for _, out := range outputs {
 		checkAlerts = append(checkAlerts, out.ScanResults...)
@@ -404,7 +404,7 @@ func TestMultiFilePackage_InitializerTopologyPanic(t *testing.T) {
 	}
 
 	scanner = &recordingScanner{}
-	outputs, hasErrors, _ := ProcessFilesParallel(RealFileSystem{}, files, false, scanner)
+	outputs, hasErrors := ProcessFilesParallel(RealFileSystem{}, files, false, scanner)
 	if !hasErrors || outputs[0].ErrorMessage != "panic during analysis: synthetic topology panic" {
 		t.Errorf("check --scan: hasErrors %v, %s: %q; want the initializer's panic reported", hasErrors, files[0], outputs[0].ErrorMessage)
 	}
