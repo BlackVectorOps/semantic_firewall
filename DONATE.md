@@ -5,7 +5,7 @@
 
 ## Where
 
-- **GitHub Sponsors**, monthly or one-time: [xkilldash9x](https://github.com/sponsors/xkilldash9x) or [BlackVectorOps](https://github.com/sponsors/BlackVectorOps). Either one reaches me.
+- **GitHub Sponsors**, monthly or one-time: [svczero](https://github.com/sponsors/svczero) or [BlackVectorOps](https://github.com/sponsors/BlackVectorOps). Either one reaches me.
 - **Buy Me a Coffee**, one-off: [buymeacoffee.com/blackvectorops](https://buymeacoffee.com/blackvectorops)
 - **Cash App**: [cash.app/$kylemcallister2123](https://cash.app/$kylemcallister2123)
 
