@@ -37,6 +37,7 @@ The analysis never executes the code under test.
 - [GitHub Action](#github-action)
 - [Library usage](#library-usage)
 - [Development](#development)
+- [Donate](#donate)
 
 ## Install
 
@@ -1380,6 +1381,10 @@ go run ./tools/mutate -base origin/main -list            # mutants per file
 ```
 
 `-goflags` passes extra `go test` flags to every mutant run (`-goflags "-race -shuffle=on"`; `-race` turns cgo on for the test binary). `-run` limits the tests run per mutant, `-tests` names the packages whose tests judge it (default: the mutated file's package), `-files` limits the files mutated, and `-retest <output>` reruns only the survivors of an earlier run. A surviving mutant is a missing test, or code no test can observe (a cache, a check that cannot fail); each needs one answer or the other.
+
+## Donate
+
+`sfw` is free, and one person keeps it going. If it's useful to you, [DONATE.md](DONATE.md) has the ways to chip in.
 
 ## License
 
